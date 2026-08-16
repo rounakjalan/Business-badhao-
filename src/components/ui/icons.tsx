@@ -88,6 +88,59 @@ export function SettingsIcon(props: IconProps) {
   );
 }
 
+export function ProspectsIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="9" r="3" />
+      <path d="M5.5 20a6.5 6.5 0 0 1 13 0" />
+      <path d="M12 2v1.5M12 16.5V18M4.5 9H3M21 9h-1.5M6.2 4.2l1 1M17.8 4.2l-1 1" />
+    </svg>
+  );
+}
+
+export function TasksIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+      <path d="m8 12 2.5 2.5L16 9" />
+    </svg>
+  );
+}
+
+export function SearchIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
+export function BellIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}
+
+export function SparklesIcon(props: IconProps) {
+  return (
+    <svg {...base} fill="currentColor" stroke="none" {...props}>
+      <path d="M12 2.5c.3 3 1.2 4.9 2.8 6.5s3.5 2.5 6.5 2.8c.3 0 .3.4 0 .4-3 .3-4.9 1.2-6.5 2.8s-2.5 3.5-2.8 6.5c0 .3-.4.3-.4 0-.3-3-1.2-4.9-2.8-6.5S6.3 12.8 3.3 12.5c-.3 0-.3-.4 0-.4 3-.3 4.9-1.2 6.5-2.8S12.3 5.8 12.6 2.5c0-.3.4-.3.4 0Z" />
+    </svg>
+  );
+}
+
+export function CheckIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
 export function MenuIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

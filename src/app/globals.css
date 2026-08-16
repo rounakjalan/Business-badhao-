@@ -3,8 +3,43 @@
 @theme inline {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* Dashboard-only design system (see DashboardShell). The public
+     marketing/auth pages keep the Geist typeface and light theme above. */
+  --font-outfit: var(--font-outfit);
+  --font-display: var(--font-fraunces);
+  --font-jetbrains: var(--font-jetbrains-mono);
+
+  --color-bb-navy: #060c1a;
+  --color-bb-navy-2: #0d1628;
+  --color-bb-navy-3: #111d35;
+  --color-bb-navy-4: #172244;
+  --color-bb-border: #1f3060;
+  --color-bb-border-2: #2a3f7a;
+  --color-bb-text: #e4ebf7;
+  --color-bb-text-2: #a0b3d6;
+  --color-bb-text-3: #6a82a8;
+  --color-bb-indigo: #5b6ef5;
+  --color-bb-indigo-2: #7c8cf8;
+  --color-bb-indigo-3: #3d4fd4;
+  --color-bb-violet: #8b5cf6;
+  --color-bb-emerald: #10b981;
+  --color-bb-amber: #f59e0b;
+  --color-bb-rose: #f43f5e;
+  --color-bb-sky: #0ea5e9;
 }
 
 body {
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
 }
+
+@keyframes bb-pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+@keyframes bb-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.bb-animate-fade-in { animation: bb-fade-in 0.3s ease both; }
+.bb-animate-pulse-dot { animation: bb-pulse-dot 2s infinite; }

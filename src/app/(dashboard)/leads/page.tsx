@@ -1,10 +1,4 @@
-import { PageHeader } from "@/components/layout/page-header";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { LeadsIcon } from "@/components/ui/icons";
-import { SimpleTable } from "@/components/ui/simple-table";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { formatDate, shortId } from "@/lib/format";
+import { LeadsListClient } from "@/app/(dashboard)/leads/leads-list-client";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -13,48 +7,39 @@ export default async function LeadsPage() {
   if (!currentOrg) return null;
 
   const supabase = await createClient();
-  const { data, error } = await supabase
+  const { data: leads, error } = await supabase
     .from("leads")
-    .select("id, status, qualification_status, current_score, created_at")
+    .select("id, status, qualification_status, current_score, intent, next_action, campaign_id, created_at")
     .eq("organization_id", currentOrg.organizationId)
     .order("created_at", { ascending: false });
 
-  if (error) {
-    throw new Error(error.message);
-  }
+  if (error) throw new Error(error.message);
 
-  const leads = data ?? [];
+  const leadIds = (leads ?? []).map((l) => l.id);
+  const campaignIds = [...new Set((leads ?? []).map((l) => l.campaign_id).filter((id): id is string => Boolean(id)))];
 
-  return (
-    <div className="flex flex-1 flex-col gap-6">
-      <PageHeader
-        title="Leads"
-        description="Prospects discovered or imported into your workspace."
-        action={
-          <Button disabled title="Coming soon">
-            Add lead
-          </Button>
-        }
-      />
-      {leads.length === 0 ? (
-        <EmptyState
-          icon={LeadsIcon}
-          title="No leads yet"
-          description="Leads you add or discover will show up here with their contact details and status."
-        />
-      ) : (
-        <SimpleTable
-          columns={[
-            { header: "Lead", cell: (l) => <span className="font-mono text-xs text-slate-500">{shortId(l.id)}</span> },
-            { header: "Status", cell: (l) => <StatusBadge status={l.status} /> },
-            { header: "Qualification", cell: (l) => <StatusBadge status={l.qualification_status} /> },
-            { header: "Score", cell: (l) => l.current_score ?? "—" },
-            { header: "Created", cell: (l) => formatDate(l.created_at) },
-          ]}
-          rows={leads}
-          getRowKey={(l) => l.id}
-        />
-      )}
-    </div>
-  );
+  const [contacts, campaigns] = await Promise.all([
+    leadIds.length
+      ? supabase.from("contacts").select("lead_id, full_name, email").in("lead_id", leadIds).eq("is_primary", true)
+      : Promise.resolve({ data: [] }),
+    campaignIds.length ? supabase.from("campaigns").select("id, name").in("id", campaignIds) : Promise.resolve({ data: [] }),
+  ]);
+
+  const contactByLead = new Map((contacts.data ?? []).map((c) => [c.lead_id, c]));
+  const campaignNameById = new Map((campaigns.data ?? []).map((c) => [c.id, c.name]));
+
+  const rows = (leads ?? []).map((l) => ({
+    id: l.id,
+    name: contactByLead.get(l.id)?.full_name ?? "Unnamed lead",
+    email: contactByLead.get(l.id)?.email ?? null,
+    status: l.status,
+    qualificationStatus: l.qualification_status,
+    score: l.current_score,
+    intent: l.intent,
+    nextAction: l.next_action,
+    campaignName: l.campaign_id ? (campaignNameById.get(l.campaign_id) ?? null) : null,
+    createdAt: l.created_at,
+  }));
+
+  return <LeadsListClient leads={rows} />;
 }
