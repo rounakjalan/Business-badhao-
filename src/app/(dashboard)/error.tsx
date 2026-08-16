@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { Button } from "@/components/ui/button";
+import { DashButton } from "@/components/dashboard-ui/button";
 
 export default function DashboardError({
   error,
@@ -15,15 +15,15 @@ export default function DashboardError({
   }, [error]);
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-red-200 bg-red-50 px-6 py-16 text-center">
-      <h3 className="text-sm font-semibold text-red-800">Something went wrong</h3>
-      <p className="mt-1.5 max-w-sm text-sm text-red-700">
+    <div className="m-6 flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-bb-rose/30 bg-bb-rose/5 px-6 py-16 text-center">
+      <h3 className="text-sm font-semibold text-bb-rose">Something went wrong</h3>
+      <p className="mt-1.5 max-w-sm text-sm text-bb-text-2">
         We couldn&apos;t load this page. This is usually temporary — try again in a moment.
       </p>
       <div className="mt-6">
-        <Button variant="secondary" onClick={reset}>
+        <DashButton variant="outline" onClick={reset}>
           Try again
-        </Button>
+        </DashButton>
       </div>
     </div>
   );

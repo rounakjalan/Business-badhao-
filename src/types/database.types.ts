@@ -169,6 +169,7 @@ export interface Database {
           name: string;
           description: string | null;
           objective: string | null;
+          target_audience: string | null;
           status: "draft" | "planning" | "active" | "paused" | "completed" | "archived";
           created_by: string | null;
           created_at: string;
@@ -182,6 +183,7 @@ export interface Database {
           name: string;
           description?: string | null;
           objective?: string | null;
+          target_audience?: string | null;
           status?: "draft" | "planning" | "active" | "paused" | "completed" | "archived";
           created_by?: string | null;
           created_at?: string;
@@ -195,6 +197,7 @@ export interface Database {
           name?: string;
           description?: string | null;
           objective?: string | null;
+          target_audience?: string | null;
           status?: "draft" | "planning" | "active" | "paused" | "completed" | "archived";
           created_by?: string | null;
           created_at?: string;
@@ -287,6 +290,8 @@ export interface Database {
           status: "new" | "contacted" | "qualified" | "unqualified" | "converted" | "lost";
           qualification_status: "pending" | "qualifying" | "qualified" | "disqualified";
           current_score: number | null;
+          intent: string | null;
+          next_action: string | null;
           notes: string | null;
           created_at: string;
           updated_at: string;
@@ -300,6 +305,8 @@ export interface Database {
           status?: "new" | "contacted" | "qualified" | "unqualified" | "converted" | "lost";
           qualification_status?: "pending" | "qualifying" | "qualified" | "disqualified";
           current_score?: number | null;
+          intent?: string | null;
+          next_action?: string | null;
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -313,6 +320,8 @@ export interface Database {
           status?: "new" | "contacted" | "qualified" | "unqualified" | "converted" | "lost";
           qualification_status?: "pending" | "qualifying" | "qualified" | "disqualified";
           current_score?: number | null;
+          intent?: string | null;
+          next_action?: string | null;
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -569,9 +578,10 @@ export interface Database {
           lead_id: string | null;
           campaign_id: string | null;
           title: string;
-          status: "open" | "won" | "lost";
+          status: "open" | "negotiation" | "won" | "lost";
           value: number;
           currency: string;
+          probability: number | null;
           expected_close_date: string | null;
           won_at: string | null;
           lost_at: string | null;
@@ -585,9 +595,10 @@ export interface Database {
           lead_id?: string | null;
           campaign_id?: string | null;
           title: string;
-          status?: "open" | "won" | "lost";
+          status?: "open" | "negotiation" | "won" | "lost";
           value?: number;
           currency?: string;
+          probability?: number | null;
           expected_close_date?: string | null;
           won_at?: string | null;
           lost_at?: string | null;
@@ -601,9 +612,10 @@ export interface Database {
           lead_id?: string | null;
           campaign_id?: string | null;
           title?: string;
-          status?: "open" | "won" | "lost";
+          status?: "open" | "negotiation" | "won" | "lost";
           value?: number;
           currency?: string;
+          probability?: number | null;
           expected_close_date?: string | null;
           won_at?: string | null;
           lost_at?: string | null;

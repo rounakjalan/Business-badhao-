@@ -2,42 +2,30 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { signOut } from "@/app/auth/actions";
 import { NAV_ITEMS } from "@/lib/navigation";
 import { LogoMark } from "@/components/ui/icons";
 
 type SidebarProps = {
-  organizationName: string;
-  userEmail: string;
+  collapsed: boolean;
+  onToggleCollapsed?: () => void;
   onNavigate?: () => void;
 };
 
-function initialsFor(name: string) {
-  const trimmed = name.trim();
-  if (!trimmed) return "?";
-  return trimmed
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-}
-
-export function Sidebar({ organizationName, userEmail, onNavigate }: SidebarProps) {
+export function Sidebar({ collapsed, onToggleCollapsed, onNavigate }: SidebarProps) {
   const pathname = usePathname();
 
   return (
-    <div className="flex h-full flex-col bg-slate-900 text-slate-300">
-      <div className="flex h-16 shrink-0 items-center gap-2 px-5">
-        <LogoMark className="h-7 w-7" />
-        <span className="text-sm font-semibold tracking-wide text-white">
-          Business Badhao
-        </span>
+    <div className="flex h-full flex-col bg-bb-navy-2 font-outfit">
+      <div className="flex h-[60px] shrink-0 items-center gap-3 border-b border-bb-border px-4">
+        <LogoMark className="h-8 w-8 shrink-0" />
+        {!collapsed ? (
+          <span className="font-display truncate text-base font-semibold text-bb-text">Business Badhao</span>
+        ) : null}
       </div>
 
-      <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
+      <nav className="flex-1 space-y-0.5 overflow-y-auto py-4">
         {NAV_ITEMS.map((item) => {
-          const isActive =
-            pathname === item.href || pathname?.startsWith(`${item.href}/`);
+          const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`);
           const Icon = item.icon;
 
           return (
@@ -46,42 +34,30 @@ export function Sidebar({ organizationName, userEmail, onNavigate }: SidebarProp
               href={item.href}
               onClick={onNavigate}
               aria-current={isActive ? "page" : undefined}
-              className={`group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+              title={collapsed ? item.label : undefined}
+              className={`mx-2 mb-0.5 flex items-center gap-3 rounded-lg border-l-2 px-3 py-2.5 text-sm font-medium transition-all ${
                 isActive
-                  ? "bg-slate-800 text-white"
-                  : "text-slate-400 hover:bg-slate-800/60 hover:text-white"
+                  ? "border-bb-indigo bg-gradient-to-r from-bb-indigo/25 to-bb-indigo/8 text-bb-indigo-2"
+                  : "border-transparent text-bb-text-3 hover:bg-white/5"
               }`}
             >
-              <Icon
-                className={`h-5 w-5 shrink-0 ${
-                  isActive ? "text-white" : "text-slate-500 group-hover:text-white"
-                }`}
-              />
-              {item.label}
+              <Icon className="h-[18px] w-5 shrink-0" />
+              {!collapsed ? <span className="truncate">{item.label}</span> : null}
             </Link>
           );
         })}
       </nav>
 
-      <div className="border-t border-slate-800 px-3 py-4">
-        <div className="flex items-center gap-3 rounded-lg px-3 py-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-semibold text-white">
-            {initialsFor(organizationName)}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-white">{organizationName}</p>
-            <p className="truncate text-xs text-slate-500">{userEmail}</p>
-          </div>
-          <form action={signOut}>
-            <button
-              type="submit"
-              className="rounded-md px-2 py-1 text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-white"
-            >
-              Sign out
-            </button>
-          </form>
-        </div>
-      </div>
+      {onToggleCollapsed ? (
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="mx-auto mb-4 flex h-8 w-8 items-center justify-center rounded-lg text-bb-text-3 transition-colors hover:bg-white/5"
+        >
+          {collapsed ? "→" : "←"}
+        </button>
+      ) : null}
     </div>
   );
 }
