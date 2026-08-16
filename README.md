@@ -10,10 +10,17 @@ This repository contains:
   (sign up / sign in / sign out / protected routes), the multi-tenant
   organization model, the full database schema with Row Level Security, and
   a dashboard wired to real (empty-by-default) data.
+- **Dashboard redesign**: a full dark-theme UI (design system ported from a
+  Figma Make prototype) covering every dashboard page — including two new
+  sections, Prospects and Tasks — all wired to real Supabase data. See
+  [Dashboard UI](#dashboard-ui) below for what's real vs. previewed.
 
 It does **not** yet include AI agents, lead discovery/scraping, outreach
 providers (email/SMS/WhatsApp), payments, or analytics logic — those are
-later phases.
+later phases. Where the redesign's source material showed AI features
+(campaign planning, reply generation, deal analysis), this app shows an
+honest interactive **preview** of the UI/UX with a clear label — it never
+calls a real AI provider or writes fabricated AI output into the database.
 
 ## Tech stack
 
@@ -144,6 +151,7 @@ All tables live in `supabase/migrations/`, applied in order:
 | `..._deals.sql` | `deals`, `deal_events`, `loss_analysis`, `recovery_attempts` |
 | `..._agents_ops_audit.sql` | `agent_runs`, `agent_actions`, `tasks`, `model_usage`, `audit_logs` |
 | `..._create_organization_rpc.sql` | `create_organization_with_owner()`, an atomic RPC used by onboarding |
+| `..._dashboard_design_fields.sql` | `deals.probability`, a `negotiation` deal status, `leads.intent`/`next_action`, `campaigns.target_audience` |
 
 Every business-owned table has `organization_id`, UUID primary keys,
 `created_at`/`updated_at`, foreign keys to its related entities, and
@@ -260,17 +268,52 @@ applied to a linked remote project. It seeds one confirmed dev user
 a small amount of sample campaign/lead/conversation/deal data so the
 dashboard has something real to render locally.
 
-## Dashboard data layer
+## Dashboard UI
 
-`/dashboard` shows live counts from Supabase (total leads, qualified
-leads, active conversations, open deals, won deals, open pipeline value),
-computed in `src/lib/dashboard.ts`. `/campaigns`, `/leads`,
-`/conversations`, and `/deals` render real rows from their respective
-tables (or `/settings` for organization/profile updates) — no data is
-fabricated. Every one of these falls back to the same `EmptyState`
-component from Phase 1 when the organization has no data yet.
-`/analytics` and `/knowledge` remain the Phase 1 static placeholders, since
-neither analytics logic nor the knowledge base is in scope yet.
+The dashboard shell (`src/components/layout/dashboard-shell.tsx`,
+`sidebar.tsx`) and every page under `src/app/(dashboard)/` use a dark
+navy/indigo design system (`src/app/globals.css`'s `bb-*` tokens; Fraunces
+for headings, Outfit for body text, JetBrains Mono for numbers), matching
+a Figma Make prototype the product design was built from. Shared pieces
+live in `src/components/dashboard-ui/` (`Badge`, `DarkCard`,
+`DarkEmptyState`, `DataTable`, `DashButton`, `DarkAlert`).
+
+**What's real, wired to Supabase:**
+
+- `/dashboard` — live counts and a real acquisition funnel
+  (`src/lib/dashboard.ts`), recent leads, open tasks, open deals
+- `/campaigns`, `/campaigns/[id]`, `/campaigns/create` — real list, detail
+  (with real linked conversations/deals), and a working create form
+- `/leads`, `/leads/[id]` — real list and detail, including real research,
+  conversations, tasks, deals, and an editable notes field
+- `/prospects` — **new route**, backed by the `prospects` table
+- `/conversations`, `/conversations/[id]` — real list and detail; replies
+  are recorded as real `messages` rows, but nothing is sent externally (no
+  outreach provider is connected — see the in-app notice on the compose box)
+- `/deals`, `/deals/[id]` — real pipeline/list views; "Mark Won"/"Mark
+  Lost" and the loss-reason picker write real `deals`/`deal_events`/
+  `loss_analysis` rows
+- `/tasks` — **new route**, backed by the `tasks` table, with working
+  create/complete actions
+- `/settings` — real profile and organization data, plus a real
+  organization members list
+
+**What's an honest preview, not a real feature:** anywhere the source
+design showed an AI capability that doesn't exist yet (the campaign
+AI-planner step, lead discovery, deal/loss analysis), this app shows the
+same interactive UI clearly labeled as a preview — a client-side demo with
+canned example content, never a real provider call, and nothing it
+produces is written to the database. Settings sections with no backing
+system yet (AI behavior toggles, notifications, integrations, security
+sessions, danger zone) are visually complete but inert, matching how
+Phase 1/2 already marked unbuilt features "Coming soon." `/analytics` is
+now computed from real aggregate counts; `/knowledge` remains a static
+placeholder since there's no knowledge-base table yet.
+
+Two small additive schema fields were added to support the design:
+`deals.probability` (nullable 0–100), a `negotiation` deal status,
+`leads.intent`/`leads.next_action`, and `campaigns.target_audience` — see
+`supabase/migrations/20260816130000_dashboard_design_fields.sql`.
 
 Errors while loading a dashboard route are caught by
 `src/app/(dashboard)/error.tsx` (a friendly retry state, not a stack
@@ -282,38 +325,45 @@ is fetched.
 ```
 src/
   app/
-    page.tsx                    Public landing page ("/")
-    login/, signup/              Auth pages (Server Action forms)
-    auth/actions.ts              signIn / signUp / signOut Server Actions
-    auth/callback/route.ts       Email confirmation / OAuth code exchange
-    onboarding/                  "Create your organization" (first login)
-    (dashboard)/                 Route group sharing the dashboard shell
-      layout.tsx                 Enforces auth + organization membership
-      error.tsx, loading.tsx     Shared error/loading states
-      dashboard/                  "/dashboard" — live stats
-      campaigns/, leads/,
-      conversations/, deals/      Real Supabase-backed lists + empty states
-      analytics/, knowledge/      Still Phase 1 placeholders (out of scope)
-      settings/                   Real profile/organization info + forms
+    page.tsx                     Public landing page ("/") — light theme
+    login/, signup/               Auth pages (Server Action forms) — light theme
+    auth/actions.ts               signIn / signUp / signOut Server Actions
+    auth/callback/route.ts        Email confirmation / OAuth code exchange
+    onboarding/                   "Create your organization" (first login)
+    (dashboard)/                  Route group sharing the dark dashboard shell
+      layout.tsx                  Enforces auth + organization membership
+      error.tsx, loading.tsx      Shared error/loading states
+      dashboard/                   "/dashboard" — live stats, funnel, activity
+      campaigns/                   list, [id] detail, create — real + a real form
+      leads/                       list, [id] detail — real, editable notes
+      prospects/                   "/prospects" — new, real prospects table
+      conversations/                list, [id] detail — real messages (internal only)
+      deals/                        list/pipeline, [id] detail — real won/lost actions
+      tasks/                        "/tasks" — new, real create/complete
+      analytics/                    real aggregate funnel/campaign/source stats
+      knowledge/                    static placeholder (no backing table yet)
+      settings/                     real profile/org + sectioned settings UI
   components/
-    layout/                      Sidebar, dashboard shell, page header
-    ui/                          Button, Card, EmptyState, Alert,
-                                  SimpleTable, StatusBadge, icons
+    layout/                       Sidebar, dashboard shell, global search, page header
+    dashboard-ui/                 Badge, DarkCard, DarkEmptyState, DataTable,
+                                   DashButton, DarkAlert — the dark design system
+    ui/                           Button, Card, Alert, icons — used by the
+                                   light-theme public/auth pages only
   lib/
-    supabase/                    client.ts, server.ts, middleware.ts, env.ts
-    organizations.ts             getCurrentOrg() — the signed-in user's org
-    dashboard.ts                 Dashboard stat queries
-    format.ts                    Shared date/currency formatting
-    navigation.ts                Single source of truth for sidebar nav items
-  proxy.ts                       Session refresh + route protection
-  types/database.types.ts        Hand-authored, generation-shaped DB types
+    supabase/                     client.ts, server.ts, middleware.ts, env.ts
+    organizations.ts              getCurrentOrg() — the signed-in user's org
+    dashboard.ts                  Dashboard/analytics stat + funnel queries
+    format.ts                     Shared date/currency/relative-time formatting
+    navigation.ts                 Single source of truth for sidebar nav items
+  proxy.ts                        Session refresh + route protection
+  types/database.types.ts         Hand-authored, generation-shaped DB types
 supabase/
-  migrations/                    Schema, RLS policies, RPC (see table above)
-  seed.sql                       Local dev-only seed data
-  tests/*.test.sql                RLS/tenant-isolation test suite
+  migrations/                     Schema, RLS policies, RPC (see table above)
+  seed.sql                        Local dev-only seed data
+  tests/*.test.sql                 RLS/tenant-isolation test suite
 scripts/
-  test-rls.sh                    Runs the test suite against scratch Postgres
-  dev/pg-auth-stub.sql            Minimal local stand-in for Supabase's `auth` schema
+  test-rls.sh                     Runs the test suite against scratch Postgres
+  dev/pg-auth-stub.sql             Minimal local stand-in for Supabase's `auth` schema
 ```
 
 ## Scripts

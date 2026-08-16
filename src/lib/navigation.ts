@@ -8,7 +8,9 @@ import {
   type IconProps,
   KnowledgeIcon,
   LeadsIcon,
+  ProspectsIcon,
   SettingsIcon,
+  TasksIcon,
 } from "@/components/ui/icons";
 
 export type NavItem = {
@@ -21,10 +23,12 @@ export type NavItem = {
 export const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", description: "Overview of your account", icon: DashboardIcon },
   { label: "Campaigns", href: "/campaigns", description: "Outreach campaigns", icon: CampaignsIcon },
-  { label: "Leads", href: "/leads", description: "Prospects and contacts", icon: LeadsIcon },
+  { label: "Leads", href: "/leads", description: "Qualified prospects ready for outreach", icon: LeadsIcon },
+  { label: "Prospects", href: "/prospects", description: "Discovered contacts being researched", icon: ProspectsIcon },
   { label: "Conversations", href: "/conversations", description: "Messages with leads", icon: ConversationsIcon },
   { label: "Deals", href: "/deals", description: "Pipeline and deal tracking", icon: DealsIcon },
   { label: "Analytics", href: "/analytics", description: "Performance insights", icon: AnalyticsIcon },
   { label: "Knowledge", href: "/knowledge", description: "Knowledge base", icon: KnowledgeIcon },
+  { label: "Tasks", href: "/tasks", description: "To-dos and follow-ups", icon: TasksIcon },
   { label: "Settings", href: "/settings", description: "Account and workspace settings", icon: SettingsIcon },
 ];

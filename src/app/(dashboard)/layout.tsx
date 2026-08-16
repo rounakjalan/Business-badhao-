@@ -25,8 +25,14 @@ export default async function DashboardGroupLayout({
     redirect("/onboarding");
   }
 
+  const { data: profile } = await supabase.from("profiles").select("full_name").eq("id", user.id).maybeSingle();
+
   return (
-    <DashboardShell organizationName={currentOrg.organizationName} userEmail={user.email ?? ""}>
+    <DashboardShell
+      organizationName={currentOrg.organizationName}
+      userEmail={user.email ?? ""}
+      userFullName={profile?.full_name ?? ""}
+    >
       {children}
     </DashboardShell>
   );

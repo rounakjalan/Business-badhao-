@@ -1,19 +1,19 @@
-import { DealsListClient } from "@/app/(dashboard)/deals/deals-list-client";
+import { TasksClient } from "@/app/(dashboard)/tasks/tasks-client";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
-export default async function DealsPage() {
+export default async function TasksPage() {
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return null;
 
   const supabase = await createClient();
   const { data, error } = await supabase
-    .from("deals")
-    .select("id, title, status, value, currency, probability, expected_close_date, created_at")
+    .from("tasks")
+    .select("id, title, status, due_at, created_at")
     .eq("organization_id", currentOrg.organizationId)
     .order("created_at", { ascending: false });
 
   if (error) throw new Error(error.message);
 
-  return <DealsListClient deals={data ?? []} />;
+  return <TasksClient tasks={data ?? []} />;
 }

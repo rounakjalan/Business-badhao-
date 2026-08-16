@@ -7,10 +7,12 @@ const PROTECTED_PREFIXES = [
   "/dashboard",
   "/campaigns",
   "/leads",
+  "/prospects",
   "/conversations",
   "/deals",
   "/analytics",
   "/knowledge",
+  "/tasks",
   "/settings",
   "/onboarding",
 ];
