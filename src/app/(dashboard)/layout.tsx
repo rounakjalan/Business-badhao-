@@ -1,10 +1,33 @@
 import type { ReactNode } from "react";
+import { redirect } from "next/navigation";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
+import { getCurrentOrg } from "@/lib/organizations";
+import { createClient } from "@/lib/supabase/server";
 
-export default function DashboardGroupLayout({
+export default async function DashboardGroupLayout({
   children,
 }: {
   children: ReactNode;
 }) {
-  return <DashboardShell>{children}</DashboardShell>;
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  // The middleware already redirects unauthenticated requests away from
+  // these routes; this is a defense-in-depth check for the layout itself.
+  if (!user) {
+    redirect("/login");
+  }
+
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) {
+    redirect("/onboarding");
+  }
+
+  return (
+    <DashboardShell organizationName={currentOrg.organizationName} userEmail={user.email ?? ""}>
+      {children}
+    </DashboardShell>
+  );
 }

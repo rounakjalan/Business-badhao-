@@ -2,20 +2,33 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { signOut } from "@/app/auth/actions";
 import { NAV_ITEMS } from "@/lib/navigation";
 import { LogoMark } from "@/components/ui/icons";
 
 type SidebarProps = {
+  organizationName: string;
+  userEmail: string;
   onNavigate?: () => void;
 };
 
-export function Sidebar({ onNavigate }: SidebarProps) {
+function initialsFor(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return "?";
+  return trimmed
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+}
+
+export function Sidebar({ organizationName, userEmail, onNavigate }: SidebarProps) {
   const pathname = usePathname();
 
   return (
     <div className="flex h-full flex-col bg-slate-900 text-slate-300">
       <div className="flex h-16 shrink-0 items-center gap-2 px-5">
-        <LogoMark className="h-7 w-7 text-white" />
+        <LogoMark className="h-7 w-7" />
         <span className="text-sm font-semibold tracking-wide text-white">
           Business Badhao
         </span>
@@ -53,12 +66,20 @@ export function Sidebar({ onNavigate }: SidebarProps) {
       <div className="border-t border-slate-800 px-3 py-4">
         <div className="flex items-center gap-3 rounded-lg px-3 py-2">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-semibold text-white">
-            YB
+            {initialsFor(organizationName)}
           </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-white">Your Business</p>
-            <p className="truncate text-xs text-slate-500">Free plan</p>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-white">{organizationName}</p>
+            <p className="truncate text-xs text-slate-500">{userEmail}</p>
           </div>
+          <form action={signOut}>
+            <button
+              type="submit"
+              className="rounded-md px-2 py-1 text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-white"
+            >
+              Sign out
+            </button>
+          </form>
         </div>
       </div>
     </div>

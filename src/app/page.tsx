@@ -35,7 +35,7 @@ export default function Home() {
       <header className="border-b border-slate-200">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
           <Link href="/" className="flex items-center gap-2">
-            <LogoMark className="h-7 w-7 text-slate-900" />
+            <LogoMark className="h-7 w-7" />
             <span className="text-sm font-semibold text-slate-900">
               Business Badhao
             </span>
@@ -47,7 +47,7 @@ export default function Home() {
             >
               Log in
             </Link>
-            <Link href="/dashboard">
+            <Link href="/signup">
               <Button>Get started</Button>
             </Link>
           </div>
@@ -65,7 +65,7 @@ export default function Home() {
               run outreach, and close deals, all from a single workspace.
             </p>
             <div className="mt-10 flex items-center justify-center gap-4">
-              <Link href="/dashboard">
+              <Link href="/signup">
                 <Button className="px-6 py-3 text-base">Get started</Button>
               </Link>
               <Link href="/login">

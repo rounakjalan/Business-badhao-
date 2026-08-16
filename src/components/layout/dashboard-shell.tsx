@@ -5,16 +5,18 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { CloseIcon, MenuIcon } from "@/components/ui/icons";
 
 type DashboardShellProps = {
+  organizationName: string;
+  userEmail: string;
   children: ReactNode;
 };
 
-export function DashboardShell({ children }: DashboardShellProps) {
+export function DashboardShell({ organizationName, userEmail, children }: DashboardShellProps) {
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   return (
     <div className="flex h-dvh overflow-hidden bg-slate-50">
       <aside className="hidden w-64 shrink-0 md:flex">
-        <Sidebar />
+        <Sidebar organizationName={organizationName} userEmail={userEmail} />
       </aside>
 
       {isMobileNavOpen ? (
@@ -34,7 +36,11 @@ export function DashboardShell({ children }: DashboardShellProps) {
             >
               <CloseIcon className="h-5 w-5" />
             </button>
-            <Sidebar onNavigate={() => setIsMobileNavOpen(false)} />
+            <Sidebar
+              organizationName={organizationName}
+              userEmail={userEmail}
+              onNavigate={() => setIsMobileNavOpen(false)}
+            />
           </div>
         </div>
       ) : null}
