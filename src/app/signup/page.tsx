@@ -1,15 +1,15 @@
 import Link from "next/link";
-import { signIn } from "@/app/auth/actions";
+import { signUp } from "@/app/auth/actions";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { LogoMark } from "@/components/ui/icons";
 
-export default async function LoginPage({
+export default async function SignupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; redirectTo?: string }>;
+  searchParams: Promise<{ error?: string; message?: string }>;
 }) {
-  const { error, redirectTo } = await searchParams;
+  const { error, message } = await searchParams;
 
   return (
     <div className="flex min-h-full flex-1 flex-col items-center justify-center bg-slate-50 px-4 py-16">
@@ -19,10 +19,10 @@ export default async function LoginPage({
             <LogoMark className="h-8 w-8" />
           </Link>
           <h1 className="mt-2 text-xl font-semibold text-slate-900">
-            Log in to Business Badhao
+            Create your Business Badhao account
           </h1>
           <p className="text-sm text-slate-500">
-            Enter your details to access your workspace.
+            Start acquiring customers with your own workspace.
           </p>
         </div>
 
@@ -32,9 +32,29 @@ export default async function LoginPage({
               <Alert variant="error">{error}</Alert>
             </div>
           ) : null}
+          {message === "check-email" ? (
+            <div className="mb-4">
+              <Alert variant="success">
+                Almost there — we sent you a confirmation link. Check your inbox to finish creating your account.
+              </Alert>
+            </div>
+          ) : null}
 
-          <form action={signIn} className="flex flex-col gap-4">
-            <input type="hidden" name="redirectTo" value={redirectTo ?? "/dashboard"} />
+          <form action={signUp} className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="fullName" className="text-sm font-medium text-slate-700">
+                Full name
+              </label>
+              <input
+                id="fullName"
+                name="fullName"
+                type="text"
+                autoComplete="name"
+                required
+                placeholder="Jordan Smith"
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+              />
+            </div>
 
             <div className="flex flex-col gap-1.5">
               <label htmlFor="email" className="text-sm font-medium text-slate-700">
@@ -59,24 +79,24 @@ export default async function LoginPage({
                 id="password"
                 name="password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 required
                 minLength={6}
-                placeholder="••••••••"
+                placeholder="At least 6 characters"
                 className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
               />
             </div>
 
             <Button type="submit" className="mt-2 w-full">
-              Log in
+              Create account
             </Button>
           </form>
         </div>
 
         <p className="mt-6 text-center text-sm text-slate-500">
-          Don&apos;t have an account?{" "}
-          <Link href="/signup" className="font-medium text-slate-700 hover:text-slate-900">
-            Sign up
+          Already have an account?{" "}
+          <Link href="/login" className="font-medium text-slate-700 hover:text-slate-900">
+            Log in
           </Link>
         </p>
       </div>
