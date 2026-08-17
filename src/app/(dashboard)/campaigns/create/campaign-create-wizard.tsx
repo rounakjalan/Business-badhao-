@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import Link from "next/link";
-import { createCampaign } from "@/app/(dashboard)/campaigns/actions";
+import { createCampaign, generateCampaignPlan } from "@/app/(dashboard)/campaigns/actions";
+import type { CampaignPlan } from "@/lib/ai/agents/campaign-planner";
 import { DarkAlert } from "@/components/dashboard-ui/alert";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { SparklesIcon } from "@/components/ui/icons";
@@ -17,15 +18,21 @@ const OBJECTIVES = [
   "Enter a new market",
 ];
 
-const PLAN_SECTIONS = [
-  { title: "Campaign Objective", val: "Clarify the outcome you want and by when." },
-  { title: "Target Customer", val: "Who specifically you're trying to reach." },
-  { title: "Key Pain Points", val: "What problems this customer is trying to solve." },
-  { title: "Buying Signals", val: "Behavior that indicates readiness to buy." },
-  { title: "Recommended Channels", val: "Where this customer can realistically be reached." },
-  { title: "Qualification Criteria", val: "What makes a lead a good fit vs. not." },
-  { title: "Success Metrics", val: "How you'll know the campaign is working." },
-];
+function planSections(plan: CampaignPlan) {
+  return [
+    { title: "Target Market", val: plan.targetMarket },
+    { title: "Customer Profile", val: plan.customerProfile },
+    { title: "Ideal Customer Characteristics", val: plan.idealCustomerCharacteristics.join(", ") },
+    { title: "Buying Signals", val: plan.buyingSignals.join(", ") },
+    { title: "Pain Points", val: plan.painPoints.join(", ") },
+    { title: "Value Proposition", val: plan.valueProposition },
+    { title: "Suggested Channels", val: plan.suggestedChannels.join(", ") },
+    { title: "Campaign Strategy", val: plan.campaignStrategy },
+    { title: "Qualification Criteria", val: plan.qualificationCriteria.join(", ") },
+    { title: "Outreach Strategy", val: plan.outreachStrategy },
+    { title: "Follow-up Strategy", val: plan.followUpStrategy },
+  ];
+}
 
 function inputClass() {
   return "w-full rounded-lg border border-bb-border bg-bb-navy px-4 py-2.5 text-sm text-bb-text outline-none placeholder:text-bb-text-3 focus:border-bb-indigo";
@@ -38,17 +45,22 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
   const [description, setDescription] = useState("");
   const [customerType, setCustomerType] = useState("");
   const [location, setLocation] = useState("");
-  const [generating, setGenerating] = useState(false);
-  const [planGenerated, setPlanGenerated] = useState(false);
+  const [generating, startGenerating] = useTransition();
+  const [plan, setPlan] = useState<CampaignPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
 
   const targetAudience = [customerType, location].filter(Boolean).join(" · ");
 
   const generatePlan = () => {
-    setGenerating(true);
-    setTimeout(() => {
-      setGenerating(false);
-      setPlanGenerated(true);
-    }, 1800);
+    setPlanError(null);
+    startGenerating(async () => {
+      const result = await generateCampaignPlan({ name, objective, description, customerType, location });
+      if (result.ok) {
+        setPlan(result.plan);
+      } else {
+        setPlanError(result.message);
+      }
+    });
   };
 
   return (
@@ -123,33 +135,40 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
         <div className="space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
           <h3 className="font-display text-lg font-semibold text-bb-text">AI Campaign Planner</h3>
           <p className="text-sm text-bb-text-3">
-            This is a preview of the AI campaign planner — coming in a future update. For now, fill in the basics and ICP
-            yourself and launch when ready.
+            Generates a real plan from Hermes based on the basics you entered. If you keep it, it&apos;s saved as this
+            campaign&apos;s Ideal Customer Profile when you launch.
           </p>
-          {!planGenerated ? (
+          {planError ? <DarkAlert variant="error">{planError}</DarkAlert> : null}
+          {!plan ? (
             <DashButton variant="gradient" onClick={generatePlan} disabled={generating}>
               {generating ? (
                 <>
                   <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                  Generating preview...
+                  Generating plan...
                 </>
               ) : (
                 <>
-                  <SparklesIcon className="h-3.5 w-3.5" /> Preview AI Plan
+                  <SparklesIcon className="h-3.5 w-3.5" /> Generate AI Plan
                 </>
               )}
             </DashButton>
           ) : (
             <div className="space-y-3">
-              {PLAN_SECTIONS.map((s) => (
+              {planSections(plan).map((s) => (
                 <div key={s.title} className="rounded-lg border border-bb-border bg-bb-navy p-4">
                   <div className="mb-1 text-xs font-medium text-bb-indigo-2">{s.title}</div>
                   <div className="text-sm text-bb-text-2">{s.val}</div>
                 </div>
               ))}
-              <p className="text-xs text-bb-text-3">
-                This is a preview only — nothing here is saved. Fill in the ICP step yourself for now.
-              </p>
+              <div className="flex gap-3">
+                <DashButton variant="ghost" onClick={generatePlan} disabled={generating}>
+                  Regenerate
+                </DashButton>
+                <DashButton variant="ghost" onClick={() => setPlan(null)}>
+                  Discard
+                </DashButton>
+              </div>
+              <p className="text-xs text-bb-text-3">This plan will be saved when you launch the campaign.</p>
             </div>
           )}
         </div>
@@ -196,6 +215,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="objective" value={objective} />
             <input type="hidden" name="description" value={description} />
             <input type="hidden" name="targetAudience" value={targetAudience} />
+            <input type="hidden" name="plan" value={plan ? JSON.stringify(plan) : ""} />
             <input type="hidden" name="launch" value="false" />
             <DashButton type="submit" variant="ghost">
               Save as Draft
@@ -206,6 +226,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="objective" value={objective} />
             <input type="hidden" name="description" value={description} />
             <input type="hidden" name="targetAudience" value={targetAudience} />
+            <input type="hidden" name="plan" value={plan ? JSON.stringify(plan) : ""} />
             <input type="hidden" name="launch" value="true" />
             <DashButton type="submit" variant="gradient" disabled={!name.trim()}>
               Launch Campaign 🚀

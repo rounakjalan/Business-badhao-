@@ -93,6 +93,7 @@ export async function callOpenAiCompatibleChat(
         max_tokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
         ...(request.tools && request.tools.length > 0 ? { tools: toOpenAiToolSchema(request.tools) } : {}),
+        ...(request.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });

@@ -33,6 +33,13 @@ export type AiCompletionRequest = {
   temperature?: number;
   timeoutMs?: number;
   tools?: AiToolDefinition[];
+  /**
+   * Request the model constrain output to a single JSON object. Support
+   * varies by provider/model — agents that need structured output must
+   * still validate the returned text against a schema (see
+   * src/lib/ai/schema.ts) rather than trusting this flag alone.
+   */
+  responseFormat?: "text" | "json";
 };
 
 export type AiUsage = {

@@ -2,10 +2,20 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { quickCreateDealForLead, quickCreateTaskForLead, updateLeadNotes } from "@/app/(dashboard)/leads/actions";
+import {
+  generateLeadOutreachAction,
+  quickCreateDealForLead,
+  quickCreateTaskForLead,
+  runLeadQualificationAction,
+  runLeadResearchAction,
+  updateLeadNotes,
+} from "@/app/(dashboard)/leads/actions";
+import type { LeadQualification } from "@/lib/ai/agents/qualification";
+import type { OutreachDraft } from "@/lib/ai/agents/outreach";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkCard } from "@/components/dashboard-ui/card";
 import { LeadStatusBadge, QualificationBadge, ScorePill, TaskStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
+import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
 
 const TABS = ["Overview", "Company", "Research", "Conversations", "Tasks", "Deals", "Notes"] as const;
@@ -54,6 +64,32 @@ export function LeadDetailTabs({
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [isPending, startTransition] = useTransition();
   const [notes, setNotes] = useState(lead.notes ?? "");
+  const [aiPending, startAiTransition] = useTransition();
+  const [researchError, setResearchError] = useState<string | null>(null);
+  const [qualification, setQualification] = useState<LeadQualification | { error: string } | null>(null);
+  const [outreachDraft, setOutreachDraft] = useState<OutreachDraft | { error: string } | null>(null);
+
+  function runResearch() {
+    setResearchError(null);
+    startAiTransition(async () => {
+      const result = await runLeadResearchAction(lead.id);
+      if (!result.ok) setResearchError(result.message);
+    });
+  }
+
+  function runQualification() {
+    startAiTransition(async () => {
+      const result = await runLeadQualificationAction(lead.id);
+      setQualification(result.ok ? result.qualification : { error: result.message });
+    });
+  }
+
+  function runOutreach(channel: string) {
+    startAiTransition(async () => {
+      const result = await generateLeadOutreachAction(lead.id, channel);
+      setOutreachDraft(result.ok ? result.draft : { error: result.message });
+    });
+  }
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col">
@@ -129,10 +165,55 @@ export function LeadDetailTabs({
                 <Row label="Campaign" val={campaignName ?? "—"} />
               </DarkCard>
               <DarkCard className="p-5">
-                <h4 className="mb-3 border-b border-bb-border pb-3 text-sm font-semibold text-bb-text">Qualification</h4>
+                <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
+                  <h4 className="text-sm font-semibold text-bb-text">Qualification</h4>
+                  <DashButton variant="outline" disabled={aiPending} onClick={runQualification}>
+                    {aiPending ? "Analyzing…" : "Run AI Qualification"}
+                  </DashButton>
+                </div>
                 <Row label="Score" val={lead.current_score !== null ? String(lead.current_score) : "Not scored yet"} />
                 <Row label="Qualification status" val={lead.qualification_status} />
                 <Row label="Next action" val={lead.next_action ?? "—"} />
+                {qualification ? (
+                  "error" in qualification ? (
+                    <p className="mt-3 text-xs text-bb-rose">{qualification.error}</p>
+                  ) : (
+                    <div className="mt-3 space-y-1.5 border-t border-bb-border pt-3 text-xs">
+                      <Row label="Fit score" val={String(qualification.fitScore)} />
+                      <Row label="Intent score" val={String(qualification.intentScore)} />
+                      {qualification.positiveReasons.length > 0 ? (
+                        <p className="text-bb-emerald">+ {qualification.positiveReasons.join("; ")}</p>
+                      ) : null}
+                      {qualification.negativeReasons.length > 0 ? (
+                        <p className="text-bb-rose">− {qualification.negativeReasons.join("; ")}</p>
+                      ) : null}
+                    </div>
+                  )
+                ) : null}
+              </DarkCard>
+
+              <DarkCard className="p-5">
+                <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
+                  <h4 className="flex items-center gap-1.5 text-sm font-semibold text-bb-text">
+                    <SparklesIcon className="h-4 w-4 text-bb-indigo" /> AI Outreach Draft
+                  </h4>
+                  <DashButton variant="outline" disabled={aiPending} onClick={() => runOutreach("email")}>
+                    Generate
+                  </DashButton>
+                </div>
+                {!outreachDraft ? (
+                  <p className="text-sm text-bb-text-3">
+                    Drafts a personalized message from real research and qualification on file. Never sent automatically.
+                  </p>
+                ) : "error" in outreachDraft ? (
+                  <p className="text-sm text-bb-rose">{outreachDraft.error}</p>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    {outreachDraft.subject ? <div className="font-medium text-bb-text">{outreachDraft.subject}</div> : null}
+                    <p className="whitespace-pre-wrap rounded-lg bg-bb-navy-3 p-3 text-bb-text-2">{outreachDraft.message}</p>
+                    <p className="text-xs text-bb-text-3">Draft only — copy and send manually; no channel is connected yet.</p>
+                  </div>
+                )}
               </DarkCard>
             </div>
             <DarkCard className="p-5">
@@ -175,11 +256,20 @@ export function LeadDetailTabs({
         ) : null}
 
         {tab === "Research" ? (
-          research.length === 0 ? (
-            <p className="py-16 text-center text-sm text-bb-text-3">No research recorded for this lead yet.</p>
-          ) : (
-            <div className="max-w-2xl space-y-3">
-              {research.map((r) => (
+          <div className="max-w-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-bb-text-3">
+                Reasons over information already on file for this lead — no web access, nothing fabricated.
+              </p>
+              <DashButton variant="outline" disabled={aiPending} onClick={runResearch}>
+                {aiPending ? "Researching…" : "Run AI Research"}
+              </DashButton>
+            </div>
+            {researchError ? <p className="text-xs text-bb-rose">{researchError}</p> : null}
+            {research.length === 0 ? (
+              <p className="py-16 text-center text-sm text-bb-text-3">No research recorded for this lead yet.</p>
+            ) : (
+              research.map((r) => (
                 <DarkCard key={r.id} className="p-4">
                   <div className="mb-1 flex items-center justify-between text-xs text-bb-text-3">
                     <span className="capitalize">{r.source}</span>
@@ -187,9 +277,9 @@ export function LeadDetailTabs({
                   </div>
                   <p className="text-sm text-bb-text-2">{r.summary ?? "No summary."}</p>
                 </DarkCard>
-              ))}
-            </div>
-          )
+              ))
+            )}
+          </div>
         ) : null}
 
         {tab === "Conversations" ? (

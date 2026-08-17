@@ -2,9 +2,12 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { sendMessage, updateConversationStatus } from "@/app/(dashboard)/conversations/actions";
+import { detectIntentAction, runFollowUpAction, sendMessage, updateConversationStatus } from "@/app/(dashboard)/conversations/actions";
+import type { IntentAnalysis } from "@/lib/ai/agents/intent";
+import type { FollowUpPlan } from "@/lib/ai/agents/follow-up";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { ChannelBadge, ConversationStatusBadge } from "@/components/dashboard-ui/badge";
+import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
 
 type Conversation = { id: string; lead_id: string; channel: string; status: string; intent: string | null; created_at: string };
@@ -25,6 +28,25 @@ export function ConversationDetailClient({
 }) {
   const [reply, setReply] = useState("");
   const [isPending, startTransition] = useTransition();
+  const [aiPending, startAiTransition] = useTransition();
+  const [intentResult, setIntentResult] = useState<IntentAnalysis | { error: string } | null>(null);
+  const [followUpResult, setFollowUpResult] = useState<FollowUpPlan | { error: string } | null>(null);
+
+  function runDetectIntent() {
+    setFollowUpResult(null);
+    startAiTransition(async () => {
+      const result = await detectIntentAction(conversation.id);
+      setIntentResult(result.ok ? result.analysis : { error: result.message });
+    });
+  }
+
+  function runFollowUpPlan() {
+    setIntentResult(null);
+    startAiTransition(async () => {
+      const result = await runFollowUpAction(conversation.id);
+      setFollowUpResult(result.ok ? result.plan : { error: result.message });
+    });
+  }
 
   return (
     <div className="bb-animate-fade-in flex h-full flex-1 flex-col">
@@ -139,6 +161,53 @@ export function ConversationDetailClient({
           <div className="rounded-xl border border-bb-border bg-bb-navy-2 p-4">
             <div className="mb-3 text-xs font-medium text-bb-text-3">LEAD</div>
             <Row label="Score" val={leadScore !== null ? String(leadScore) : "—"} />
+          </div>
+
+          <div className="rounded-xl border border-bb-border bg-bb-navy-2 p-4">
+            <div className="mb-3 flex items-center gap-1.5 text-xs font-medium text-bb-text-3">
+              <SparklesIcon className="h-3.5 w-3.5 text-bb-indigo" /> AI ASSISTANT
+            </div>
+            <div className="flex flex-col gap-2">
+              <DashButton variant="outline" disabled={aiPending || messages.length === 0} onClick={runDetectIntent}>
+                Detect Intent
+              </DashButton>
+              <DashButton variant="outline" disabled={aiPending || messages.length === 0} onClick={runFollowUpPlan}>
+                Suggest Follow-up
+              </DashButton>
+            </div>
+
+            {aiPending ? <p className="mt-3 text-xs text-bb-text-3">Thinking…</p> : null}
+
+            {intentResult && !aiPending ? (
+              "error" in intentResult ? (
+                <p className="mt-3 text-xs text-bb-rose">{intentResult.error}</p>
+              ) : (
+                <div className="mt-3 space-y-2 border-t border-bb-navy-3 pt-3 text-xs">
+                  <Row label="Intent" val={intentResult.intent.replaceAll("_", " ")} />
+                  <Row label="Confidence" val={intentResult.confidence} />
+                  <p className="text-bb-text-2">{intentResult.reasoning}</p>
+                  {intentResult.detectedBuyingSignals.length > 0 ? (
+                    <p className="text-bb-text-3">Signals: {intentResult.detectedBuyingSignals.join(", ")}</p>
+                  ) : null}
+                  {intentResult.detectedObjections.length > 0 ? (
+                    <p className="text-bb-text-3">Objections: {intentResult.detectedObjections.join(", ")}</p>
+                  ) : null}
+                  <p className="text-bb-indigo-2">Next: {intentResult.recommendedNextAction}</p>
+                </div>
+              )
+            ) : null}
+
+            {followUpResult && !aiPending ? (
+              "error" in followUpResult ? (
+                <p className="mt-3 text-xs text-bb-rose">{followUpResult.error}</p>
+              ) : (
+                <div className="mt-3 space-y-2 border-t border-bb-navy-3 pt-3 text-xs">
+                  <Row label="Timing" val={followUpResult.followUpTiming} />
+                  <p className="text-bb-text-2">{followUpResult.followUpMessage}</p>
+                  <p className="text-bb-text-3">A task was created with this plan.</p>
+                </div>
+              )
+            ) : null}
           </div>
         </div>
       </div>

@@ -2,10 +2,13 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { markDealLost, markDealWon } from "@/app/(dashboard)/deals/actions";
+import { markDealLost, markDealWon, runDealAgentAction, runLossAnalysisAction } from "@/app/(dashboard)/deals/actions";
+import type { DealRecommendation } from "@/lib/ai/agents/deal-agent";
+import type { LossAnalysis } from "@/lib/ai/agents/loss-analysis";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkCard } from "@/components/dashboard-ui/card";
 import { DealStatusBadge, ConversationStatusBadge, TaskStatusBadge } from "@/components/dashboard-ui/badge";
+import { SparklesIcon } from "@/components/ui/icons";
 import { formatCurrency, formatDate } from "@/lib/format";
 
 const TABS = ["Overview", "Conversation", "Tasks", "Timeline", "Loss Analysis"] as const;
@@ -49,6 +52,23 @@ export function DealDetailTabs({
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [isPending, startTransition] = useTransition();
   const [selectedReason, setSelectedReason] = useState(deal.loss_reason ?? "");
+  const [aiPending, startAiTransition] = useTransition();
+  const [recommendation, setRecommendation] = useState<DealRecommendation | { error: string } | null>(null);
+  const [lossAnalysisResult, setLossAnalysisResult] = useState<LossAnalysis | { error: string } | null>(null);
+
+  function runDealAgent() {
+    startAiTransition(async () => {
+      const result = await runDealAgentAction(deal.id);
+      setRecommendation(result.ok ? result.recommendation : { error: result.message });
+    });
+  }
+
+  function runAiLossAnalysis() {
+    startAiTransition(async () => {
+      const result = await runLossAnalysisAction(deal.id);
+      setLossAnalysisResult(result.ok ? result.analysis : { error: result.message });
+    });
+  }
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col">
@@ -123,17 +143,45 @@ export function DealDetailTabs({
 
       <div className="flex-1 p-4 sm:p-6">
         {tab === "Overview" ? (
-          <DarkCard className="max-w-2xl p-5">
-            <h4 className="mb-4 border-b border-bb-border pb-3 text-sm font-semibold text-bb-text">Acquisition Path</h4>
-            <div className="flex flex-wrap items-center gap-2 text-sm text-bb-text-3">
-              {["Campaign", "→", "Lead", "→", "Conversation", "→", "Deal"].map((s, i) => (
-                <span key={i} className={s === "→" ? "text-bb-border" : "text-bb-text-2"}>
-                  {s}
-                </span>
-              ))}
-            </div>
-            {campaignName ? <div className="mt-3 text-xs text-bb-text-3">Campaign: <span className="text-bb-text-2">{campaignName}</span></div> : null}
-          </DarkCard>
+          <div className="max-w-2xl space-y-4">
+            <DarkCard className="p-5">
+              <h4 className="mb-4 border-b border-bb-border pb-3 text-sm font-semibold text-bb-text">Acquisition Path</h4>
+              <div className="flex flex-wrap items-center gap-2 text-sm text-bb-text-3">
+                {["Campaign", "→", "Lead", "→", "Conversation", "→", "Deal"].map((s, i) => (
+                  <span key={i} className={s === "→" ? "text-bb-border" : "text-bb-text-2"}>
+                    {s}
+                  </span>
+                ))}
+              </div>
+              {campaignName ? <div className="mt-3 text-xs text-bb-text-3">Campaign: <span className="text-bb-text-2">{campaignName}</span></div> : null}
+            </DarkCard>
+
+            <DarkCard className="p-5">
+              <div className="mb-4 flex items-center justify-between border-b border-bb-border pb-3">
+                <h4 className="flex items-center gap-1.5 text-sm font-semibold text-bb-text">
+                  <SparklesIcon className="h-4 w-4 text-bb-indigo" /> AI Deal Agent
+                </h4>
+                <DashButton variant="outline" disabled={aiPending} onClick={runDealAgent}>
+                  {aiPending ? "Analyzing…" : "Analyze Deal"}
+                </DashButton>
+              </div>
+              {!recommendation ? (
+                <p className="text-sm text-bb-text-3">
+                  Analyzes this deal&apos;s conversation to recommend a next action. Never changes the deal&apos;s status itself.
+                </p>
+              ) : "error" in recommendation ? (
+                <p className="text-sm text-bb-rose">{recommendation.error}</p>
+              ) : (
+                <div className="space-y-2 text-sm">
+                  <Row label="Negotiation state" val={recommendation.negotiationState} />
+                  <Row label="Closing readiness" val={recommendation.closingReadiness} />
+                  <Row label="Decision maker" val={recommendation.decisionMakerStatus.replaceAll("_", " ")} />
+                  {recommendation.objections.length > 0 ? <Row label="Objections" val={recommendation.objections.join(", ")} /> : null}
+                  <p className="mt-2 rounded-lg bg-bb-navy-3 p-3 text-bb-indigo-2">{recommendation.recommendedNextAction}</p>
+                </div>
+              )}
+            </DarkCard>
+          </div>
         ) : null}
 
         {tab === "Conversation" ? (
@@ -216,9 +264,52 @@ export function DealDetailTabs({
                 Mark Deal Lost
               </DashButton>
             ) : null}
+
+            {deal.status === "lost" ? (
+              <DarkCard className="p-5">
+                <div className="mb-4 flex items-center justify-between border-b border-bb-border pb-3">
+                  <h4 className="flex items-center gap-1.5 text-sm font-semibold text-bb-text">
+                    <SparklesIcon className="h-4 w-4 text-bb-indigo" /> AI Loss Analysis
+                  </h4>
+                  <DashButton variant="outline" disabled={aiPending} onClick={runAiLossAnalysis}>
+                    {aiPending ? "Analyzing…" : "Run AI Analysis"}
+                  </DashButton>
+                </div>
+                {!lossAnalysisResult ? (
+                  <p className="text-sm text-bb-text-3">
+                    Analyzes this deal&apos;s record and conversation to explain why it was lost and suggest changes.
+                  </p>
+                ) : "error" in lossAnalysisResult ? (
+                  <p className="text-sm text-bb-rose">{lossAnalysisResult.error}</p>
+                ) : (
+                  <div className="space-y-3 text-sm">
+                    <Row label="Primary reason" val={lossAnalysisResult.primaryReason.replaceAll("_", " ")} />
+                    <p className="text-bb-text-2">{lossAnalysisResult.summary}</p>
+                    <p className="text-xs text-bb-text-3">Root cause: {lossAnalysisResult.rootCause}</p>
+                    {lossAnalysisResult.lessons.length > 0 ? (
+                      <p className="text-xs text-bb-text-3">Lessons: {lossAnalysisResult.lessons.join("; ")}</p>
+                    ) : null}
+                    {lossAnalysisResult.recommendedCampaignChanges.length > 0 ? (
+                      <p className="text-xs text-bb-indigo-2">
+                        Campaign changes: {lossAnalysisResult.recommendedCampaignChanges.join("; ")}
+                      </p>
+                    ) : null}
+                  </div>
+                )}
+              </DarkCard>
+            ) : null}
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function Row({ label, val }: { label: string; val: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1">
+      <span className="shrink-0 text-xs text-bb-text-3">{label}</span>
+      <span className="text-right text-sm text-bb-text-2">{val}</span>
     </div>
   );
 }
