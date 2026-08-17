@@ -1,6 +1,6 @@
 "use server";
 
-import { generateAiCompletion } from "@/lib/ai/openrouter";
+import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import { getDashboardStats, getOpenDeals, getRecentLeads, getUpcomingTasks } from "@/lib/dashboard";
 import { formatCurrency } from "@/lib/format";
 import { getCurrentOrg } from "@/lib/organizations";
@@ -16,11 +16,6 @@ export type AskAiResult = {
   suggestion: string;
   isLive: boolean;
 };
-
-const NOT_CONFIGURED_MESSAGE =
-  "Ask AI isn't connected yet — add an OPENROUTER_API_KEY environment variable to enable live suggestions.";
-
-const UNAVAILABLE_MESSAGE = "The AI provider is temporarily unreachable. Try again in a moment.";
 
 export async function getAskAiSuggestion(): Promise<AskAiResult> {
   const currentOrg = await getCurrentOrg();
@@ -51,13 +46,15 @@ export async function getAskAiSuggestion(): Promise<AskAiResult> {
     `Open deal titles: ${openDeals.length > 0 ? openDeals.map((d) => d.title).join(", ") : "none"}`,
   ].join("\n");
 
-  const result = await generateAiCompletion(snapshot, SYSTEM_PROMPT);
+  const result = await runHermesCompletion({
+    organizationId: currentOrg.organizationId,
+    agentType: "ask_ai_sidekick",
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: snapshot,
+  });
 
   if (!result.ok) {
-    return {
-      suggestion: result.reason === "not_configured" ? NOT_CONFIGURED_MESSAGE : UNAVAILABLE_MESSAGE,
-      isLive: false,
-    };
+    return { suggestion: result.message, isLive: false };
   }
 
   return { suggestion: result.text, isLive: true };
