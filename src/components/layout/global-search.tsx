@@ -89,14 +89,14 @@ function GlobalSearchModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-bb-navy/80 pt-24 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-[#333333]/35 pt-24"
       onClick={onClose}
     >
       <div
-        className="bb-animate-fade-in w-full max-w-xl overflow-hidden rounded-2xl border border-bb-border bg-bb-navy-3 shadow-2xl"
+        className="bb-animate-fade-in bb-shadow-dropdown w-full max-w-xl overflow-hidden rounded-2xl bg-bb-navy-2"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-3 border-b border-bb-border px-5 py-4">
+        <div className="flex items-center gap-3 border-b border-bb-navy-3 px-5 py-4">
           <SearchIcon className="h-4 w-4 text-bb-indigo" />
           <input
             ref={inputRef}
@@ -123,7 +123,7 @@ function GlobalSearchModal({ onClose }: { onClose: () => void }) {
                 onClose();
                 router.push(r.href);
               }}
-              className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-white/5"
+              className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-bb-navy-3"
             >
               <r.icon className="h-4 w-4 shrink-0 text-bb-indigo" />
               <div className="min-w-0">

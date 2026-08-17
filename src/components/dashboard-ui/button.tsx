@@ -5,7 +5,7 @@ type Variant = "gradient" | "outline" | "ghost" | "danger";
 const VARIANT_CLASSES: Record<Variant, string> = {
   gradient: "bg-gradient-to-br from-bb-indigo to-bb-violet text-white hover:opacity-90",
   outline: "bg-bb-indigo/10 text-bb-indigo-2 border border-bb-indigo/30 hover:bg-bb-indigo/15",
-  ghost: "border border-bb-border text-bb-text-2 hover:bg-white/5",
+  ghost: "border border-bb-border text-bb-text-2 hover:bg-bb-navy-3",
   danger: "bg-bb-rose/10 text-bb-rose border border-bb-rose/30 hover:bg-bb-rose/15",
 };
 

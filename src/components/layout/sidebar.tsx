@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { NAV_ITEMS } from "@/lib/navigation";
-import { LogoMark } from "@/components/ui/icons";
 
 type SidebarProps = {
   collapsed: boolean;
@@ -15,18 +14,23 @@ export function Sidebar({ collapsed, onToggleCollapsed, onNavigate }: SidebarPro
   const pathname = usePathname();
 
   return (
-    <div className="flex h-full flex-col bg-bb-navy-2 font-outfit">
-      <div className="flex h-[60px] shrink-0 items-center gap-3 border-b border-bb-border px-4">
-        <LogoMark className="h-8 w-8 shrink-0" />
+    <div className="flex h-full flex-col border-r border-bb-border bg-bb-navy-2 font-outfit">
+      <div className="flex h-16 shrink-0 items-center gap-2.5 border-b border-bb-border px-5">
+        <div
+          className="h-8 w-8 shrink-0 rounded-[10px]"
+          style={{
+            background:
+              "conic-gradient(from 270deg, #8181ff 15%, #33dbdb 40%, #33d58e 55%, #ffd633 65%, #fc527d 85%, #8181ff 100%)",
+          }}
+        />
         {!collapsed ? (
-          <span className="font-display truncate text-base font-semibold text-bb-text">Business Badhao</span>
+          <span className="truncate text-[15px] font-semibold tracking-[-0.16px] text-bb-text">Business Badhao</span>
         ) : null}
       </div>
 
-      <nav className="flex-1 space-y-0.5 overflow-y-auto py-4">
+      <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-3">
         {NAV_ITEMS.map((item) => {
           const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`);
-          const Icon = item.icon;
 
           return (
             <Link
@@ -35,13 +39,11 @@ export function Sidebar({ collapsed, onToggleCollapsed, onNavigate }: SidebarPro
               onClick={onNavigate}
               aria-current={isActive ? "page" : undefined}
               title={collapsed ? item.label : undefined}
-              className={`mx-2 mb-0.5 flex items-center gap-3 rounded-lg border-l-2 px-3 py-2.5 text-sm font-medium transition-all ${
-                isActive
-                  ? "border-bb-indigo bg-gradient-to-r from-bb-indigo/25 to-bb-indigo/8 text-bb-indigo-2"
-                  : "border-transparent text-bb-text-3 hover:bg-white/5"
+              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all ${
+                isActive ? "bg-[#e7ecff] text-bb-indigo" : "text-bb-text-2 hover:bg-bb-navy-3"
               }`}
             >
-              <Icon className="h-[18px] w-5 shrink-0" />
+              <span className={`h-2 w-2 shrink-0 rounded-full ${isActive ? "bg-bb-indigo" : "bg-[#cacbcd]"}`} />
               {!collapsed ? <span className="truncate">{item.label}</span> : null}
             </Link>
           );
@@ -53,7 +55,7 @@ export function Sidebar({ collapsed, onToggleCollapsed, onNavigate }: SidebarPro
           type="button"
           onClick={onToggleCollapsed}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="mx-auto mb-4 flex h-8 w-8 items-center justify-center rounded-lg text-bb-text-3 transition-colors hover:bg-white/5"
+          className="mx-auto mb-4 flex h-8 w-8 items-center justify-center rounded-full border border-bb-border-2 bg-bb-navy-3 text-sm text-bb-text-2 transition-colors hover:bg-bb-navy-4"
         >
           {collapsed ? "→" : "←"}
         </button>

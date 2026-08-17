@@ -104,7 +104,7 @@ export default async function AnalyticsPage() {
               </thead>
               <tbody>
                 {campaignPerf.map((c) => (
-                  <tr key={c.name} className="border-b border-bb-border/40 transition-colors last:border-0 hover:bg-white/3">
+                  <tr key={c.name} className="border-b border-bb-navy-3 transition-colors last:border-0 hover:bg-bb-navy-3">
                     <td className="px-5 py-3 font-medium text-bb-text">{c.name}</td>
                     <td className="font-jetbrains px-5 py-3 text-bb-text-2">{c.leads}</td>
                     <td className="font-jetbrains px-5 py-3 text-bb-indigo-2">{c.qualified}</td>
@@ -141,7 +141,7 @@ export default async function AnalyticsPage() {
               </thead>
               <tbody>
                 {sourcePerf.map((s) => (
-                  <tr key={s.source} className="border-b border-bb-border/40 transition-colors last:border-0 hover:bg-white/3">
+                  <tr key={s.source} className="border-b border-bb-navy-3 transition-colors last:border-0 hover:bg-bb-navy-3">
                     <td className="px-4 py-3 font-medium text-bb-text">{s.source}</td>
                     <td className="font-jetbrains px-4 py-3 text-xs text-bb-text-2">{s.prospects}</td>
                     <td className="font-jetbrains px-4 py-3 text-xs text-bb-indigo-2">{s.leads}</td>
@@ -161,7 +161,7 @@ export default async function AnalyticsPage() {
               { label: "Campaigns", val: (campaigns.data ?? []).length.toString() },
               { label: "Lead Sources", val: (leadSources.data ?? []).length.toString() },
             ].map((m) => (
-              <div key={m.label} className="flex items-center justify-between border-b border-bb-border/40 py-1.5 last:border-0">
+              <div key={m.label} className="flex items-center justify-between border-b border-bb-navy-3 py-1.5 last:border-0">
                 <span className="text-sm text-bb-text-2">{m.label}</span>
                 <span className="font-jetbrains font-semibold text-bb-text">{m.val}</span>
               </div>

@@ -1,19 +1,21 @@
 type BadgeColor = "slate" | "blue" | "indigo" | "violet" | "amber" | "emerald" | "rose" | "sky";
 
+// Pastel pill pairs from the Command Center design handoff — bg/text aren't
+// opacity-derived from one hue, so each pair is spelled out explicitly.
 const COLOR_CLASSES: Record<BadgeColor, string> = {
-  slate: "bg-bb-text-3/15 text-bb-text-2 border-bb-text-3/30",
-  blue: "bg-bb-sky/15 text-bb-sky border-bb-sky/30",
-  indigo: "bg-bb-indigo/15 text-bb-indigo-2 border-bb-indigo/30",
-  violet: "bg-bb-violet/15 text-bb-violet border-bb-violet/30",
-  amber: "bg-bb-amber/15 text-bb-amber border-bb-amber/30",
-  emerald: "bg-bb-emerald/15 text-bb-emerald border-bb-emerald/30",
-  rose: "bg-bb-rose/15 text-bb-rose border-bb-rose/30",
-  sky: "bg-bb-sky/15 text-bb-sky border-bb-sky/30",
+  slate: "bg-[#f0f0f0] text-[#535768]",
+  blue: "bg-[#abf0ff] text-[#0e7a9e]",
+  indigo: "bg-[#e7ecff] text-bb-indigo",
+  violet: "bg-[#eddff7] text-bb-violet",
+  amber: "bg-[#ffe8d4] text-bb-amber",
+  emerald: "bg-[#d9fbc4] text-bb-emerald",
+  rose: "bg-[#ffe0e8] text-bb-rose",
+  sky: "bg-[#d1faff] text-bb-sky",
 };
 
 export function Badge({ color = "slate", children }: { color?: BadgeColor; children: React.ReactNode }) {
   return (
-    <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap ${COLOR_CLASSES[color]}`}>
+    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap ${COLOR_CLASSES[color]}`}>
       {children}
     </span>
   );
@@ -96,7 +98,7 @@ export function ScorePill({ score }: { score: number | null }) {
   if (score === null) return <span className="text-bb-text-3 text-xs font-mono">—</span>;
   const color: BadgeColor = score >= 80 ? "emerald" : score >= 60 ? "amber" : "rose";
   return (
-    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-xs font-semibold ${COLOR_CLASSES[color]}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono text-xs font-semibold ${COLOR_CLASSES[color]}`}>
       {score}
     </span>
   );

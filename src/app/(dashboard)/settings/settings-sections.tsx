@@ -69,8 +69,8 @@ export function SettingsSections({
               section === s
                 ? "border-bb-indigo bg-bb-indigo/15 text-bb-indigo-2"
                 : s === "Danger Zone"
-                  ? "border-transparent text-bb-rose hover:bg-white/5"
-                  : "border-transparent text-bb-text-3 hover:bg-white/5"
+                  ? "border-transparent text-bb-rose hover:bg-bb-navy-3"
+                  : "border-transparent text-bb-text-3 hover:bg-bb-navy-3"
             }`}
           >
             {s}
@@ -118,7 +118,7 @@ export function SettingsSections({
               <h4 className="mb-3 text-sm font-semibold text-bb-text">Members</h4>
               <div className="overflow-hidden rounded-xl border border-bb-border">
                 {teamMembers.map((m) => (
-                  <div key={m.userId} className="flex items-center gap-3 border-b border-bb-border/50 px-4 py-3 last:border-0">
+                  <div key={m.userId} className="flex items-center gap-3 border-b border-bb-navy-3 px-4 py-3 last:border-0">
                     <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-bb-indigo to-bb-violet text-xs font-bold text-white">
                       {m.name[0]?.toUpperCase() ?? "?"}
                     </div>
@@ -243,7 +243,7 @@ function Field({ label, name, defaultValue, disabled }: { label: string; name: s
 function ToggleRow({ label }: { label: string }) {
   const [on, setOn] = useState(false);
   return (
-    <div className="flex items-center justify-between border-b border-bb-border/40 py-3 last:border-0">
+    <div className="flex items-center justify-between border-b border-bb-navy-3 py-3 last:border-0">
       <span className="text-sm text-bb-text-2">{label}</span>
       <button
         type="button"

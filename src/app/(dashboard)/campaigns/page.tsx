@@ -86,7 +86,7 @@ export default async function CampaignsPage({
             className={`rounded-lg border px-3 py-1.5 text-xs font-medium capitalize transition-all ${
               (statusFilter ?? "all") === s
                 ? "border-bb-indigo bg-bb-indigo/20 text-bb-indigo-2"
-                : "border-bb-border bg-white/4 text-bb-text-3 hover:bg-white/8"
+                : "border-bb-border bg-bb-navy-3 text-bb-text-3 hover:bg-bb-navy-4"
             }`}
           >
             {s}

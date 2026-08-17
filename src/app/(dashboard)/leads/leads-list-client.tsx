@@ -62,7 +62,7 @@ export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
             key={s}
             onClick={() => setStatusFilter(s)}
             className={`rounded-lg border px-3 py-2 text-xs font-medium capitalize transition-all ${
-              statusFilter === s ? "border-bb-indigo bg-bb-indigo/20 text-bb-indigo-2" : "border-bb-border bg-white/4 text-bb-text-3 hover:bg-white/8"
+              statusFilter === s ? "border-bb-indigo bg-bb-indigo/20 text-bb-indigo-2" : "border-bb-border bg-bb-navy-3 text-bb-text-3 hover:bg-bb-navy-4"
             }`}
           >
             {s}
@@ -93,7 +93,7 @@ export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
                 <tr
                   key={lead.id}
                   onClick={() => router.push(`/leads/${lead.id}`)}
-                  className="cursor-pointer border-b border-bb-border/50 transition-colors last:border-0 hover:bg-white/3"
+                  className="cursor-pointer border-b border-bb-navy-3 transition-colors last:border-0 hover:bg-bb-navy-3"
                 >
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
@@ -125,7 +125,7 @@ export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
                         e.stopPropagation();
                         router.push(`/leads/${lead.id}`);
                       }}
-                      className="rounded-lg border border-bb-indigo/25 px-3 py-1.5 text-xs text-bb-indigo-2 hover:bg-white/5"
+                      className="rounded-lg border border-bb-indigo/25 px-3 py-1.5 text-xs text-bb-indigo-2 hover:bg-bb-navy-3"
                     >
                       Open
                     </button>

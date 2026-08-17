@@ -10,8 +10,8 @@ type DarkEmptyStateProps = {
 
 export function DarkEmptyState({ icon: Icon, title, description, action }: DarkEmptyStateProps) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-bb-border bg-bb-navy-2 px-6 py-16 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-bb-navy-3 text-bb-text-3">
+    <div className="bb-shadow-card flex flex-1 flex-col items-center justify-center rounded-3xl bg-bb-navy-2 px-6 py-16 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-bb-navy-4 text-bb-text-3">
         <Icon className="h-6 w-6" />
       </div>
       <h3 className="font-display mt-4 text-sm font-semibold text-bb-text">{title}</h3>

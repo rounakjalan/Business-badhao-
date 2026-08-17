@@ -5,28 +5,33 @@
   --font-mono: var(--font-geist-mono);
 
   /* Dashboard-only design system (see DashboardShell). The public
-     marketing/auth pages keep the Geist typeface and light theme above. */
-  --font-outfit: var(--font-outfit);
-  --font-display: var(--font-fraunces);
+     marketing/auth pages keep the Geist typeface and light theme above.
+     Both dashboard type slots point at Poppins (the monday.com-style
+     redesign's typeface) so no call site needs to change class names. */
+  --font-outfit: var(--font-poppins);
+  --font-display: var(--font-poppins);
   --font-jetbrains: var(--font-jetbrains-mono);
 
-  --color-bb-navy: #060c1a;
-  --color-bb-navy-2: #0d1628;
-  --color-bb-navy-3: #111d35;
-  --color-bb-navy-4: #172244;
-  --color-bb-border: #1f3060;
-  --color-bb-border-2: #2a3f7a;
-  --color-bb-text: #e4ebf7;
-  --color-bb-text-2: #a0b3d6;
-  --color-bb-text-3: #6a82a8;
-  --color-bb-indigo: #5b6ef5;
-  --color-bb-indigo-2: #7c8cf8;
-  --color-bb-indigo-3: #3d4fd4;
-  --color-bb-violet: #8b5cf6;
-  --color-bb-emerald: #10b981;
-  --color-bb-amber: #f59e0b;
-  --color-bb-rose: #f43f5e;
-  --color-bb-sky: #0ea5e9;
+  /* Light "Command Center" theme (monday.com-inspired), design handoff
+     2026-08. Semantic token names kept from the original dark palette so
+     every existing bg-bb, text-bb and border-bb utility repaints for free. */
+  --color-bb-navy: #f5f6f8; /* page background */
+  --color-bb-navy-2: #ffffff; /* surfaces: sidebar, header, cards */
+  --color-bb-navy-3: #f5f6f8; /* recessed surfaces: search input, funnel track */
+  --color-bb-navy-4: #f0f0f0; /* neutral chip/icon-circle background */
+  --color-bb-border: #d0d4e4; /* structural border */
+  --color-bb-border-2: #dddfeb; /* subtle border */
+  --color-bb-text: #333333; /* ink */
+  --color-bb-text-2: #535768; /* secondary */
+  --color-bb-text-3: #808080; /* tertiary / muted */
+  --color-bb-indigo: #6161ff;
+  --color-bb-indigo-2: #6161ff;
+  --color-bb-indigo-3: #4b4bff; /* hover */
+  --color-bb-violet: #9450fd;
+  --color-bb-emerald: #3a7d1e;
+  --color-bb-amber: #c4650f;
+  --color-bb-rose: #c23a5e;
+  --color-bb-sky: #0e7a9e;
 }
 
 body {
@@ -43,3 +48,7 @@ body {
 }
 .bb-animate-fade-in { animation: bb-fade-in 0.3s ease both; }
 .bb-animate-pulse-dot { animation: bb-pulse-dot 2s infinite; }
+
+.bb-shadow-card { box-shadow: 0 2px 48px 0 rgba(205, 208, 223, 0.4); }
+.bb-shadow-pill { box-shadow: 0 2px 24px 0 rgba(205, 208, 223, 0.4); }
+.bb-shadow-dropdown { box-shadow: 0 5px 45px 0 rgba(0, 0, 0, 0.15); }

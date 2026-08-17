@@ -14,12 +14,12 @@ type DataTableProps<T> = {
 
 export function DataTable<T>({ columns, rows, getRowKey, onRowClick }: DataTableProps<T>) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-bb-border">
+    <div className="bb-shadow-card overflow-hidden rounded-3xl bg-bb-navy-2">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-bb-border bg-bb-navy-2">
+          <tr>
             {columns.map((column) => (
-              <th key={column.header} className="whitespace-nowrap px-4 py-3 text-left text-xs font-medium text-bb-text-3">
+              <th key={column.header} className="whitespace-nowrap px-6 py-3 text-left text-xs font-medium text-bb-text-3">
                 {column.header}
               </th>
             ))}
@@ -30,10 +30,10 @@ export function DataTable<T>({ columns, rows, getRowKey, onRowClick }: DataTable
             <tr
               key={getRowKey(row)}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
-              className={`border-b border-bb-border/50 last:border-0 ${onRowClick ? "cursor-pointer transition-colors hover:bg-white/3" : ""}`}
+              className={`border-t border-bb-navy-3 ${onRowClick ? "cursor-pointer transition-colors hover:bg-bb-navy-3" : ""}`}
             >
               {columns.map((column) => (
-                <td key={column.header} className="whitespace-nowrap px-4 py-3 text-bb-text-2">
+                <td key={column.header} className="whitespace-nowrap px-6 py-3.5 text-bb-text-2">
                   {column.cell(row)}
                 </td>
               ))}
