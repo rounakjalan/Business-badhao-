@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useState, useTransition, type ReactNode } from "react";
 import { signOut } from "@/app/auth/actions";
+import { getAskAiSuggestion } from "@/app/(dashboard)/ai-actions";
 import { Sidebar } from "@/components/layout/sidebar";
 import { GlobalSearch } from "@/components/layout/global-search";
 import { BellIcon, CloseIcon, MenuIcon, SearchIcon, SparklesIcon } from "@/components/ui/icons";
@@ -31,9 +32,21 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiSuggestion, setAiSuggestion] = useState<{ text: string; isLive: boolean } | null>(null);
+  const [aiPending, startAiTransition] = useTransition();
   const [profileOpen, setProfileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const pathname = usePathname();
+
+  function openAi() {
+    setAiOpen(true);
+    setNotifOpen(false);
+    setProfileOpen(false);
+    startAiTransition(async () => {
+      const result = await getAskAiSuggestion();
+      setAiSuggestion({ text: result.suggestion, isLive: result.isLive });
+    });
+  }
 
   const pageTitle = NAV_ITEMS.find((item) => pathname === item.href || pathname?.startsWith(`${item.href}/`))?.label ?? "Business Badhao";
   const displayName = userFullName || userEmail;
@@ -69,6 +82,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
       <div className="flex min-w-0 flex-1 flex-col">
         <header
           onClick={() => {
+            setAiOpen(false);
             setNotifOpen(false);
             setProfileOpen(false);
           }}
@@ -109,9 +123,11 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                setAiOpen((v) => !v);
-                setNotifOpen(false);
-                setProfileOpen(false);
+                if (aiOpen) {
+                  setAiOpen(false);
+                } else {
+                  openAi();
+                }
               }}
               className="bb-press hidden items-center gap-1.5 rounded-full border border-[#dbdbff] bg-[#e7ecff] px-4.5 py-2 text-sm font-medium text-bb-indigo transition-colors hover:bg-[#dbdbff] sm:flex"
             >
@@ -124,11 +140,20 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
                 className="bb-animate-scale-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-[300px] origin-top-right rounded-2xl bg-bb-navy-2 p-4"
               >
                 <div className="mb-2 text-sm font-semibold text-bb-text">Sidekick suggestion</div>
-                <p className="text-[13px] leading-relaxed text-bb-text-2">
-                  Ask your top-scored leads and open deals what needs attention today — this preview will connect to
-                  live suggestions once the AI assistant ships.
-                </p>
-                <p className="mt-3 text-[11px] text-bb-text-3">Preview only — no request has been sent to an AI model.</p>
+                {aiPending ? (
+                  <p className="text-[13px] text-bb-text-3">Thinking…</p>
+                ) : (
+                  <>
+                    <p className="text-[13px] leading-relaxed text-bb-text-2">
+                      {aiSuggestion?.text ?? "Ask your top-scored leads and open deals what needs attention today."}
+                    </p>
+                    <p className="mt-3 text-[11px] text-bb-text-3">
+                      {aiSuggestion?.isLive
+                        ? "Generated live by Hermes 4 70B via OpenRouter, based on your real workspace data."
+                        : null}
+                    </p>
+                  </>
+                )}
               </div>
             ) : null}
           </div>
