@@ -60,12 +60,12 @@ export function SettingsSections({
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col md:flex-row">
-      <div className="shrink-0 border-b border-bb-border p-4 md:w-52 md:border-b-0 md:border-r">
+      <div className="bb-stagger shrink-0 border-b border-bb-border p-4 md:w-52 md:border-b-0 md:border-r">
         {SECTIONS.map((s) => (
           <button
             key={s}
             onClick={() => setSection(s)}
-            className={`mb-0.5 w-full rounded-lg border-l-2 px-4 py-2.5 text-left text-sm font-medium transition-all ${
+            className={`bb-stagger-item mb-0.5 w-full rounded-lg border-l-2 px-4 py-2.5 text-left text-sm font-medium transition-all ${
               section === s
                 ? "border-bb-indigo bg-bb-indigo/15 text-bb-indigo-2"
                 : s === "Danger Zone"
@@ -163,9 +163,9 @@ export function SettingsSections({
 
         {section === "Integrations" ? (
           <Section title="Integrations" desc="Connect external tools and services">
-            <div className="space-y-3">
+            <div className="bb-stagger space-y-3">
               {INTEGRATIONS.map((int) => (
-                <div key={int.name} className="flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
+                <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
                   <div className="flex-1">
                     <div className="text-sm font-medium text-bb-text">{int.name}</div>
                     <div className="text-xs text-bb-text-3">{int.desc}</div>
@@ -248,9 +248,11 @@ function ToggleRow({ label }: { label: string }) {
       <button
         type="button"
         onClick={() => setOn((v) => !v)}
-        className={`relative h-5 w-10 shrink-0 rounded-full transition-colors ${on ? "bg-bb-indigo" : "bg-bb-border"}`}
+        className={`bb-press relative h-5 w-10 shrink-0 rounded-full transition-colors duration-200 ${on ? "bg-bb-indigo" : "bg-bb-border"}`}
       >
-        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${on ? "left-[22px]" : "left-0.5"}`} />
+        <span
+          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all duration-200 ease-out ${on ? "left-[22px]" : "left-0.5"}`}
+        />
       </button>
     </div>
   );

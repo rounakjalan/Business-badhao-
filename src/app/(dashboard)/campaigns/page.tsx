@@ -78,12 +78,12 @@ export default async function CampaignsPage({
         }
       />
 
-      <div className="flex flex-wrap gap-2">
+      <div className="bb-stagger flex flex-wrap gap-2">
         {statuses.map((s) => (
           <Link
             key={s}
             href={s === "all" ? "/campaigns" : `/campaigns?status=${s}`}
-            className={`rounded-lg border px-3 py-1.5 text-xs font-medium capitalize transition-all ${
+            className={`bb-stagger-item bb-press rounded-lg border px-3 py-1.5 text-xs font-medium capitalize transition-all ${
               (statusFilter ?? "all") === s
                 ? "border-bb-indigo bg-bb-indigo/20 text-bb-indigo-2"
                 : "border-bb-border bg-bb-navy-3 text-bb-text-3 hover:bg-bb-navy-4"
@@ -106,12 +106,12 @@ export default async function CampaignsPage({
           }
         />
       ) : (
-        <div className="space-y-4">
+        <div className="bb-stagger space-y-4">
           {campaigns.map((c) => {
             const stats = statsByCampaign.get(c.id) ?? { leads: 0, qualified: 0, conversations: 0, deals: 0, revenue: 0 };
             return (
-              <Link key={c.id} href={`/campaigns/${c.id}`}>
-                <DarkCard className="p-5 transition-colors hover:border-bb-indigo/30">
+              <Link key={c.id} href={`/campaigns/${c.id}`} className="bb-stagger-item block">
+                <DarkCard className="bb-lift p-5">
                   <div className="mb-4 flex items-start justify-between gap-3">
                     <div>
                       <div className="mb-1 flex flex-wrap items-center gap-3">

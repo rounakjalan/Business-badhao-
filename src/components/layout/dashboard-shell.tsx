@@ -49,15 +49,15 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
           <button
             type="button"
             aria-label="Close navigation"
-            className="absolute inset-0 bg-[#333333]/35"
+            className="bb-animate-fade-in absolute inset-0 bg-[#333333]/35"
             onClick={() => setIsMobileNavOpen(false)}
           />
-          <div className="relative flex h-full w-64 max-w-[80vw] flex-col shadow-xl">
+          <div className="bb-animate-slide-in-left relative flex h-full w-64 max-w-[80vw] flex-col shadow-xl">
             <button
               type="button"
               onClick={() => setIsMobileNavOpen(false)}
               aria-label="Close navigation"
-              className="absolute right-3 top-4 flex h-8 w-8 items-center justify-center rounded-md text-bb-text-3 hover:bg-bb-navy-3 hover:text-bb-text"
+              className="bb-press absolute right-3 top-4 flex h-8 w-8 items-center justify-center rounded-md text-bb-text-3 transition-colors hover:bg-bb-navy-3 hover:text-bb-text"
             >
               <CloseIcon className="h-5 w-5" />
             </button>
@@ -78,7 +78,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
             type="button"
             onClick={() => setIsMobileNavOpen(true)}
             aria-label="Open navigation"
-            className="flex h-9 w-9 items-center justify-center rounded-md text-bb-text-3 hover:bg-bb-navy-3 hover:text-bb-text md:hidden"
+            className="bb-press flex h-9 w-9 items-center justify-center rounded-md text-bb-text-3 transition-colors hover:bg-bb-navy-3 hover:text-bb-text md:hidden"
           >
             <MenuIcon className="h-5 w-5" />
           </button>
@@ -89,7 +89,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
           <button
             type="button"
             onClick={() => setSearchOpen(true)}
-            className="hidden items-center gap-2 rounded-full border border-bb-border-2 bg-bb-navy-3 px-4 py-2 text-sm text-bb-text-3 transition-colors hover:bg-bb-navy-4 sm:flex sm:min-w-44"
+            className="bb-press hidden items-center gap-2 rounded-full border border-bb-border-2 bg-bb-navy-3 px-4 py-2 text-sm text-bb-text-3 transition-colors hover:bg-bb-navy-4 sm:flex sm:min-w-44"
           >
             <SearchIcon className="h-4 w-4" />
             <span>Search...</span>
@@ -99,7 +99,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
             type="button"
             onClick={() => setSearchOpen(true)}
             aria-label="Search"
-            className="flex h-9 w-9 items-center justify-center rounded-md text-bb-text-3 hover:bg-bb-navy-3 sm:hidden"
+            className="bb-press flex h-9 w-9 items-center justify-center rounded-md text-bb-text-3 transition-colors hover:bg-bb-navy-3 sm:hidden"
           >
             <SearchIcon className="h-4 w-4" />
           </button>
@@ -113,7 +113,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
                 setNotifOpen(false);
                 setProfileOpen(false);
               }}
-              className="hidden items-center gap-1.5 rounded-full border border-[#dbdbff] bg-[#e7ecff] px-4.5 py-2 text-sm font-medium text-bb-indigo transition-colors hover:bg-[#dbdbff] sm:flex"
+              className="bb-press hidden items-center gap-1.5 rounded-full border border-[#dbdbff] bg-[#e7ecff] px-4.5 py-2 text-sm font-medium text-bb-indigo transition-colors hover:bg-[#dbdbff] sm:flex"
             >
               <SparklesIcon className="h-3.5 w-3.5" />
               <span>Ask AI</span>
@@ -121,7 +121,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
             {aiOpen ? (
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="bb-animate-fade-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-[300px] rounded-2xl bg-bb-navy-2 p-4"
+                className="bb-animate-scale-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-[300px] origin-top-right rounded-2xl bg-bb-navy-2 p-4"
               >
                 <div className="mb-2 text-sm font-semibold text-bb-text">Sidekick suggestion</div>
                 <p className="text-[13px] leading-relaxed text-bb-text-2">
@@ -143,14 +143,14 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
                 setProfileOpen(false);
               }}
               aria-label="Notifications"
-              className="relative flex h-9.5 w-9.5 items-center justify-center rounded-full text-bb-text-2 transition-colors hover:bg-bb-navy-3"
+              className="bb-press relative flex h-9.5 w-9.5 items-center justify-center rounded-full text-bb-text-2 transition-colors hover:bg-bb-navy-3"
             >
               <BellIcon className="h-[18px] w-[18px]" />
             </button>
             {notifOpen ? (
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="bb-animate-fade-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-70 overflow-hidden rounded-2xl bg-bb-navy-2"
+                className="bb-animate-scale-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-70 origin-top-right overflow-hidden rounded-2xl bg-bb-navy-2"
               >
                 <div className="border-b border-bb-navy-3 px-4 py-3 text-sm font-semibold text-bb-text">Notifications</div>
                 <div className="px-4 py-6 text-center text-sm text-bb-text-3">You&apos;re all caught up.</div>
@@ -167,7 +167,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
                 setAiOpen(false);
                 setNotifOpen(false);
               }}
-              className="flex items-center gap-2 rounded-full transition-opacity hover:opacity-90"
+              className="bb-press flex items-center gap-2 rounded-full transition-opacity hover:opacity-90"
             >
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-bb-indigo to-bb-violet text-[13px] font-semibold text-white">
                 {initialsFor(displayName)}
@@ -176,7 +176,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
             {profileOpen ? (
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="bb-animate-fade-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-50 overflow-hidden rounded-2xl bg-bb-navy-2"
+                className="bb-animate-scale-in bb-shadow-dropdown absolute right-0 top-12 z-50 w-50 origin-top-right overflow-hidden rounded-2xl bg-bb-navy-2"
               >
                 <div className="border-b border-bb-navy-3 px-4 py-3">
                   <div className="truncate text-sm font-semibold text-bb-text">{displayName}</div>

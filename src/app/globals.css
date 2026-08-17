@@ -46,9 +46,64 @@ body {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+@keyframes bb-scale-in {
+  from { opacity: 0; transform: scale(0.94) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes bb-slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes bb-pop-in {
+  0% { opacity: 0; transform: scale(0.9) translateY(10px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
 .bb-animate-fade-in { animation: bb-fade-in 0.3s ease both; }
 .bb-animate-pulse-dot { animation: bb-pulse-dot 2s infinite; }
+.bb-animate-scale-in { animation: bb-scale-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.bb-animate-slide-in-left { animation: bb-slide-in-left 0.25s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.bb-animate-pop-in { animation: bb-pop-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Staggered entrance for grids/lists — apply .bb-stagger to the container and
+   .bb-stagger-item to each direct-child; nth-child selectors give each item
+   an increasing delay by DOM position, no per-item inline style needed. */
+.bb-stagger > .bb-stagger-item { opacity: 0; animation: bb-fade-in 0.4s ease both; }
+.bb-stagger > .bb-stagger-item:nth-child(1) { animation-delay: 0s; }
+.bb-stagger > .bb-stagger-item:nth-child(2) { animation-delay: 0.05s; }
+.bb-stagger > .bb-stagger-item:nth-child(3) { animation-delay: 0.1s; }
+.bb-stagger > .bb-stagger-item:nth-child(4) { animation-delay: 0.15s; }
+.bb-stagger > .bb-stagger-item:nth-child(5) { animation-delay: 0.2s; }
+.bb-stagger > .bb-stagger-item:nth-child(6) { animation-delay: 0.25s; }
+.bb-stagger > .bb-stagger-item:nth-child(7) { animation-delay: 0.3s; }
+.bb-stagger > .bb-stagger-item:nth-child(8) { animation-delay: 0.35s; }
+.bb-stagger > .bb-stagger-item:nth-child(n+9) { animation-delay: 0.4s; }
 
 .bb-shadow-card { box-shadow: 0 2px 48px 0 rgba(205, 208, 223, 0.4); }
 .bb-shadow-pill { box-shadow: 0 2px 24px 0 rgba(205, 208, 223, 0.4); }
 .bb-shadow-dropdown { box-shadow: 0 5px 45px 0 rgba(0, 0, 0, 0.15); }
+
+.bb-press { transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1); }
+.bb-press:active { transform: scale(0.96); }
+
+.bb-lift { transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s ease; }
+.bb-lift:hover { transform: translateY(-3px); box-shadow: 0 8px 28px 0 rgba(97, 97, 255, 0.18); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-animate-fade-in,
+  .bb-animate-scale-in,
+  .bb-animate-slide-in-left,
+  .bb-animate-pop-in,
+  .bb-stagger-item,
+  .bb-animate-pulse-dot {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+  .bb-press,
+  .bb-lift,
+  .bb-press:active,
+  .bb-lift:hover {
+    transition: none !important;
+    transform: none !important;
+  }
+}

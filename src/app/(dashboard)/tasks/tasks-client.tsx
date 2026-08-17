@@ -31,7 +31,7 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
       />
 
       {creating ? (
-        <DarkCard className="border-bb-indigo/30 p-5">
+        <DarkCard className="bb-animate-scale-in origin-top border-bb-indigo/30 p-5">
           <h4 className="mb-4 text-sm font-semibold text-bb-text">New Task</h4>
           <form
             action={(formData) => {
@@ -66,13 +66,16 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
       {tasks.length === 0 ? (
         <DarkEmptyState icon={TasksIcon} title="No tasks yet" description="Tasks you create or that follow from your leads and deals will show up here." />
       ) : (
-        <div className="space-y-2">
+        <div className="bb-stagger space-y-2">
           {todo.map((task) => (
-            <div key={task.id} className="flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4 transition-all hover:border-bb-indigo/30">
+            <div
+              key={task.id}
+              className="bb-stagger-item bb-lift flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4 transition-colors hover:border-bb-indigo/30"
+            >
               <button
                 onClick={() => startTransition(() => completeTask(task.id))}
                 aria-label="Mark complete"
-                className="h-5 w-5 shrink-0 rounded-full border-2 border-bb-border transition-all hover:border-bb-indigo"
+                className="bb-press h-5 w-5 shrink-0 rounded-full border-2 border-bb-border transition-all hover:scale-110 hover:border-bb-indigo"
               />
               <div className="min-w-0 flex-1">
                 <div className="mb-0.5 truncate text-sm font-medium text-bb-text">{task.title}</div>
@@ -85,7 +88,10 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
             <>
               <div className="pt-2 text-xs font-medium text-bb-text-3">COMPLETED</div>
               {done.map((task) => (
-                <div key={task.id} className="flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4 opacity-50">
+                <div
+                  key={task.id}
+                  className="bb-animate-fade-in flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4 opacity-50"
+                >
                   <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 border-bb-emerald bg-bb-emerald">
                     <CheckIcon className="h-3 w-3 text-white" />
                   </div>

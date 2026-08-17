@@ -39,11 +39,13 @@ export function Sidebar({ collapsed, onToggleCollapsed, onNavigate }: SidebarPro
               onClick={onNavigate}
               aria-current={isActive ? "page" : undefined}
               title={collapsed ? item.label : undefined}
-              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all ${
-                isActive ? "bg-[#e7ecff] text-bb-indigo" : "text-bb-text-2 hover:bg-bb-navy-3"
+              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 ${
+                isActive ? "bg-[#e7ecff] text-bb-indigo" : "text-bb-text-2 hover:translate-x-0.5 hover:bg-bb-navy-3"
               }`}
             >
-              <span className={`h-2 w-2 shrink-0 rounded-full ${isActive ? "bg-bb-indigo" : "bg-[#cacbcd]"}`} />
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full transition-transform duration-200 group-hover:scale-125 ${isActive ? "bg-bb-indigo" : "bg-[#cacbcd]"}`}
+              />
               {!collapsed ? <span className="truncate">{item.label}</span> : null}
             </Link>
           );
@@ -55,7 +57,7 @@ export function Sidebar({ collapsed, onToggleCollapsed, onNavigate }: SidebarPro
           type="button"
           onClick={onToggleCollapsed}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="mx-auto mb-4 flex h-8 w-8 items-center justify-center rounded-full border border-bb-border-2 bg-bb-navy-3 text-sm text-bb-text-2 transition-colors hover:bg-bb-navy-4"
+          className="bb-press mx-auto mb-4 flex h-8 w-8 items-center justify-center rounded-full border border-bb-border-2 bg-bb-navy-3 text-sm text-bb-text-2 transition-colors hover:bg-bb-navy-4"
         >
           {collapsed ? "→" : "←"}
         </button>

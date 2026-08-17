@@ -51,8 +51,8 @@ export function DealsListClient({ deals }: { deals: Deal[] }) {
                 <button
                   key={v}
                   onClick={() => setView(v)}
-                  className={`px-4 py-2 text-xs font-medium capitalize transition-all ${
-                    view === v ? "bg-bb-indigo/20 text-bb-indigo-2" : "text-bb-text-3"
+                  className={`bb-press px-4 py-2 text-xs font-medium capitalize transition-all ${
+                    view === v ? "bg-bb-indigo/20 text-bb-indigo-2" : "text-bb-text-3 hover:bg-bb-navy-3"
                   }`}
                 >
                   {v}
@@ -66,11 +66,11 @@ export function DealsListClient({ deals }: { deals: Deal[] }) {
       {deals.length === 0 ? (
         <DarkEmptyState icon={DealsIcon} title="No deals yet" description="Deals created from your conversations and leads will be tracked here." />
       ) : view === "pipeline" ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="bb-stagger grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {STAGES.map((stage) => {
             const stageDeals = deals.filter((d) => d.status === stage);
             return (
-              <div key={stage}>
+              <div key={stage} className="bb-stagger-item">
                 <div className="mb-3 flex items-center justify-between px-1">
                   <div className="flex items-center gap-2">
                     <span className={`h-2 w-2 rounded-full ${STAGE_COLOR[stage]}`} />
@@ -83,7 +83,7 @@ export function DealsListClient({ deals }: { deals: Deal[] }) {
                     <button
                       key={d.id}
                       onClick={() => router.push(`/deals/${d.id}`)}
-                      className="w-full rounded-lg border border-bb-border bg-bb-navy p-3 text-left transition-all hover:border-bb-indigo/40"
+                      className="bb-press bb-lift w-full rounded-lg border border-bb-border bg-bb-navy p-3 text-left transition-colors hover:border-bb-indigo/40"
                     >
                       <div className="mb-1 text-xs font-semibold leading-tight text-bb-text">{d.title}</div>
                       <div className="flex items-center justify-between">
@@ -92,7 +92,10 @@ export function DealsListClient({ deals }: { deals: Deal[] }) {
                       </div>
                       {d.probability !== null ? (
                         <div className="mt-2 h-1 rounded-full bg-bb-navy-3">
-                          <div className={`h-full rounded-full ${STAGE_COLOR[stage]}`} style={{ width: `${d.probability}%` }} />
+                          <div
+                            className={`h-full rounded-full transition-[width] duration-700 ease-out ${STAGE_COLOR[stage]}`}
+                            style={{ width: `${d.probability}%` }}
+                          />
                         </div>
                       ) : null}
                     </button>
