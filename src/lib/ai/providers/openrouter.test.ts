@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AiError } from "@/lib/ai/errors";
 import { DEFAULT_OPENROUTER_MODEL, OpenRouterProvider } from "@/lib/ai/providers/openrouter";
 import type { AiCompletionRequest } from "@/lib/ai/types";
 
@@ -110,9 +109,40 @@ describe("OpenRouterProvider", () => {
     await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toMatchObject({ code: "malformed_response" });
   });
 
-  it("treats unparsable JSON as a malformed response", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response("not json", { status: 200 }));
-    await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toBeInstanceOf(AiError);
+  it("treats unparsable JSON as a malformed response, and preserves the raw evidence instead of discarding it", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("<html>upstream error</html>", { status: 200, headers: { "content-type": "text/html" } })
+    );
+
+    await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toMatchObject({
+      code: "malformed_response",
+      message: expect.stringContaining("HTTP 200"),
+    });
+  });
+
+  it("captures status, content-type, requested model, and raw body in the malformed-response error message", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("<html>upstream error</html>", { status: 200, headers: { "content-type": "text/html" } })
+    );
+
+    const error = await new OpenRouterProvider().complete(baseRequest).catch((e) => e);
+
+    expect(error.message).toContain("HTTP 200");
+    expect(error.message).toContain("content-type: text/html");
+    expect(error.message).toContain(`model requested: ${DEFAULT_OPENROUTER_MODEL}`);
+    expect(error.message).toContain("<html>upstream error</html>");
+  });
+
+  it("captures diagnostics for an empty completion too, not just unparsable JSON", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse(200, { choices: [{ message: { content: "" } }] })
+    );
+
+    const error = await new OpenRouterProvider().complete(baseRequest).catch((e) => e);
+
+    expect(error.code).toBe("malformed_response");
+    expect(error.message).toContain("HTTP 200");
+    expect(error.message).toContain(`model requested: ${DEFAULT_OPENROUTER_MODEL}`);
   });
 
   it("normalizes tool calls when the model returns them", async () => {

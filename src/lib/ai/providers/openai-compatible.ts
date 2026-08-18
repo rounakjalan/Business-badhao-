@@ -110,19 +110,29 @@ export async function callOpenAiCompatibleChat(
   }
 
   const latencyMs = Date.now() - startedAt;
+  // Read the body exactly once, as text, regardless of outcome — this is
+  // what lets a JSON-parse failure below still report the real status,
+  // content-type, requested model, and raw body instead of discarding
+  // that evidence the moment response.json() would have thrown. None of
+  // this is ever shown to the end user (see USER_SAFE_MESSAGES in
+  // hermes-service.ts) — it only ever reaches agent_runs.output for
+  // diagnosis.
+  const contentType = response.headers.get("content-type") ?? "unknown";
+  const rawBody = await safeReadText(response);
+  const diagnostics = `HTTP ${response.status}, content-type: ${contentType}, model requested: ${model}. Raw body (first 500 chars): ${rawBody.slice(0, 500) || "(empty)"}`;
 
   if (!response.ok) {
-    throw mapHttpErrorToAiError(cfg.providerName, response.status, await safeReadText(response));
+    throw mapHttpErrorToAiError(cfg.providerName, response.status, rawBody);
   }
 
   let data: OpenAiCompatibleChatResponse;
   try {
-    data = (await response.json()) as OpenAiCompatibleChatResponse;
+    data = JSON.parse(rawBody) as OpenAiCompatibleChatResponse;
   } catch (cause) {
     throw new AiError({
       code: "malformed_response",
       provider: cfg.providerName,
-      message: `${cfg.providerName} returned a response that could not be parsed as JSON`,
+      message: `${cfg.providerName} returned a non-JSON response. ${diagnostics}`,
       cause,
     });
   }
@@ -139,7 +149,7 @@ export async function callOpenAiCompatibleChat(
     throw new AiError({
       code: "malformed_response",
       provider: cfg.providerName,
-      message: `${cfg.providerName} returned an empty completion`,
+      message: `${cfg.providerName} returned an empty completion. ${diagnostics}`,
     });
   }
 
