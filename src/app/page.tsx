@@ -47,7 +47,7 @@ export default function Home() {
             >
               Log in
             </Link>
-            <Link href="/signup">
+            <Link href="/dashboard">
               <Button>Get started</Button>
             </Link>
           </div>
@@ -65,7 +65,7 @@ export default function Home() {
               run outreach, and close deals, all from a single workspace.
             </p>
             <div className="mt-10 flex items-center justify-center gap-4">
-              <Link href="/signup">
+              <Link href="/dashboard">
                 <Button className="px-6 py-3 text-base">Get started</Button>
               </Link>
               <Link href="/login">
