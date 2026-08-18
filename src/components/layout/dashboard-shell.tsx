@@ -149,7 +149,7 @@ export function DashboardShell({ organizationName, userEmail, userFullName, chil
                     </p>
                     <p className="mt-3 text-[11px] text-bb-text-3">
                       {aiSuggestion?.isLive
-                        ? "Generated live by Hermes 4 70B via OpenRouter, based on your real workspace data."
+                        ? "Generated live via OpenRouter, based on your real workspace data."
                         : null}
                     </p>
                   </>

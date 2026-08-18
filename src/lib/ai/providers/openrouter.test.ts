@@ -39,7 +39,7 @@ describe("OpenRouterProvider", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("uses the default Hermes 4 70B model when OPENROUTER_MODEL is unset", async () => {
+  it("uses the default Nemotron 3 Ultra free model when OPENROUTER_MODEL is unset", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse(200, {
         id: "req-1",

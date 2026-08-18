@@ -3,8 +3,13 @@ import { callOpenAiCompatibleChat } from "@/lib/ai/providers/openai-compatible";
 import type { AiProvider } from "@/lib/ai/providers/provider";
 import type { AiCompletionRequest, AiCompletionResponse } from "@/lib/ai/types";
 
-/** Kept as the default so the existing Ask AI behavior doesn't change for anyone who hasn't set OPENROUTER_MODEL. */
-export const DEFAULT_OPENROUTER_MODEL = "nousresearch/hermes-4-70b";
+/**
+ * Business Badhao's configured primary model — used whenever OPENROUTER_MODEL
+ * isn't set. Nemotron 3 Ultra's free endpoint on OpenRouter. Still fully
+ * overridable via OPENROUTER_MODEL; nothing in the router or agents hard-codes
+ * this identifier.
+ */
+export const DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
