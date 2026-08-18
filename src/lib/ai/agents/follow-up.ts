@@ -55,6 +55,7 @@ export async function runFollowUp(input: FollowUpInput): Promise<FollowUpResult>
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "follow_up",
+    taskType: "FOLLOW_UP",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 500,

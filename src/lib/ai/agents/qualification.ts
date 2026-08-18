@@ -73,6 +73,7 @@ export async function runLeadQualification(input: LeadQualificationInput): Promi
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "lead_qualification",
+    taskType: "LEAD_QUALIFICATION",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 700,

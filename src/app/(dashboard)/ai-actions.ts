@@ -49,6 +49,7 @@ export async function getAskAiSuggestion(): Promise<AskAiResult> {
   const result = await runHermesCompletion({
     organizationId: currentOrg.organizationId,
     agentType: "ask_ai_sidekick",
+    taskType: "GENERAL_CHAT",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt: snapshot,
   });

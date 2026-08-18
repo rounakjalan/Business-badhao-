@@ -2,6 +2,8 @@ import { getAiConfig } from "@/lib/ai/config";
 import { AiError, type AiErrorCode } from "@/lib/ai/errors";
 import { createProvider } from "@/lib/ai/providers/registry";
 import { withRetry } from "@/lib/ai/retry";
+import { resolveRouting } from "@/lib/ai/router/model-router";
+import type { AiTaskType } from "@/lib/ai/router/task-types";
 import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
 import { recordModelUsage } from "@/lib/ai/tracking/model-usage";
 import type { AiCompletionRequest, AiMessage, AiProviderName } from "@/lib/ai/types";
@@ -11,6 +13,8 @@ export type HermesRequest = {
   organizationId: string | null;
   /** Free-form label for agent_runs.agent_type, e.g. "ask_ai_sidekick". */
   agentType: string;
+  /** Drives provider/model selection via the Model Router — see src/lib/ai/router. */
+  taskType: AiTaskType;
   systemPrompt: string;
   userPrompt: string;
   maxTokens?: number;
@@ -49,17 +53,16 @@ const USER_SAFE_MESSAGES: Record<AiErrorCode, string> = {
 
 /**
  * The single entry point every AI feature in Business Badhao calls through
- * — never a provider directly. Handles provider selection (with an
- * explicit, opt-in fallback), retries for transient errors, and best-effort
- * agent_runs/model_usage tracking.
+ * — never a provider directly. Routes the request to a provider via the
+ * Model Router (src/lib/ai/router), handles the explicit opt-in fallback,
+ * retries for transient errors, and best-effort agent_runs/model_usage
+ * tracking.
  *
- * UI / Server Action -> runHermesCompletion -> provider abstraction -> model
+ * UI / Server Action -> runHermesCompletion -> Model Router -> provider abstraction -> model
  */
 export async function runHermesCompletion(request: HermesRequest): Promise<HermesResult> {
   const config = getAiConfig();
-  const providerOrder: AiProviderName[] = config.fallbackProvider
-    ? [config.provider, config.fallbackProvider]
-    : [config.provider];
+  const { providerOrder, preferredProvider } = resolveRouting(request.taskType, config);
 
   const messages: AiMessage[] = [
     { role: "system", content: request.systemPrompt },
@@ -67,7 +70,9 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
   ];
 
   const agentRun = await createAgentRun(request.organizationId, request.agentType, {
-    primaryProvider: config.provider,
+    taskType: request.taskType,
+    preferredProvider,
+    providerOrder,
     fallbackProvider: config.fallbackProvider,
   });
 
@@ -107,10 +112,12 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
       }
 
       await completeAgentRun(agentRun, "completed", {
+        taskType: request.taskType,
         provider: response.provider,
         model: response.model,
         finishReason: response.finishReason,
         latencyMs: response.latencyMs,
+        usedFallback: response.provider !== preferredProvider,
       });
 
       return { ok: true, text: response.text, provider: response.provider, model: response.model };
@@ -126,7 +133,11 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
   }
 
   const code = lastError?.code ?? "unknown";
-  await completeAgentRun(agentRun, "failed", { code, message: lastError?.message ?? "no provider produced a result" });
+  await completeAgentRun(agentRun, "failed", {
+    taskType: request.taskType,
+    code,
+    message: lastError?.message ?? "no provider produced a result",
+  });
 
   return { ok: false, code, message: USER_SAFE_MESSAGES[code] };
 }

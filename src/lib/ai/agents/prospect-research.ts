@@ -71,6 +71,7 @@ export async function runProspectResearch(input: ProspectResearchInput): Promise
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "prospect_research",
+    taskType: "PROSPECT_RESEARCH",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 800,

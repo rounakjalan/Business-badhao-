@@ -73,6 +73,7 @@ export async function detectIntent(input: IntentDetectionInput): Promise<IntentD
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "intent_detection",
+    taskType: "INTENT_DETECTION",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 500,

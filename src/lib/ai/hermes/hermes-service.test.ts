@@ -10,17 +10,30 @@ vi.mock("@/lib/ai/providers/registry", () => ({
   createProvider: vi.fn(),
 }));
 
+// Hoisted so the mock factory below (which vi.mock hoists above imports)
+// can reference the same spies the tests inspect afterward.
+const { insertSpy, updateSpy } = vi.hoisted(() => ({
+  insertSpy: vi.fn(),
+  updateSpy: vi.fn(),
+}));
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     from: () => ({
-      insert: () => ({
-        select: () => ({
-          single: async () => ({ data: { id: "run-1" }, error: null }),
-        }),
-      }),
-      update: () => ({
-        eq: async () => ({ error: null }),
-      }),
+      insert: (payload: unknown) => {
+        insertSpy(payload);
+        return {
+          select: () => ({
+            single: async () => ({ data: { id: "run-1" }, error: null }),
+          }),
+        };
+      },
+      update: (payload: unknown) => {
+        updateSpy(payload);
+        return {
+          eq: async () => ({ error: null }),
+        };
+      },
     }),
   })),
 }));
@@ -56,6 +69,7 @@ function fakeProvider(overrides: Partial<AiProvider> = {}): AiProvider {
 const baseRequest = {
   organizationId: "org-1",
   agentType: "ask_ai_sidekick",
+  taskType: "GENERAL_CHAT" as const,
   systemPrompt: "system",
   userPrompt: "user",
 };
@@ -141,5 +155,65 @@ describe("runHermesCompletion", () => {
 
     expect(result).toEqual({ ok: false, code: "not_configured", message: expect.any(String) });
     expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("routes an intent-detection task to Groq first when Groq is configured", async () => {
+    const groqProvider = fakeProvider({ name: "groq", complete: vi.fn().mockResolvedValue(fakeResponse({ provider: "groq", model: "fast-model" })) });
+    const openRouterProvider = fakeProvider({ complete: vi.fn() });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "groq" ? groqProvider : openRouterProvider));
+
+    const result = await runHermesCompletion({ ...baseRequest, taskType: "INTENT_DETECTION" });
+
+    expect(result).toEqual({ ok: true, text: "a real suggestion", provider: "groq", model: "fast-model" });
+    expect(createProvider).toHaveBeenCalledTimes(1);
+    expect(createProvider).toHaveBeenCalledWith("groq");
+    expect(openRouterProvider.complete).not.toHaveBeenCalled();
+  });
+
+  it("gracefully degrades an intent-detection task to the configured primary when Groq isn't configured (no regression)", async () => {
+    const groqProvider = fakeProvider({ name: "groq", isConfigured: () => false, complete: vi.fn() });
+    const openRouterProvider = fakeProvider({ complete: vi.fn().mockResolvedValue(fakeResponse()) });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "groq" ? groqProvider : openRouterProvider));
+
+    const result = await runHermesCompletion({ ...baseRequest, taskType: "INTENT_DETECTION" });
+
+    expect(result.ok).toBe(true);
+    expect(createProvider).toHaveBeenNthCalledWith(1, "groq");
+    expect(createProvider).toHaveBeenNthCalledWith(2, "openrouter");
+    expect(groqProvider.complete).not.toHaveBeenCalled();
+    expect(openRouterProvider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("never routes a research task to Groq just because Groq happens to be configured as the fallback", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+    const openRouterProvider = fakeProvider({ complete: vi.fn().mockResolvedValue(fakeResponse()) });
+    const groqProvider = fakeProvider({ name: "groq", complete: vi.fn() });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "groq" ? groqProvider : openRouterProvider));
+
+    const result = await runHermesCompletion({ ...baseRequest, agentType: "campaign_planner", taskType: "CAMPAIGN_PLANNING" });
+
+    expect(result.ok).toBe(true);
+    expect(createProvider).toHaveBeenCalledTimes(1);
+    expect(createProvider).toHaveBeenCalledWith("openrouter");
+    expect(groqProvider.complete).not.toHaveBeenCalled();
+  });
+
+  it("records the task type and routing decision on the agent_runs row", async () => {
+    vi.mocked(createProvider).mockReturnValue(fakeProvider());
+
+    await runHermesCompletion({ ...baseRequest, taskType: "CAMPAIGN_PLANNING" });
+
+    expect(insertSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_type: "ask_ai_sidekick",
+        input: expect.objectContaining({ taskType: "CAMPAIGN_PLANNING", preferredProvider: "openrouter" }),
+      })
+    );
+    expect(updateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "completed",
+        output: expect.objectContaining({ taskType: "CAMPAIGN_PLANNING", provider: "openrouter", usedFallback: false }),
+      })
+    );
   });
 });

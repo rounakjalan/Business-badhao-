@@ -66,6 +66,7 @@ export async function runDealAgent(input: DealAgentInput): Promise<DealAgentResu
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "deal_agent",
+    taskType: "DEAL_ANALYSIS",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 600,

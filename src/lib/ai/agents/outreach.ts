@@ -58,6 +58,7 @@ export async function generateOutreach(input: OutreachGeneratorInput): Promise<O
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "outreach_generation",
+    taskType: "OUTREACH_GENERATION",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 500,

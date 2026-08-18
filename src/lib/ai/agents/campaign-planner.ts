@@ -72,6 +72,7 @@ export async function runCampaignPlanner(input: CampaignPlannerInput): Promise<C
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "campaign_planner",
+    taskType: "CAMPAIGN_PLANNING",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 900,

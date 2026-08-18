@@ -80,6 +80,7 @@ export async function runLossAnalysis(input: LossAnalysisInput): Promise<LossAna
   const result = await runHermesCompletion({
     organizationId: input.organizationId,
     agentType: "loss_analysis",
+    taskType: "LOSS_ANALYSIS",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
     maxTokens: 700,
