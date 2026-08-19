@@ -9,8 +9,10 @@ const SYSTEM_PROMPT =
   "You are the AI sidekick embedded in Business Badhao, a customer-acquisition CRM for small and growing " +
   "Indian businesses. You are given a real snapshot of the signed-in user's workspace. Reply with ONE short, " +
   "specific, actionable suggestion (2-3 sentences max) about what they should focus on next. Reference the " +
-  "actual numbers or names given — never invent data that isn't in the snapshot. Plain text only, no markdown, " +
-  "no headers, no bullet points.";
+  "actual numbers or names given — never invent data that isn't in the snapshot. You may call lookup_lead, " +
+  "search_leads, or lookup_deal if the snapshot doesn't have enough detail to give a specific suggestion — " +
+  "use them only when genuinely useful, not on every request. Plain text only, no markdown, no headers, no " +
+  "bullet points.";
 
 export type AskAiResult = {
   suggestion: string;
@@ -52,6 +54,7 @@ export async function getAskAiSuggestion(): Promise<AskAiResult> {
     taskType: "GENERAL_CHAT",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt: snapshot,
+    enableTools: true,
   });
 
   if (!result.ok) {

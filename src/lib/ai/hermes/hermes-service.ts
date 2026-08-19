@@ -1,12 +1,60 @@
 import { getAiConfig } from "@/lib/ai/config";
 import { AiError, type AiErrorCode } from "@/lib/ai/errors";
+import type { AiProvider } from "@/lib/ai/providers/provider";
 import { createProvider } from "@/lib/ai/providers/registry";
 import { withRetry } from "@/lib/ai/retry";
 import { resolveRouting } from "@/lib/ai/router/model-router";
 import type { AiTaskType } from "@/lib/ai/router/task-types";
+import { executeTool, HERMES_TOOL_DEFINITIONS } from "@/lib/ai/tools/registry";
 import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
 import { recordModelUsage } from "@/lib/ai/tracking/model-usage";
-import type { AiCompletionRequest, AiMessage, AiProviderName } from "@/lib/ai/types";
+import type { AiCompletionRequest, AiCompletionResponse, AiMessage, AiProviderName } from "@/lib/ai/types";
+
+/** Hard cap on tool-augmented follow-up calls per Hermes invocation (bounds both latency and provider cost). */
+const MAX_TOOL_ROUNDS = 2;
+
+/**
+ * When request.enableTools is set, lets the model call read-only,
+ * organization-scoped tools (src/lib/ai/tools/registry.ts) before
+ * producing its final answer. Bounded to MAX_TOOL_ROUNDS follow-up calls;
+ * once that's exhausted (or the model stops requesting tools), whatever
+ * response came back — with or without text — is returned as-is, same as
+ * a normal (non-tool) completion.
+ */
+async function runWithTools(
+  provider: AiProvider,
+  baseRequest: AiCompletionRequest,
+  organizationId: string,
+  maxRetries: number
+): Promise<AiCompletionResponse> {
+  let messages = baseRequest.messages;
+
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    const response = await withRetry(
+      () => provider.complete({ ...baseRequest, messages, tools: HERMES_TOOL_DEFINITIONS }),
+      maxRetries
+    );
+
+    if (response.toolCalls.length === 0 || round === MAX_TOOL_ROUNDS) {
+      return response;
+    }
+
+    const toolResultMessages: AiMessage[] = [];
+    for (const call of response.toolCalls) {
+      const result = await executeTool(organizationId, call.name, call.arguments);
+      toolResultMessages.push({ role: "tool", toolCallId: call.id, content: JSON.stringify(result) });
+    }
+
+    messages = [
+      ...messages,
+      { role: "assistant", content: response.text ?? "", toolCalls: response.toolCalls },
+      ...toolResultMessages,
+    ];
+  }
+
+  // Unreachable — the loop always returns by round === MAX_TOOL_ROUNDS — but keeps TypeScript satisfied.
+  throw new AiError({ code: "malformed_response", provider: provider.name, message: "tool round loop exited without a response" });
+}
 
 export type HermesRequest = {
   /** null for actions that can happen before onboarding (e.g. an unauthenticated preview) — tracking is skipped in that case. */
@@ -21,6 +69,14 @@ export type HermesRequest = {
   temperature?: number;
   /** Set to "json" for agents that parse the result with src/lib/ai/schema.ts. */
   responseFormat?: "text" | "json";
+  /**
+   * Lets the model call read-only lookup tools (src/lib/ai/tools/registry.ts)
+   * before answering — see runWithTools. Requires organizationId to be set
+   * (tools are always org-scoped); ignored otherwise. Not used by any of
+   * the structured-JSON agents — they parse response.text against a zod
+   * schema and a tool-call round would produce a different shape.
+   */
+  enableTools?: boolean;
 };
 
 export type HermesSuccess = {
@@ -95,7 +151,10 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
         responseFormat: request.responseFormat,
       };
 
-      const response = await withRetry(() => provider.complete(completionRequest), config.maxRetries);
+      const response =
+        request.enableTools && request.organizationId
+          ? await runWithTools(provider, completionRequest, request.organizationId, config.maxRetries)
+          : await withRetry(() => provider.complete(completionRequest), config.maxRetries);
 
       await recordModelUsage({
         organizationId: request.organizationId,

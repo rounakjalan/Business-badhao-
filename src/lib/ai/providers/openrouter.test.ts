@@ -165,4 +165,31 @@ describe("OpenRouterProvider", () => {
     expect(response.toolCalls).toEqual([{ id: "call_1", name: "lookup_lead", arguments: '{"leadId":"123"}' }]);
     expect(response.finishReason).toBe("tool_calls");
   });
+
+  it("serializes a tool-call round-trip (assistant toolCalls + a tool-result message) in OpenAI wire format", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { choices: [{ message: { content: "done" } }] }));
+
+    await new OpenRouterProvider().complete({
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "who should I follow up with?" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "lookup_lead", arguments: '{"leadId":"lead-1"}' }],
+        },
+        { role: "tool", toolCallId: "call_1", content: '{"ok":true,"data":{"current_score":82}}' },
+      ],
+    });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+
+    expect(sentBody.messages[2]).toEqual({
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup_lead", arguments: '{"leadId":"lead-1"}' } }],
+    });
+    expect(sentBody.messages[3]).toEqual({ role: "tool", tool_call_id: "call_1", content: '{"ok":true,"data":{"current_score":82}}' });
+  });
 });

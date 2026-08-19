@@ -45,6 +45,29 @@ function toOpenAiToolSchema(tools: AiToolDefinition[]) {
   }));
 }
 
+/**
+ * Maps our provider-agnostic AiMessage onto the OpenAI-compatible wire
+ * format. Only role:"tool" and an assistant message carrying toolCalls need
+ * special shaping — everything else passes through as {role, content}.
+ */
+function toWireMessage(message: AiCompletionRequest["messages"][number]) {
+  if (message.role === "tool") {
+    return { role: "tool" as const, tool_call_id: message.toolCallId, content: message.content };
+  }
+  if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
+    return {
+      role: "assistant" as const,
+      content: message.content || null,
+      tool_calls: message.toolCalls.map((call) => ({
+        id: call.id,
+        type: "function" as const,
+        function: { name: call.name, arguments: call.arguments },
+      })),
+    };
+  }
+  return { role: message.role, content: message.content };
+}
+
 function mapHttpErrorToAiError(provider: AiProviderName, status: number, bodyText: string): AiError {
   const snippet = bodyText.slice(0, 300);
   if (status === 401 || status === 403) {
@@ -89,7 +112,7 @@ export async function callOpenAiCompatibleChat(
       },
       body: JSON.stringify({
         model,
-        messages: request.messages,
+        messages: request.messages.map(toWireMessage),
         max_tokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
         // Explicit, not just relying on the provider's default — this

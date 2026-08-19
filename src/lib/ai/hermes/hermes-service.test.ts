@@ -10,6 +10,11 @@ vi.mock("@/lib/ai/providers/registry", () => ({
   createProvider: vi.fn(),
 }));
 
+vi.mock("@/lib/ai/tools/registry", () => ({
+  HERMES_TOOL_DEFINITIONS: [{ name: "lookup_lead", description: "test tool", parameters: {} }],
+  executeTool: vi.fn(),
+}));
+
 // Hoisted so the mock factory below (which vi.mock hoists above imports)
 // can reference the same spies the tests inspect afterward.
 const { insertSpy, updateSpy } = vi.hoisted(() => ({
@@ -39,6 +44,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 import { createProvider } from "@/lib/ai/providers/registry";
+import { executeTool } from "@/lib/ai/tools/registry";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 
 const ENV_KEYS = ["AI_PROVIDER", "AI_FALLBACK_PROVIDER", "AI_TIMEOUT_MS", "AI_MAX_RETRIES"] as const;
@@ -215,5 +221,80 @@ describe("runHermesCompletion", () => {
         output: expect.objectContaining({ taskType: "CAMPAIGN_PLANNING", provider: "openrouter", usedFallback: false }),
       })
     );
+  });
+
+  describe("tool calling (enableTools)", () => {
+    it("does not request tools or execute anything when enableTools is unset", async () => {
+      const provider = fakeProvider();
+      vi.mocked(createProvider).mockReturnValue(provider);
+
+      await runHermesCompletion(baseRequest);
+
+      expect(provider.complete).toHaveBeenCalledTimes(1);
+      const call = vi.mocked(provider.complete).mock.calls[0][0];
+      expect(call.tools).toBeUndefined();
+      expect(executeTool).not.toHaveBeenCalled();
+    });
+
+    it("executes a requested tool call and re-queries the provider with the result before returning", async () => {
+      const toolCallResponse = fakeResponse({
+        text: null,
+        toolCalls: [{ id: "call_1", name: "lookup_lead", arguments: '{"leadId":"lead-1"}' }],
+      });
+      const finalResponse = fakeResponse({ text: "Priya Sharma is your top lead, follow up today." });
+      const complete = vi.fn().mockResolvedValueOnce(toolCallResponse).mockResolvedValueOnce(finalResponse);
+      vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete }));
+      vi.mocked(executeTool).mockResolvedValue({ ok: true, data: { id: "lead-1", current_score: 82 } });
+
+      const result = await runHermesCompletion({ ...baseRequest, organizationId: "org-1", enableTools: true });
+
+      expect(result).toEqual({
+        ok: true,
+        text: "Priya Sharma is your top lead, follow up today.",
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+      expect(complete).toHaveBeenCalledTimes(2);
+      expect(executeTool).toHaveBeenCalledWith("org-1", "lookup_lead", '{"leadId":"lead-1"}');
+
+      // The follow-up call must replay the tool call and its result as history.
+      const secondCallArgs = complete.mock.calls[1][0];
+      const roles = secondCallArgs.messages.map((m: { role: string }) => m.role);
+      expect(roles).toEqual(["system", "user", "assistant", "tool"]);
+      expect(secondCallArgs.messages[3]).toEqual({
+        role: "tool",
+        toolCallId: "call_1",
+        content: JSON.stringify({ ok: true, data: { id: "lead-1", current_score: 82 } }),
+      });
+    });
+
+    it("bounds the tool-call loop instead of looping forever when the model keeps requesting tools", async () => {
+      const alwaysToolCalls = fakeResponse({
+        text: null,
+        toolCalls: [{ id: "call_x", name: "lookup_lead", arguments: "{}" }],
+      });
+      const complete = vi.fn().mockResolvedValue(alwaysToolCalls);
+      vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete }));
+      vi.mocked(executeTool).mockResolvedValue({ ok: false, error: "invalid arguments" });
+
+      const result = await runHermesCompletion({ ...baseRequest, organizationId: "org-1", enableTools: true });
+
+      // MAX_TOOL_ROUNDS (2) extra attempts beyond the first call = 3 total.
+      expect(complete).toHaveBeenCalledTimes(3);
+      expect(result).toEqual({ ok: false, code: "malformed_response", message: expect.any(String) });
+    });
+
+    it("never attempts tool execution when there is no organizationId, even with enableTools set", async () => {
+      const provider = fakeProvider();
+      vi.mocked(createProvider).mockReturnValue(provider);
+
+      const result = await runHermesCompletion({ ...baseRequest, organizationId: null, enableTools: true });
+
+      expect(result.ok).toBe(true);
+      expect(provider.complete).toHaveBeenCalledTimes(1);
+      const call = vi.mocked(provider.complete).mock.calls[0][0];
+      expect(call.tools).toBeUndefined();
+      expect(executeTool).not.toHaveBeenCalled();
+    });
   });
 });
