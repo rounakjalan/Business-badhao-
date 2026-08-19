@@ -85,7 +85,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             key={s}
             type="button"
             onClick={() => setStep(i)}
-            className={`flex-1 rounded-lg border py-2 text-center text-xs font-medium transition-all ${
+            className={`bb-press flex-1 rounded-lg border py-2 text-center text-xs font-medium transition-all ${
               i === step
                 ? "border-bb-indigo bg-bb-indigo/20 text-bb-indigo-2"
                 : i < step
@@ -100,7 +100,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
       </div>
 
       {step === 0 ? (
-        <div className="space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
+        <div className="bb-animate-fade-in space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
           <h3 className="font-display text-lg font-semibold text-bb-text">Campaign Basics</h3>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Campaign Name</label>
@@ -132,7 +132,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
       ) : null}
 
       {step === 1 ? (
-        <div className="space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
+        <div className="bb-animate-fade-in space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
           <h3 className="font-display text-lg font-semibold text-bb-text">AI Campaign Planner</h3>
           <p className="text-sm text-bb-text-3">
             Generates a real plan from Hermes based on the basics you entered. If you keep it, it&apos;s saved as this
@@ -153,9 +153,9 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
               )}
             </DashButton>
           ) : (
-            <div className="space-y-3">
+            <div className="bb-stagger space-y-3">
               {planSections(plan).map((s) => (
-                <div key={s.title} className="rounded-lg border border-bb-border bg-bb-navy p-4">
+                <div key={s.title} className="bb-stagger-item rounded-lg border border-bb-border bg-bb-navy p-4">
                   <div className="mb-1 text-xs font-medium text-bb-indigo-2">{s.title}</div>
                   <div className="text-sm text-bb-text-2">{s.val}</div>
                 </div>
@@ -175,7 +175,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
       ) : null}
 
       {step === 2 ? (
-        <div className="space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
+        <div className="bb-animate-fade-in space-y-5 rounded-xl border border-bb-border bg-bb-navy-2 p-6">
           <h3 className="font-display text-lg font-semibold text-bb-text">Ideal Customer Profile</h3>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
@@ -202,7 +202,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
       ) : null}
 
       {step === 3 ? (
-        <div className="space-y-4 rounded-xl border border-bb-border bg-bb-navy-2 p-6 text-center">
+        <div className="bb-animate-fade-in space-y-4 rounded-xl border border-bb-border bg-bb-navy-2 p-6 text-center">
           <h3 className="font-display text-xl font-semibold text-bb-text">Ready to launch</h3>
           <p className="text-sm text-bb-text-3">Review your campaign below, then save it as a draft or launch it now.</p>
           <div className="rounded-xl border border-bb-border bg-bb-navy p-4 text-left text-sm">
