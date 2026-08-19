@@ -153,6 +153,20 @@ describe("runHermesCompletion", () => {
     expect(createProvider).toHaveBeenCalledWith("openrouter");
   });
 
+  it("retries a malformed_response failure from the provider before giving up", async () => {
+    const complete = vi
+      .fn()
+      .mockRejectedValueOnce(new AiError({ code: "malformed_response", provider: "openrouter", message: "empty completion" }))
+      .mockResolvedValueOnce(fakeResponse());
+    vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete }));
+
+    const result = await runHermesCompletion(baseRequest);
+
+    expect(result).toEqual({ ok: true, text: "a real suggestion", provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(createProvider).toHaveBeenCalledTimes(1); // retried the same provider, not a fallback
+  });
+
   it("treats an unconfigured provider as not_configured without calling complete()", async () => {
     const provider = fakeProvider({ isConfigured: () => false, complete: vi.fn() });
     vi.mocked(createProvider).mockReturnValue(provider);

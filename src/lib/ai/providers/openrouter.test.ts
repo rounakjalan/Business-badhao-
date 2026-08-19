@@ -63,6 +63,16 @@ describe("OpenRouterProvider", () => {
     expect(sentBody.stream).toBe(false);
   });
 
+  it("caps reasoning effort so a reasoning model can't spend the whole token budget on reasoning", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { choices: [{ message: { content: "hi there" } }] }));
+
+    await new OpenRouterProvider().complete(baseRequest);
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+    expect(sentBody.reasoning).toEqual({ effort: "low" });
+  });
+
   it("respects an explicit OPENROUTER_MODEL override", async () => {
     process.env.OPENROUTER_MODEL = "nousresearch/hermes-3-llama-3.1-70b";
     vi.mocked(fetch).mockResolvedValueOnce(

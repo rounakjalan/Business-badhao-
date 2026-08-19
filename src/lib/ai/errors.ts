@@ -11,8 +11,20 @@ export type AiErrorCode =
   | "network_error"
   | "unknown";
 
-/** Error codes worth a small, bounded retry. Auth/config/not-found errors never are. */
-const RETRYABLE_CODES: ReadonlySet<AiErrorCode> = new Set(["timeout", "provider_unavailable", "network_error", "rate_limited"]);
+/**
+ * Error codes worth a small, bounded retry. Auth/config/not-found errors
+ * never are. malformed_response is included because it's frequently a
+ * transient upstream hiccup on free-tier reasoning models (e.g. the
+ * completion coming back empty because the model spent its whole token
+ * budget on reasoning) rather than a permanently broken request.
+ */
+const RETRYABLE_CODES: ReadonlySet<AiErrorCode> = new Set([
+  "timeout",
+  "provider_unavailable",
+  "network_error",
+  "rate_limited",
+  "malformed_response",
+]);
 
 /**
  * The only error type a provider implementation may throw. Carries a

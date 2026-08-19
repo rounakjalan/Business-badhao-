@@ -13,6 +13,8 @@ export type OpenAiCompatibleConfig = {
   apiKey: string;
   defaultModel: string;
   extraHeaders?: Record<string, string>;
+  /** Extra provider-specific fields merged into the request body, e.g. OpenRouter's `reasoning` cap. */
+  extraBody?: Record<string, unknown>;
 };
 
 type OpenAiCompatibleToolCall = {
@@ -123,6 +125,7 @@ export async function callOpenAiCompatibleChat(
         stream: false,
         ...(request.tools && request.tools.length > 0 ? { tools: toOpenAiToolSchema(request.tools) } : {}),
         ...(request.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
+        ...cfg.extraBody,
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });

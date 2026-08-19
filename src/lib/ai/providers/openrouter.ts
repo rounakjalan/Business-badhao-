@@ -46,6 +46,12 @@ export class OpenRouterProvider implements AiProvider {
         apiKey,
         defaultModel: this.model,
         extraHeaders: { "X-Title": "Business Badhao" },
+        // Caps reasoning-token spend on reasoning models (e.g. the default
+        // Nemotron 3 Ultra) to a fraction of maxTokens instead of letting
+        // reasoning consume the entire budget and leave nothing for the
+        // actual content — which is what was producing empty completions
+        // (malformed_response). See OpenRouter's unified reasoning API.
+        extraBody: { reasoning: { effort: "low" } },
       },
       request
     );

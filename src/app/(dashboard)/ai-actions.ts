@@ -54,6 +54,7 @@ export async function getAskAiSuggestion(): Promise<AskAiResult> {
     taskType: "GENERAL_CHAT",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt: snapshot,
+    maxTokens: 500,
     enableTools: true,
   });
 

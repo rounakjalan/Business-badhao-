@@ -75,7 +75,7 @@ export async function runCampaignPlanner(input: CampaignPlannerInput): Promise<C
     taskType: "CAMPAIGN_PLANNING",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
-    maxTokens: 900,
+    maxTokens: 1600,
     temperature: 0.5,
     responseFormat: "json",
   });
