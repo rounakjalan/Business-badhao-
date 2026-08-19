@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { getSiteUrl } from "@/lib/site-url";
 
 function safeRedirectPath(path: FormDataEntryValue | null): string {
   if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) {
@@ -34,7 +35,13 @@ export async function signUp(formData: FormData) {
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: { data: { full_name: fullName } },
+    options: {
+      data: { full_name: fullName },
+      // Without this, Supabase builds the confirmation link from the
+      // project's dashboard-configured Site URL instead of wherever this
+      // is actually deployed — see src/lib/site-url.ts.
+      emailRedirectTo: `${getSiteUrl()}/auth/callback`,
+    },
   });
 
   if (error) {
