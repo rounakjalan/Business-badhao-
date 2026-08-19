@@ -156,6 +156,23 @@ describe("OpenRouterProvider", () => {
     expect(error.message).toContain(`model requested: ${DEFAULT_OPENROUTER_MODEL}`);
   });
 
+  it("classifies an upstream error embedded in an HTTP 200 body by its embedded code, instead of treating it as an empty completion", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse(200, { error: { message: "Upstream error from Nvidia: Service temporarily overloaded", code: 502 } })
+    );
+
+    const error = await new OpenRouterProvider().complete(baseRequest).catch((e) => e);
+
+    expect(error.code).toBe("provider_unavailable");
+    expect(error.message).toContain("Upstream error from Nvidia: Service temporarily overloaded");
+  });
+
+  it("falls back to unknown for an embedded error with a non-numeric code", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { error: { message: "insufficient_quota" } }));
+
+    await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toMatchObject({ code: "unknown" });
+  });
+
   it("normalizes tool calls when the model returns them", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse(200, {

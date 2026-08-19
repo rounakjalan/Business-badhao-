@@ -34,6 +34,15 @@ type OpenAiCompatibleChatResponse = {
     completion_tokens?: number;
     total_tokens?: number;
   };
+  /**
+   * OpenRouter (and providers behind it) sometimes report a failure this
+   * way instead of a non-2xx HTTP status — e.g. HTTP 200 with body
+   * {"error":{"message":"Upstream error from Nvidia: Service temporarily
+   * overloaded","code":502}} when the underlying model host is down.
+   * Checked explicitly below so this surfaces as the real error instead
+   * of silently falling through to "empty completion".
+   */
+  error?: { message?: string; code?: number | string };
 };
 
 function toOpenAiToolSchema(tools: AiToolDefinition[]) {
@@ -70,21 +79,26 @@ function toWireMessage(message: AiCompletionRequest["messages"][number]) {
   return { role: message.role, content: message.content };
 }
 
+/** Shared by both a real non-2xx HTTP status and an error code embedded in an HTTP-200 body. */
+function mapErrorCodeToAiError(provider: AiProviderName, code: number, message: string): AiError {
+  if (code === 401 || code === 403) {
+    return new AiError({ code: "invalid_api_key", provider, message, statusCode: code });
+  }
+  if (code === 404) {
+    return new AiError({ code: "model_not_found", provider, message, statusCode: code });
+  }
+  if (code === 429) {
+    return new AiError({ code: "rate_limited", provider, message, statusCode: code });
+  }
+  if (code >= 500) {
+    return new AiError({ code: "provider_unavailable", provider, message, statusCode: code });
+  }
+  return new AiError({ code: "unknown", provider, message, statusCode: code });
+}
+
 function mapHttpErrorToAiError(provider: AiProviderName, status: number, bodyText: string): AiError {
   const snippet = bodyText.slice(0, 300);
-  if (status === 401 || status === 403) {
-    return new AiError({ code: "invalid_api_key", provider, message: `${provider} rejected the configured API key`, statusCode: status });
-  }
-  if (status === 404) {
-    return new AiError({ code: "model_not_found", provider, message: `${provider} could not find the requested model`, statusCode: status });
-  }
-  if (status === 429) {
-    return new AiError({ code: "rate_limited", provider, message: `${provider} rate limit exceeded`, statusCode: status });
-  }
-  if (status >= 500) {
-    return new AiError({ code: "provider_unavailable", provider, message: `${provider} server error (HTTP ${status})`, statusCode: status });
-  }
-  return new AiError({ code: "unknown", provider, message: `${provider} returned HTTP ${status}: ${snippet}`, statusCode: status });
+  return mapErrorCodeToAiError(provider, status, `${provider} returned HTTP ${status}: ${snippet}`);
 }
 
 async function safeReadText(response: Response): Promise<string> {
@@ -175,6 +189,21 @@ export async function callOpenAiCompatibleChat(
       message: `${cfg.providerName} returned a non-JSON response. ${diagnostics}`,
       cause,
     });
+  }
+
+  if (data.error) {
+    console.error(`[ai] ${cfg.providerName} returned an embedded error in an HTTP ${response.status} response`, {
+      status: response.status,
+      contentType,
+      model,
+      bodySnippet,
+    });
+    const embeddedCode = typeof data.error.code === "number" ? data.error.code : response.status;
+    throw mapErrorCodeToAiError(
+      cfg.providerName,
+      embeddedCode,
+      `${cfg.providerName} returned an upstream error: ${data.error.message ?? "no message"}. ${diagnostics}`
+    );
   }
 
   const choice = data.choices?.[0];
