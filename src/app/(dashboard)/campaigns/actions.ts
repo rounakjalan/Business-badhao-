@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { CampaignPlanSchema, runCampaignPlanner, type CampaignPlannerResult } from "@/lib/ai/agents/campaign-planner";
+import { runCampaignPlanner, type CampaignPlan, type CampaignPlannerResult } from "@/lib/ai/agents/campaign-planner";
+import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { TablesUpdate } from "@/types/database.types";
@@ -30,13 +31,34 @@ export async function generateCampaignPlan(input: {
   });
 }
 
+export async function generateIcp(input: {
+  name: string;
+  objective: string;
+  description: string;
+  plan: CampaignPlan;
+}): Promise<IcpGeneratorResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) {
+    return { ok: false, message: "Sign in to a workspace to generate an ideal customer profile." };
+  }
+
+  return runIcpGenerator({
+    organizationId: currentOrg.organizationId,
+    organizationName: currentOrg.organizationName,
+    campaignName: input.name,
+    objective: input.objective,
+    description: input.description,
+    plan: input.plan,
+  });
+}
+
 export async function createCampaign(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const objective = String(formData.get("objective") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
   const targetAudience = String(formData.get("targetAudience") ?? "").trim();
   const launch = formData.get("launch") === "true";
-  const planRaw = String(formData.get("plan") ?? "");
+  const icpRaw = String(formData.get("icp") ?? "");
 
   if (!name) {
     redirect(`/campaigns/create?error=${encodeURIComponent("Campaign name is required.")}`);
@@ -52,38 +74,30 @@ export async function createCampaign(formData: FormData) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // The AI plan (if the user generated and kept one) is optional and
-  // re-validated here rather than trusted as-is — it arrived through a
-  // hidden form field, so it's still just client-supplied data at this
-  // point.
+  // The AI plan and ICP (if the user generated and kept them) are optional
+  // and re-validated here rather than trusted as-is — they arrived through
+  // hidden form fields, so they're still just client-supplied data at this
+  // point. Nothing is written to Supabase until this single insert, so
+  // regenerating either in the wizard (client-side state) or refreshing
+  // the page (loses in-progress wizard state, same as before this feature)
+  // can never produce duplicate campaigns or duplicate ICP rows.
   let idealCustomerProfileId: string | null = null;
-  if (planRaw) {
-    const planParse = CampaignPlanSchema.safeParse(JSON.parse(planRaw));
-    if (planParse.success) {
-      const plan = planParse.data;
-      const { data: icp } = await supabase
+  if (icpRaw) {
+    const icpParse = IcpSchema.safeParse(JSON.parse(icpRaw));
+    if (icpParse.success) {
+      const icp = icpParse.data;
+      const { data: savedIcp } = await supabase
         .from("ideal_customer_profiles")
         .insert({
           organization_id: currentOrg.organizationId,
           name: `${name} — ICP`,
-          description: plan.customerProfile,
-          criteria: {
-            targetMarket: plan.targetMarket,
-            idealCustomerCharacteristics: plan.idealCustomerCharacteristics,
-            buyingSignals: plan.buyingSignals,
-            painPoints: plan.painPoints,
-            valueProposition: plan.valueProposition,
-            suggestedChannels: plan.suggestedChannels,
-            campaignStrategy: plan.campaignStrategy,
-            qualificationCriteria: plan.qualificationCriteria,
-            outreachStrategy: plan.outreachStrategy,
-            followUpStrategy: plan.followUpStrategy,
-          },
+          description: icp.targetCustomer,
+          criteria: icp,
           created_by: user?.id ?? null,
         })
         .select("id")
         .single();
-      idealCustomerProfileId = icp?.id ?? null;
+      idealCustomerProfileId = savedIcp?.id ?? null;
     }
   }
 

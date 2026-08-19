@@ -11,12 +11,17 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
   const supabase = await createClient();
   const { data: campaign } = await supabase
     .from("campaigns")
-    .select("id, name, objective, description, target_audience, status, created_at")
+    .select("id, name, objective, description, target_audience, status, created_at, ideal_customer_profile_id")
     .eq("id", id)
     .eq("organization_id", currentOrg.organizationId)
     .maybeSingle();
 
   if (!campaign) notFound();
+
+  const icp = campaign.ideal_customer_profile_id
+    ? (await supabase.from("ideal_customer_profiles").select("criteria").eq("id", campaign.ideal_customer_profile_id).maybeSingle()).data
+        ?.criteria ?? null
+    : null;
 
   const [leads, conversations, deals] = await Promise.all([
     supabase.from("leads").select("id, qualification_status").eq("campaign_id", id),
@@ -35,6 +40,7 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
   return (
     <CampaignDetailTabs
       campaign={campaign}
+      icp={icp}
       leadCount={leadCount}
       qualifiedCount={qualifiedCount}
       conversations={conversations.data ?? []}

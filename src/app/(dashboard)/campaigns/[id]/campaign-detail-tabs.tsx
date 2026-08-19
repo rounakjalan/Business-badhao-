@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { updateCampaignStatus } from "@/app/(dashboard)/campaigns/actions";
+import { IcpSchema, type Icp } from "@/lib/ai/agents/icp-schema";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkCard } from "@/components/dashboard-ui/card";
 import { CampaignStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
@@ -28,6 +29,7 @@ type DealRow = { id: string; title: string; status: string; value: number; curre
 
 export function CampaignDetailTabs({
   campaign,
+  icp,
   leadCount,
   qualifiedCount,
   conversations,
@@ -35,12 +37,15 @@ export function CampaignDetailTabs({
   revenue,
 }: {
   campaign: Campaign;
+  /** Raw jsonb from ideal_customer_profiles.criteria — validated below, since campaigns created before the ICP step shipped store the old plan-derived shape. */
+  icp: unknown;
   leadCount: number;
   qualifiedCount: number;
   conversations: ConversationRow[];
   deals: DealRow[];
   revenue: number;
 }) {
+  const parsedIcp = icp ? IcpSchema.safeParse(icp) : null;
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [pending, setPending] = useState(false);
 
@@ -123,12 +128,7 @@ export function CampaignDetailTabs({
           </div>
         ) : null}
 
-        {tab === "ICP" ? (
-          <DarkCard className="max-w-2xl p-5 text-sm text-bb-text-2">
-            <div className="mb-2 text-xs font-medium text-bb-text-3">IDEAL CUSTOMER PROFILE</div>
-            <p>{campaign.target_audience || "Set a target audience from the campaign settings to define your ICP."}</p>
-          </DarkCard>
-        ) : null}
+        {tab === "ICP" ? <IcpTab icp={parsedIcp?.success ? parsedIcp.data : null} targetAudience={campaign.target_audience} /> : null}
 
         {tab === "Lead Discovery" ? <LeadDiscoveryPreview /> : null}
 
@@ -168,6 +168,48 @@ export function CampaignDetailTabs({
 
         {tab === "Activity" ? <div className="py-16 text-center text-sm text-bb-text-3">Activity history is coming soon.</div> : null}
       </div>
+    </div>
+  );
+}
+
+const ICP_DISPLAY_FIELDS: { key: keyof Icp; label: string }[] = [
+  { key: "targetCustomer", label: "Target Customer / Persona" },
+  { key: "ageRange", label: "Age Range" },
+  { key: "location", label: "Location / Service Area" },
+  { key: "industry", label: "Industry / Category" },
+  { key: "businessType", label: "Company / Business Type" },
+  { key: "budgetRange", label: "Income / Budget / Purchasing Capacity" },
+  { key: "needs", label: "Needs" },
+  { key: "painPoints", label: "Pain Points" },
+  { key: "buyingSignals", label: "Buying Signals" },
+  { key: "decisionFactors", label: "Decision-Making Factors" },
+  { key: "disqualifiers", label: "Disqualifiers" },
+  { key: "preferredChannels", label: "Preferred Channels" },
+  { key: "qualificationCriteria", label: "Qualification Criteria" },
+];
+
+function IcpTab({ icp, targetAudience }: { icp: Icp | null; targetAudience: string | null }) {
+  if (!icp) {
+    return (
+      <DarkCard className="max-w-2xl p-5 text-sm text-bb-text-2">
+        <div className="mb-2 text-xs font-medium text-bb-text-3">IDEAL CUSTOMER PROFILE</div>
+        <p>{targetAudience || "No Ideal Customer Profile was generated for this campaign yet."}</p>
+      </DarkCard>
+    );
+  }
+
+  return (
+    <div className="bb-stagger grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
+      {ICP_DISPLAY_FIELDS.map((f) => {
+        const value = icp[f.key];
+        const display = Array.isArray(value) ? (value.length > 0 ? value.join(", ") : "—") : (value ?? "Not specified");
+        return (
+          <div key={f.key} className="bb-stagger-item rounded-lg border border-bb-border bg-bb-navy p-4">
+            <div className="mb-1 text-xs font-medium text-bb-indigo-2">{f.label}</div>
+            <div className="text-sm text-bb-text-2">{display}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
