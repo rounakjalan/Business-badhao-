@@ -60,6 +60,7 @@ describe("OpenRouterProvider", () => {
     expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
     const sentBody = JSON.parse((init as RequestInit).body as string);
     expect(sentBody.model).toBe(DEFAULT_OPENROUTER_MODEL);
+    expect(sentBody.stream).toBe(false);
   });
 
   it("respects an explicit OPENROUTER_MODEL override", async () => {

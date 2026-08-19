@@ -92,6 +92,12 @@ export async function callOpenAiCompatibleChat(
         messages: request.messages,
         max_tokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
+        // Explicit, not just relying on the provider's default — this
+        // module only ever reads the body as a single JSON object
+        // (see below), so a streamed (SSE) response would already fail
+        // to parse. Forcing this off removes streaming as a variable
+        // when diagnosing a malformed_response failure.
+        stream: false,
         ...(request.tools && request.tools.length > 0 ? { tools: toOpenAiToolSchema(request.tools) } : {}),
         ...(request.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
       }),
@@ -115,11 +121,13 @@ export async function callOpenAiCompatibleChat(
   // content-type, requested model, and raw body instead of discarding
   // that evidence the moment response.json() would have thrown. None of
   // this is ever shown to the end user (see USER_SAFE_MESSAGES in
-  // hermes-service.ts) — it only ever reaches agent_runs.output for
-  // diagnosis.
+  // hermes-service.ts) — the message text reaches agent_runs.output for
+  // diagnosis; the console.error calls below additionally put the same
+  // evidence in Vercel's runtime logs.
   const contentType = response.headers.get("content-type") ?? "unknown";
   const rawBody = await safeReadText(response);
-  const diagnostics = `HTTP ${response.status}, content-type: ${contentType}, model requested: ${model}. Raw body (first 500 chars): ${rawBody.slice(0, 500) || "(empty)"}`;
+  const bodySnippet = rawBody.slice(0, 1000) || "(empty)";
+  const diagnostics = `HTTP ${response.status}, content-type: ${contentType}, model requested: ${model}. Raw body (first 1000 chars): ${bodySnippet}`;
 
   if (!response.ok) {
     throw mapHttpErrorToAiError(cfg.providerName, response.status, rawBody);
@@ -129,6 +137,12 @@ export async function callOpenAiCompatibleChat(
   try {
     data = JSON.parse(rawBody) as OpenAiCompatibleChatResponse;
   } catch (cause) {
+    console.error(`[ai] ${cfg.providerName} returned a non-JSON response`, {
+      status: response.status,
+      contentType,
+      model,
+      bodySnippet,
+    });
     throw new AiError({
       code: "malformed_response",
       provider: cfg.providerName,
@@ -146,6 +160,12 @@ export async function callOpenAiCompatibleChat(
   }));
 
   if (!text && toolCalls.length === 0) {
+    console.error(`[ai] ${cfg.providerName} returned an empty completion`, {
+      status: response.status,
+      contentType,
+      model,
+      bodySnippet,
+    });
     throw new AiError({
       code: "malformed_response",
       provider: cfg.providerName,
