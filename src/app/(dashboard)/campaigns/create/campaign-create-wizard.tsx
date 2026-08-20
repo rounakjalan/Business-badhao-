@@ -71,6 +71,12 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
   const [generatingIcp, startGeneratingIcp] = useTransition();
   const [icp, setIcp] = useState<Icp | null>(null);
   const [icpError, setIcpError] = useState<string | null>(null);
+  // Guards against a double-click (or clicking both buttons) creating more
+  // than one campaign/ICP — createCampaign has no idempotency of its own,
+  // it just inserts on every call. onClick fires before the browser
+  // submits the form, so this reliably blocks any submission after the
+  // first one, regardless of which button was clicked first.
+  const [submitting, setSubmitting] = useState(false);
 
   const targetAudience = [customerType, location].filter(Boolean).join(" · ");
 
@@ -352,7 +358,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="targetAudience" value={targetAudience} />
             <input type="hidden" name="icp" value={icpForSubmit ? JSON.stringify(icpForSubmit) : ""} />
             <input type="hidden" name="launch" value="false" />
-            <DashButton type="submit" variant="ghost">
+            <DashButton type="submit" variant="ghost" disabled={submitting} onClick={() => setSubmitting(true)}>
               Save as Draft
             </DashButton>
           </form>
@@ -363,8 +369,8 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="targetAudience" value={targetAudience} />
             <input type="hidden" name="icp" value={icpForSubmit ? JSON.stringify(icpForSubmit) : ""} />
             <input type="hidden" name="launch" value="true" />
-            <DashButton type="submit" variant="gradient" disabled={!name.trim()}>
-              Launch Campaign 🚀
+            <DashButton type="submit" variant="gradient" disabled={submitting || !name.trim()} onClick={() => setSubmitting(true)}>
+              {submitting ? "Launching..." : "Launch Campaign 🚀"}
             </DashButton>
           </form>
         </div>
