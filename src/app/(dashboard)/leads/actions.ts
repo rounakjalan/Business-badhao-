@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { runProspectResearch, type ProspectResearchResult } from "@/lib/ai/agents/prospect-research";
 import { runLeadQualification, type LeadQualificationResult } from "@/lib/ai/agents/qualification";
 import { generateOutreach, type OutreachGeneratorResult } from "@/lib/ai/agents/outreach";
+import { getBusinessContext, selectOutreachContext, selectQualificationContext, selectResearchContext } from "@/lib/business-context";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
@@ -71,6 +72,8 @@ export async function runLeadResearchAction(leadId: string): Promise<ProspectRes
   const context = await loadLeadContext(leadId, currentOrg.organizationId);
   if (!context) return { ok: false, message: "Lead not found." };
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   const result = await runProspectResearch({
     organizationId: currentOrg.organizationId,
     leadName: context.leadName,
@@ -79,6 +82,7 @@ export async function runLeadResearchAction(leadId: string): Promise<ProspectRes
     title: context.title,
     campaignName: context.campaignName,
     campaignObjective: context.campaignObjective,
+    businessContext: selectResearchContext(businessContext),
   });
 
   if (result.ok) {
@@ -103,6 +107,8 @@ export async function runLeadQualificationAction(leadId: string): Promise<LeadQu
   const context = await loadLeadContext(leadId, currentOrg.organizationId);
   if (!context) return { ok: false, message: "Lead not found." };
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   const result = await runLeadQualification({
     organizationId: currentOrg.organizationId,
     leadName: context.leadName,
@@ -112,6 +118,7 @@ export async function runLeadQualificationAction(leadId: string): Promise<LeadQu
     researchSummary: context.latestResearchSummary,
     icpCriteria: context.icpCriteria,
     campaignObjective: context.campaignObjective,
+    businessContext: selectQualificationContext(businessContext),
   });
 
   if (result.ok) {
@@ -160,6 +167,8 @@ export async function generateLeadOutreachAction(leadId: string, channel: string
     .limit(1)
     .maybeSingle();
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   return generateOutreach({
     organizationId: currentOrg.organizationId,
     leadName: context.leadName,
@@ -169,6 +178,7 @@ export async function generateLeadOutreachAction(leadId: string, channel: string
     campaignObjective: context.campaignObjective,
     researchSummary: context.latestResearchSummary,
     qualificationReasons: latestScore?.reason ? [latestScore.reason] : [],
+    businessContext: selectOutreachContext(businessContext),
   });
 }
 

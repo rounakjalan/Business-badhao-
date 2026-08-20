@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { runDealAgent, type DealAgentResult } from "@/lib/ai/agents/deal-agent";
 import { runLossAnalysis, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
+import { getBusinessContext, selectDealContext, selectLossAnalysisContext } from "@/lib/business-context";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
@@ -61,6 +62,8 @@ export async function runDealAgentAction(dealId: string): Promise<DealAgentResul
   const context = await loadDealContext(dealId, currentOrg.organizationId);
   if (!context) return { ok: false, message: "Deal not found." };
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   const result = await runDealAgent({
     organizationId: currentOrg.organizationId,
     dealTitle: context.deal.title,
@@ -70,6 +73,7 @@ export async function runDealAgentAction(dealId: string): Promise<DealAgentResul
     leadName: context.leadName,
     channel: context.channel,
     messages: context.messages,
+    businessContext: selectDealContext(businessContext),
   });
 
   if (result.ok) {
@@ -93,6 +97,8 @@ export async function runLossAnalysisAction(dealId: string): Promise<LossAnalysi
   const context = await loadDealContext(dealId, currentOrg.organizationId);
   if (!context) return { ok: false, message: "Deal not found." };
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   const result = await runLossAnalysis({
     organizationId: currentOrg.organizationId,
     dealTitle: context.deal.title,
@@ -102,6 +108,7 @@ export async function runLossAnalysisAction(dealId: string): Promise<LossAnalysi
     leadName: context.leadName,
     campaignObjective: context.campaignObjective,
     messages: context.messages,
+    businessContext: selectLossAnalysisContext(businessContext),
   });
 
   if (result.ok) {

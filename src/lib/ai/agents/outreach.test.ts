@@ -21,6 +21,7 @@ const baseInput = {
   campaignObjective: "Book demo calls",
   researchSummary: null,
   qualificationReasons: [],
+  businessContext: null,
 };
 
 describe("generateOutreach", () => {
@@ -54,5 +55,33 @@ describe("generateOutreach", () => {
     vi.mocked(runHermesCompletion).mockResolvedValue({ ok: false, code: "not_configured", message: "The AI assistant isn't connected yet." });
     const result = await generateOutreach(baseInput);
     expect(result.ok).toBe(false);
+  });
+
+  it("does not fail when there is no business context", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_DRAFT), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+    const result = await generateOutreach({ ...baseInput, businessContext: null });
+    expect(result.ok).toBe(true);
+  });
+
+  it("includes product info, value proposition, and communication rules in the actual Hermes request", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_DRAFT), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await generateOutreach({
+      ...baseInput,
+      businessContext: {
+        businessProfile: null,
+        productsServices: [{ name: "Storefront Ads Package", description: null, category: null, price: null, pricingType: "custom", features: [], benefits: [], availability: "available", specialOffers: null }],
+        valueProposition: { keySellingPoints: ["Only local agency with same-week turnaround"], productBenefits: [] },
+        faqs: [],
+        policies: [],
+        aiCommunicationRules: { brandVoice: "Warm and direct", preferredLanguage: null, formality: null, mustEmphasize: [], mustNeverClaim: ["Guaranteed sales increase"], competitorComparisonRules: null, discountAuthority: null, escalationRules: null, handoffTriggers: [] },
+        mediaReferences: [],
+      },
+    });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("Storefront Ads Package");
+    expect(prompt).toContain("Only local agency with same-week turnaround");
+    expect(prompt).toContain("Guaranteed sales increase");
   });
 });

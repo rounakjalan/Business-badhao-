@@ -28,7 +28,18 @@ function buildFrom(tableData: TableData) {
 const { mockCreateClient } = vi.hoisted(() => ({ mockCreateClient: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mockCreateClient }));
 
-import { getBusinessContext, isBusinessContextEmpty } from "@/lib/business-context";
+import {
+  getBusinessContext,
+  isBusinessContextEmpty,
+  selectDealContext,
+  selectFollowUpContext,
+  selectIntentProductNames,
+  selectLossAnalysisContext,
+  selectOutreachContext,
+  selectQualificationContext,
+  selectResearchContext,
+  type BusinessContext,
+} from "@/lib/business-context";
 
 function mockSupabase(tableData: TableData) {
   mockCreateClient.mockResolvedValue({ from: buildFrom(tableData) });
@@ -183,5 +194,94 @@ describe("getBusinessContext", () => {
     expect(context.businessProfile).toBeNull();
     expect(context.productsServices).toHaveLength(1);
     expect(isBusinessContextEmpty(context)).toBe(false);
+  });
+
+  it("never leaks organization B's data into organization A's context", async () => {
+    mockSupabase({
+      business_profiles: { data: { business_name: "Org A Business", business_description: null, business_category: null, website: null, phone: null, email: null, whatsapp: null, address: null, service_area: null, opening_hours: null, about: null } },
+      products_services: { data: [] },
+      faqs: { data: [] },
+      business_policies: { data: [] },
+      ai_communication_rules: { data: null },
+      media_assets: { data: [] },
+    });
+
+    const contextA = await getBusinessContext("org-A");
+    expect(contextA.businessProfile?.name).toBe("Org A Business");
+    // Every query this call made was scoped to org-A, never org-B.
+    expect(orgIdFilters.every((v) => v === "org-A")).toBe(true);
+    expect(orgIdFilters).not.toContain("org-B");
+  });
+});
+
+describe("agent-specific context selectors", () => {
+  const FULL: BusinessContext = {
+    businessProfile: { name: "Acme", description: null, category: null, about: null, website: null, phone: null, email: null, whatsapp: null, address: null, serviceArea: null, openingHours: null },
+    productsServices: [{ name: "Widget Pro", description: null, category: null, price: 999, pricingType: "fixed", features: [], benefits: [], availability: "available", specialOffers: null }],
+    valueProposition: { keySellingPoints: ["Fastest install in town"], productBenefits: [] },
+    faqs: [{ question: "Refunds?", answer: "Yes, 30 days.", category: null }],
+    policies: [{ policyType: "refund", title: "Refund Policy", content: "30 day refund window." }],
+    aiCommunicationRules: { brandVoice: "Friendly", preferredLanguage: null, formality: null, mustEmphasize: [], mustNeverClaim: ["Guaranteed results"], competitorComparisonRules: null, discountAuthority: null, escalationRules: null, handoffTriggers: [] },
+    mediaReferences: [{ category: "brochure", title: "Catalogue", fileName: "catalogue.pdf" }],
+  };
+
+  it("selectResearchContext includes profile/products/value-proposition, not FAQs/policies/AI rules", () => {
+    const selected = selectResearchContext(FULL);
+    expect(selected.businessProfile).not.toBeNull();
+    expect(selected.productsServices).toHaveLength(1);
+    expect(selected.valueProposition.keySellingPoints).toEqual(["Fastest install in town"]);
+    expect(selected.faqs).toEqual([]);
+    expect(selected.policies).toEqual([]);
+    expect(selected.aiCommunicationRules).toBeNull();
+  });
+
+  it("selectQualificationContext includes profile/products/policies, not FAQs/AI rules", () => {
+    const selected = selectQualificationContext(FULL);
+    expect(selected.businessProfile).not.toBeNull();
+    expect(selected.productsServices).toHaveLength(1);
+    expect(selected.policies).toHaveLength(1);
+    expect(selected.faqs).toEqual([]);
+    expect(selected.aiCommunicationRules).toBeNull();
+  });
+
+  it("selectOutreachContext includes profile/products/value-proposition/FAQs/AI-rules/media, not policies", () => {
+    const selected = selectOutreachContext(FULL);
+    expect(selected.businessProfile).not.toBeNull();
+    expect(selected.faqs).toHaveLength(1);
+    expect(selected.aiCommunicationRules).not.toBeNull();
+    expect(selected.mediaReferences).toHaveLength(1);
+    expect(selected.policies).toEqual([]);
+  });
+
+  it("selectFollowUpContext includes profile/products/FAQs/policies/AI-rules, not media", () => {
+    const selected = selectFollowUpContext(FULL);
+    expect(selected.faqs).toHaveLength(1);
+    expect(selected.policies).toHaveLength(1);
+    expect(selected.aiCommunicationRules).not.toBeNull();
+    expect(selected.mediaReferences).toEqual([]);
+  });
+
+  it("selectDealContext includes products/policies/AI-rules only, not profile/FAQs/media", () => {
+    const selected = selectDealContext(FULL);
+    expect(selected.productsServices).toHaveLength(1);
+    expect(selected.policies).toHaveLength(1);
+    expect(selected.aiCommunicationRules).not.toBeNull();
+    expect(selected.businessProfile).toBeNull();
+    expect(selected.faqs).toEqual([]);
+    expect(selected.mediaReferences).toEqual([]);
+  });
+
+  it("selectLossAnalysisContext includes products/policies only", () => {
+    const selected = selectLossAnalysisContext(FULL);
+    expect(selected.productsServices).toHaveLength(1);
+    expect(selected.policies).toHaveLength(1);
+    expect(selected.businessProfile).toBeNull();
+    expect(selected.faqs).toEqual([]);
+    expect(selected.aiCommunicationRules).toBeNull();
+  });
+
+  it("selectIntentProductNames returns only names — not the full object", () => {
+    const names = selectIntentProductNames(FULL);
+    expect(names).toEqual(["Widget Pro"]);
   });
 });

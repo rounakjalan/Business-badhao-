@@ -25,6 +25,7 @@ const baseInput = {
   leadName: "Rohit Verma",
   campaignObjective: "Book demo calls",
   messages: [{ direction: "inbound", senderType: "lead", body: "That's a bit over our budget." }],
+  businessContext: null,
 };
 
 describe("runLossAnalysis", () => {
@@ -58,5 +59,33 @@ describe("runLossAnalysis", () => {
     vi.mocked(runHermesCompletion).mockResolvedValue({ ok: false, code: "provider_unavailable", message: "The AI provider is temporarily unavailable." });
     const result = await runLossAnalysis(baseInput);
     expect(result.ok).toBe(false);
+  });
+
+  it("does not fail when there is no business context", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_ANALYSIS), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+    const result = await runLossAnalysis({ ...baseInput, businessContext: null });
+    expect(result.ok).toBe(true);
+  });
+
+  it("includes product pricing and policies in the actual Hermes request, alongside real deal/conversation evidence", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_ANALYSIS), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await runLossAnalysis({
+      ...baseInput,
+      businessContext: {
+        businessProfile: null,
+        productsServices: [{ name: "Standard Plan", description: null, category: null, price: 45000, pricingType: "fixed", features: [], benefits: [], availability: "available", specialOffers: null }],
+        valueProposition: { keySellingPoints: [], productBenefits: [] },
+        faqs: [],
+        policies: [{ policyType: "refund", title: "Refund Policy", content: "No refunds after service starts." }],
+        aiCommunicationRules: null,
+        mediaReferences: [],
+      },
+    });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("Standard Plan");
+    expect(prompt).toContain("No refunds after service starts");
+    expect(prompt).toContain("That's a bit over our budget."); // real conversation evidence still present
   });
 });

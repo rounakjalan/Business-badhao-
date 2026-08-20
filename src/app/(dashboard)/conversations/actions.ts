@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { detectIntent, type IntentDetectionResult } from "@/lib/ai/agents/intent";
 import { runFollowUp, type FollowUpResult } from "@/lib/ai/agents/follow-up";
+import { getBusinessContext, selectFollowUpContext, selectIntentProductNames } from "@/lib/business-context";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
@@ -40,11 +41,14 @@ export async function detectIntentAction(conversationId: string): Promise<Intent
   const context = await loadConversationContext(conversationId, currentOrg.organizationId);
   if (!context) return { ok: false, message: "Conversation not found." };
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   const result = await detectIntent({
     organizationId: currentOrg.organizationId,
     leadName: context.leadName,
     channel: context.conversation.channel,
     messages: context.messages,
+    productNames: selectIntentProductNames(businessContext),
   });
 
   if (result.ok) {
@@ -69,12 +73,15 @@ export async function runFollowUpAction(conversationId: string): Promise<FollowU
   const context = await loadConversationContext(conversationId, currentOrg.organizationId);
   if (!context) return { ok: false, message: "Conversation not found." };
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   const result = await runFollowUp({
     organizationId: currentOrg.organizationId,
     leadName: context.leadName,
     channel: context.conversation.channel,
     detectedIntent: context.conversation.intent,
     messages: context.messages,
+    businessContext: selectFollowUpContext(businessContext),
   });
 
   if (result.ok) {

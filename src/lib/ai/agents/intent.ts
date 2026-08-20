@@ -35,13 +35,22 @@ export type IntentDetectionInput = {
   leadName: string;
   channel: string;
   messages: { direction: string; senderType: string; body: string }[];
+  /**
+   * Deliberately minimal — just what's offered (see
+   * selectIntentProductNames in src/lib/business-context.ts), not a full
+   * BusinessContext. Intent classification only needs enough to recognize
+   * "the Home Theatre package" as product interest; FAQs/policies/brand
+   * voice are irrelevant here and would only add cost/latency to a task
+   * that's intentionally routed to a fast model.
+   */
+  productNames: string[];
 };
 
 export type IntentDetectionResult =
   | { ok: true; analysis: IntentAnalysis }
   | { ok: false; message: string };
 
-const SYSTEM_PROMPT = `You are the AI conversation-intelligence agent inside Business Badhao, a customer-acquisition CRM. You are given a message thread between a business and a lead. Analyze the lead's most recent messages in the context of the whole thread.
+const SYSTEM_PROMPT = `You are the AI conversation-intelligence agent inside Business Badhao, a customer-acquisition CRM. You are given a message thread between a business and a lead, and a short list of what the business offers (for recognizing product-interest signals only — treat it as a name list, not a source of prices/policies/claims). Analyze the lead's most recent messages in the context of the whole thread.
 
 Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly these keys:
 {
@@ -66,9 +75,14 @@ export async function detectIntent(input: IntentDetectionInput): Promise<IntentD
     .map((m) => `[${m.direction === "inbound" ? "Lead" : m.senderType}]: ${m.body}`)
     .join("\n");
 
-  const userPrompt = [`Lead name: ${input.leadName}`, `Channel: ${input.channel}`, "", "Conversation:", thread || "(no messages yet)"].join(
-    "\n"
-  );
+  const userPrompt = [
+    `Lead name: ${input.leadName}`,
+    `Channel: ${input.channel}`,
+    `Products/services offered: ${input.productNames.length > 0 ? input.productNames.join(", ") : "not on file"}`,
+    "",
+    "Conversation:",
+    thread || "(no messages yet)",
+  ].join("\n");
 
   const result = await runHermesCompletion({
     organizationId: input.organizationId,

@@ -19,6 +19,7 @@ const baseInput = {
   leadName: "Rohit Verma",
   channel: "whatsapp",
   messages: [{ direction: "inbound", senderType: "lead", body: "Can you send the payment link?" }],
+  productNames: [],
 };
 
 describe("detectIntent", () => {
@@ -59,5 +60,23 @@ describe("detectIntent", () => {
     vi.mocked(runHermesCompletion).mockResolvedValue({ ok: false, code: "rate_limited", message: "The AI provider is rate-limiting requests right now — try again shortly." });
     const result = await detectIntent(baseInput);
     expect(result.ok).toBe(false);
+  });
+
+  it("does not fail when there are no product names on file", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_ANALYSIS), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+    const result = await detectIntent({ ...baseInput, productNames: [] });
+    expect(result.ok).toBe(true);
+  });
+
+  it("sends only product names — not the full Business Knowledge object — into the actual Hermes request", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_ANALYSIS), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await detectIntent({ ...baseInput, productNames: ["Home Theatre Installation", "Annual Maintenance Plan"] });
+
+    const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
+    expect(call.userPrompt).toContain("Home Theatre Installation");
+    expect(call.userPrompt).toContain("Annual Maintenance Plan");
+    // No BUSINESS KNOWLEDGE block (FAQs/policies/brand-voice) — this agent only ever gets a plain name list.
+    expect(call.userPrompt).not.toContain("=== BUSINESS KNOWLEDGE");
   });
 });

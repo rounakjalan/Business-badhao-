@@ -102,6 +102,83 @@ export function isBusinessContextEmpty(context: BusinessContext): boolean {
   );
 }
 
+export const EMPTY_BUSINESS_CONTEXT: BusinessContext = {
+  businessProfile: null,
+  productsServices: [],
+  valueProposition: { keySellingPoints: [], productBenefits: [] },
+  faqs: [],
+  policies: [],
+  aiCommunicationRules: null,
+  mediaReferences: [],
+};
+
+// ---------------------------------------------------------------------------
+// Agent-specific context selection. Each function takes the one full
+// BusinessContext already fetched via getBusinessContext() and returns a
+// same-shaped object with only the categories that agent actually needs —
+// so formatBusinessContext() (src/lib/ai/business-context-prompt.ts) can be
+// reused as-is by every agent, instead of each agent inventing its own
+// formatting. Callers fetch once per request and select per agent; this
+// never re-queries Supabase.
+// ---------------------------------------------------------------------------
+
+/** Lead Research: who this business is and what it sells, so the agent can reason about fit — not FAQs/policies/brand-voice rules, which aren't about the business's facts. */
+export function selectResearchContext(context: BusinessContext): BusinessContext {
+  return { ...EMPTY_BUSINESS_CONTEXT, businessProfile: context.businessProfile, productsServices: context.productsServices, valueProposition: context.valueProposition };
+}
+
+/** Lead Qualification: what's offered, service area (via profile), and policies that can gate fit (e.g. an admission policy) — campaign ICP stays a separate input, passed alongside this, never merged into it. */
+export function selectQualificationContext(context: BusinessContext): BusinessContext {
+  return { ...EMPTY_BUSINESS_CONTEXT, businessProfile: context.businessProfile, productsServices: context.productsServices, policies: context.policies };
+}
+
+/** Personalized Outreach: profile, product/service, value proposition, FAQs as the source of approved claims, brand voice/communication rules, and asset references. */
+export function selectOutreachContext(context: BusinessContext): BusinessContext {
+  return {
+    ...EMPTY_BUSINESS_CONTEXT,
+    businessProfile: context.businessProfile,
+    productsServices: context.productsServices,
+    valueProposition: context.valueProposition,
+    faqs: context.faqs,
+    aiCommunicationRules: context.aiCommunicationRules,
+    mediaReferences: context.mediaReferences,
+  };
+}
+
+/** Follow-up: business/product info, FAQs (for answering questions), relevant policies, and communication rules — conversation history is a separate existing input, untouched. */
+export function selectFollowUpContext(context: BusinessContext): BusinessContext {
+  return {
+    ...EMPTY_BUSINESS_CONTEXT,
+    businessProfile: context.businessProfile,
+    productsServices: context.productsServices,
+    faqs: context.faqs,
+    policies: context.policies,
+    aiCommunicationRules: context.aiCommunicationRules,
+  };
+}
+
+/** Deal Agent: product, pricing/availability (both on products_services), policies (incl. payment), and communication rules — never the full profile/FAQs, this agent is transactional, not introductory. */
+export function selectDealContext(context: BusinessContext): BusinessContext {
+  return { ...EMPTY_BUSINESS_CONTEXT, productsServices: context.productsServices, policies: context.policies, aiCommunicationRules: context.aiCommunicationRules };
+}
+
+/** Loss Analysis: product/pricing and policies only — deal info and conversation/outreach history are separate existing inputs. */
+export function selectLossAnalysisContext(context: BusinessContext): BusinessContext {
+  return { ...EMPTY_BUSINESS_CONTEXT, productsServices: context.productsServices, policies: context.policies };
+}
+
+/**
+ * Intent Detection: deliberately NOT a BusinessContext at all — just the
+ * names of what's offered, so the model can recognize e.g. "the Home
+ * Theatre package" as product-interest intent. Everything else (FAQs,
+ * policies, brand voice, pricing) is irrelevant to classifying intent and
+ * is never sent here, per the explicit "don't send the whole object"
+ * requirement for this agent specifically.
+ */
+export function selectIntentProductNames(context: BusinessContext): string[] {
+  return context.productsServices.map((p) => p.name);
+}
+
 export async function getBusinessContext(organizationId: string): Promise<BusinessContext> {
   const supabase = await createClient();
 
