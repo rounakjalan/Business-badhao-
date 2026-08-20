@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { runCampaignPlanner, type CampaignPlan, type CampaignPlannerResult } from "@/lib/ai/agents/campaign-planner";
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
+import { getBusinessContext } from "@/lib/business-context";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { TablesUpdate } from "@/types/database.types";
@@ -20,6 +21,8 @@ export async function generateCampaignPlan(input: {
     return { ok: false, message: "Sign in to a workspace to generate a campaign plan." };
   }
 
+  const businessContext = await getBusinessContext(currentOrg.organizationId);
+
   return runCampaignPlanner({
     organizationId: currentOrg.organizationId,
     organizationName: currentOrg.organizationName,
@@ -28,6 +31,7 @@ export async function generateCampaignPlan(input: {
     description: input.description,
     customerType: input.customerType,
     location: input.location,
+    businessContext,
   });
 }
 

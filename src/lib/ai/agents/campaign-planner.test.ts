@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BusinessContext } from "@/lib/business-context";
 
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
@@ -28,6 +29,51 @@ const baseInput = {
   description: "",
   customerType: "retail owners",
   location: "Delhi",
+  businessContext: null,
+};
+
+const FULL_BUSINESS_CONTEXT: BusinessContext = {
+  businessProfile: {
+    name: "Acme Electronics",
+    description: "Neighborhood electronics retailer",
+    category: "Retail electronics",
+    about: null,
+    website: null,
+    phone: null,
+    email: null,
+    whatsapp: null,
+    address: null,
+    serviceArea: "Delhi NCR",
+    openingHours: null,
+  },
+  productsServices: [
+    {
+      name: "Home Theatre Installation",
+      description: "Full setup and calibration",
+      category: "Installation",
+      price: 4999,
+      pricingType: "fixed",
+      features: ["Wall mounting", "Cable management"],
+      benefits: ["Same-day service"],
+      availability: "available",
+      specialOffers: "10% off in March",
+    },
+  ],
+  valueProposition: { keySellingPoints: ["Only certified installers in the area"], productBenefits: ["Same-day service"] },
+  faqs: [{ question: "Do you offer warranty?", answer: "Yes, 1 year on installation.", category: "Warranty" }],
+  policies: [{ policyType: "refund", title: "Refund Policy", content: "Full refund within 7 days if uninstalled." }],
+  aiCommunicationRules: {
+    brandVoice: "Friendly and technical",
+    preferredLanguage: "English",
+    formality: "Casual",
+    mustEmphasize: ["Certified installers"],
+    mustNeverClaim: ["Same-day service outside Delhi NCR"],
+    competitorComparisonRules: null,
+    discountAuthority: null,
+    escalationRules: null,
+    handoffTriggers: ["Customer asks for a refund"],
+  },
+  mediaReferences: [{ category: "brochure", title: "2026 Catalogue", fileName: "catalogue.pdf" }],
 };
 
 describe("runCampaignPlanner", () => {
@@ -81,5 +127,83 @@ describe("runCampaignPlanner", () => {
     const result = await runCampaignPlanner(baseInput);
 
     expect(result.ok).toBe(false);
+  });
+
+  describe("business context integration", () => {
+    it("does not fail when the organization has no Business Knowledge on file", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValue({
+        ok: true,
+        text: JSON.stringify(VALID_PLAN),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      const result = await runCampaignPlanner({ ...baseInput, businessContext: null });
+
+      expect(result).toEqual({ ok: true, plan: VALID_PLAN });
+      const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
+      expect(call.userPrompt).toContain("No Business Knowledge is on file for this organization yet.");
+    });
+
+    it("sends products/services, FAQs, policies, and AI communication rules as a structured, labeled business-knowledge block", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValue({
+        ok: true,
+        text: JSON.stringify(VALID_PLAN),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      await runCampaignPlanner({ ...baseInput, businessContext: FULL_BUSINESS_CONTEXT });
+
+      const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+
+      // Products/services
+      expect(prompt).toContain("PRODUCTS / SERVICES:");
+      expect(prompt).toContain("Home Theatre Installation");
+      // FAQs
+      expect(prompt).toContain("FAQs:");
+      expect(prompt).toContain("Do you offer warranty?");
+      // Policies
+      expect(prompt).toContain("BUSINESS POLICIES:");
+      expect(prompt).toContain("Full refund within 7 days if uninstalled.");
+      // AI communication rules
+      expect(prompt).toContain("AI COMMUNICATION RULES:");
+      expect(prompt).toContain("Must NEVER claim: Same-day service outside Delhi NCR");
+    });
+
+    it("keeps Business Knowledge and campaign input in clearly separate, labeled sections of the same prompt", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValue({
+        ok: true,
+        text: JSON.stringify(VALID_PLAN),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      await runCampaignPlanner({ ...baseInput, campaignName: "Spring Sale", businessContext: FULL_BUSINESS_CONTEXT });
+
+      const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+      const businessKnowledgeIdx = prompt.indexOf("=== BUSINESS KNOWLEDGE");
+      const campaignInputIdx = prompt.indexOf("=== CAMPAIGN INPUT");
+
+      expect(businessKnowledgeIdx).toBeGreaterThanOrEqual(0);
+      expect(campaignInputIdx).toBeGreaterThan(businessKnowledgeIdx);
+      // The campaign's own name lives in the CAMPAIGN INPUT section, not mixed into BUSINESS KNOWLEDGE.
+      expect(prompt.indexOf("Spring Sale")).toBeGreaterThan(campaignInputIdx);
+    });
+
+    it("instructs the model that Business Knowledge is authoritative and must not be fabricated beyond", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValue({
+        ok: true,
+        text: JSON.stringify(VALID_PLAN),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      await runCampaignPlanner({ ...baseInput, businessContext: FULL_BUSINESS_CONTEXT });
+
+      const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
+      expect(call.systemPrompt).toContain("authoritative");
+      expect(call.systemPrompt.toLowerCase()).toContain("never invent a product, price, policy");
+    });
   });
 });
