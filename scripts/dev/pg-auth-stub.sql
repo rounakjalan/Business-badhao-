@@ -58,3 +58,32 @@ alter default privileges in schema public
   grant select, insert, update, delete on tables to authenticated;
 alter default privileges in schema public
   grant select on tables to anon;
+
+-- Minimal stand-in for Supabase Storage's `storage.buckets`, referenced by
+-- migrations that seed a default bucket. Never applied to a real Supabase
+-- project (Supabase already provides the real `storage` schema).
+create schema if not exists storage;
+
+create table if not exists storage.buckets (
+  id text primary key,
+  name text not null,
+  public boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists storage.objects (
+  id uuid primary key default gen_random_uuid(),
+  bucket_id text references storage.buckets(id),
+  name text,
+  owner uuid,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table storage.objects enable row level security;
+
+-- Matches Supabase's real storage.foldername(): splits an object path on
+-- "/" and drops the file name, leaving just the folder segments.
+create or replace function storage.foldername(name text) returns text[]
+  language sql immutable
+  as $$ select (regexp_split_to_array(name, '/'))[1 : array_length(regexp_split_to_array(name, '/'), 1) - 1] $$;

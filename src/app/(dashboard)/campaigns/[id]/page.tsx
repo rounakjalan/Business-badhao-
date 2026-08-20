@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { CampaignDetailTabs } from "@/app/(dashboard)/campaigns/[id]/campaign-detail-tabs";
+import { getLeadDiscoveryStateAction } from "@/app/(dashboard)/campaigns/actions";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -23,7 +24,7 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
         ?.criteria ?? null
     : null;
 
-  const [leads, conversations, deals] = await Promise.all([
+  const [leads, conversations, deals, discovery] = await Promise.all([
     supabase.from("leads").select("id, qualification_status").eq("campaign_id", id),
     supabase
       .from("conversations")
@@ -31,6 +32,7 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
       .eq("campaign_id", id)
       .order("created_at", { ascending: false }),
     supabase.from("deals").select("id, title, status, value, currency, created_at").eq("campaign_id", id).order("created_at", { ascending: false }),
+    getLeadDiscoveryStateAction(id),
   ]);
 
   const leadCount = leads.data?.length ?? 0;
@@ -46,6 +48,7 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
       conversations={conversations.data ?? []}
       deals={deals.data ?? []}
       revenue={revenue}
+      discovery={discovery}
     />
   );
 }

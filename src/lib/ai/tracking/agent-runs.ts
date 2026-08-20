@@ -43,7 +43,7 @@ export async function createAgentRun(
 
 export async function completeAgentRun(
   run: AgentRunHandle | null,
-  status: "completed" | "failed",
+  status: "completed" | "failed" | "partially_completed",
   output: Json
 ): Promise<void> {
   if (!run) return;

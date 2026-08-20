@@ -2,14 +2,22 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { updateCampaignStatus } from "@/app/(dashboard)/campaigns/actions";
+import {
+  updateCampaignStatus,
+  startLeadDiscoveryAction,
+  type DiscoveredLeadRow,
+  type DiscoveredProspectSummary,
+  type LeadDiscoveryActionResult,
+} from "@/app/(dashboard)/campaigns/actions";
 import { IcpSchema, type Icp } from "@/lib/ai/agents/icp-schema";
+import { DarkAlert } from "@/components/dashboard-ui/alert";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkCard } from "@/components/dashboard-ui/card";
 import { CampaignStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { DataTable } from "@/components/dashboard-ui/table";
 import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
-import { ConversationsIcon, DealsIcon, SparklesIcon } from "@/components/ui/icons";
+import { ConversationsIcon, DealsIcon, ProspectsIcon, SparklesIcon } from "@/components/ui/icons";
+import type { Json } from "@/types/database.types";
 import { formatCurrency, formatDate } from "@/lib/format";
 
 const TABS = ["Overview", "ICP", "Lead Discovery", "Conversations", "Deals", "Activity"] as const;
@@ -26,6 +34,10 @@ type Campaign = {
 
 type ConversationRow = { id: string; channel: string; status: string; intent: string | null; created_at: string };
 type DealRow = { id: string; title: string; status: string; value: number; currency: string; created_at: string };
+type DiscoveryState = {
+  lastRun: { status: string; startedAt: string | null; completedAt: string | null; output: Json } | null;
+  discoveredLeads: DiscoveredLeadRow[];
+};
 
 export function CampaignDetailTabs({
   campaign,
@@ -35,6 +47,7 @@ export function CampaignDetailTabs({
   conversations,
   deals,
   revenue,
+  discovery,
 }: {
   campaign: Campaign;
   /** Raw jsonb from ideal_customer_profiles.criteria — validated below, since campaigns created before the ICP step shipped store the old plan-derived shape. */
@@ -44,6 +57,7 @@ export function CampaignDetailTabs({
   conversations: ConversationRow[];
   deals: DealRow[];
   revenue: number;
+  discovery: DiscoveryState;
 }) {
   const parsedIcp = icp ? IcpSchema.safeParse(icp) : null;
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
@@ -130,7 +144,7 @@ export function CampaignDetailTabs({
 
         {tab === "ICP" ? <IcpTab icp={parsedIcp?.success ? parsedIcp.data : null} targetAudience={campaign.target_audience} /> : null}
 
-        {tab === "Lead Discovery" ? <LeadDiscoveryPreview /> : null}
+        {tab === "Lead Discovery" ? <LeadDiscoveryTab campaignId={campaign.id} hasIcp={Boolean(icp)} discovery={discovery} /> : null}
 
         {tab === "Conversations" ? (
           conversations.length === 0 ? (
@@ -214,54 +228,198 @@ function IcpTab({ icp, targetAudience }: { icp: Icp | null; targetAudience: stri
   );
 }
 
-function LeadDiscoveryPreview() {
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
+const DISCOVERY_ERROR_TITLES: Record<string, string> = {
+  unauthorized: "Sign-in required",
+  no_icp: "No Ideal Customer Profile yet",
+  already_running: "Discovery already running",
+  not_configured: "Search provider not configured",
+  provider_error: "Discovery run failed",
+};
 
-  const start = () => {
-    setRunning(true);
-    setProgress(0);
-    const interval = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 100) {
-          clearInterval(interval);
-          setRunning(false);
-          return 100;
-        }
-        return p + 10;
-      });
-    }, 250);
+type LastRunOutput = {
+  message?: string;
+  prospectsFound?: number;
+  newLeadsCreated?: number;
+  duplicatesSkipped?: number;
+  queriesRun?: string[];
+  queriesFailed?: string[];
+};
+
+function LeadDiscoveryTab({
+  campaignId,
+  hasIcp,
+  discovery,
+}: {
+  campaignId: string;
+  hasIcp: boolean;
+  discovery: DiscoveryState;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<LeadDiscoveryActionResult | null>(null);
+
+  // Guards against duplicate discovery runs from a double-click, and against
+  // starting a second run while the server already reports one in flight.
+  const alreadyRunning = discovery.lastRun?.status === "running";
+
+  const start = async () => {
+    if (submitting || alreadyRunning) return;
+    setSubmitting(true);
+    setResult(null);
+    try {
+      setResult(await startLeadDiscoveryAction(campaignId));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
+  if (!hasIcp) {
+    return (
+      <DarkEmptyState
+        icon={ProspectsIcon}
+        title="No Ideal Customer Profile yet"
+        description="Lead Discovery searches for real prospects that match this campaign's saved ICP. Generate or save an ICP on the ICP tab first."
+      />
+    );
+  }
+
+  const lastRunOutput = (discovery.lastRun?.output ?? null) as LastRunOutput | null;
+
   return (
-    <div className="max-w-2xl space-y-5">
-      <DarkCard className="p-5 text-sm text-bb-text-2">
-        <p>
-          AI-powered lead discovery isn&apos;t connected yet — this is a preview of what running discovery will look like. Add
-          leads manually for now.
-        </p>
+    <div className="max-w-3xl space-y-5">
+      <DarkCard className="p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-sm text-bb-text-2">
+            <p className="font-medium text-bb-text">Real prospect search, grounded in this campaign&apos;s ICP.</p>
+            <p className="mt-1 text-bb-text-3">
+              Every result is backed by an actual search result — company, source link, and the exact evidence found. Nothing
+              here is invented.
+            </p>
+          </div>
+          <DashButton variant="gradient" onClick={start} disabled={submitting || alreadyRunning}>
+            <SparklesIcon className="h-3.5 w-3.5" />
+            {submitting ? "Running discovery..." : alreadyRunning ? "Discovery in progress..." : "Start Discovery"}
+          </DashButton>
+        </div>
       </DarkCard>
-      {running ? (
-        <DarkCard className="border-bb-indigo/30 p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm font-medium text-bb-indigo-2">
-              <span className="bb-animate-pulse-dot h-2 w-2 rounded-full bg-bb-indigo" />
-              Discovery running (preview)...
+
+      {result && !result.ok ? (
+        <DarkAlert variant="error">
+          <span className="font-medium">{DISCOVERY_ERROR_TITLES[result.code] ?? "Discovery failed"}.</span> {result.message}
+        </DarkAlert>
+      ) : null}
+
+      {result && result.ok ? (
+        <DarkCard className="border-bb-indigo/30 p-5 text-sm">
+          <div className="mb-3 flex items-center gap-2 font-medium text-bb-indigo-2">
+            <span className="h-2 w-2 rounded-full bg-bb-indigo" />
+            {result.status === "completed" ? "Discovery completed" : "Discovery partially completed"}
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <DiscoveryStat label="Found" value={result.prospectsFound} />
+            <DiscoveryStat label="New leads" value={result.newLeadsCreated} />
+            <DiscoveryStat label="Duplicates skipped" value={result.duplicatesSkipped} />
+          </div>
+          {result.queriesFailed.length > 0 ? (
+            <p className="mt-3 text-xs text-bb-amber">
+              {result.queriesFailed.length} of {result.queriesRun.length + result.queriesFailed.length} search queries failed —
+              results below are from the queries that succeeded.
+            </p>
+          ) : null}
+          {result.prospects.length > 0 ? (
+            <div className="mt-4 space-y-3">
+              {result.prospects.map((p, i) => (
+                <ProspectCard key={`${p.sourceUrl}-${i}`} prospect={p} />
+              ))}
             </div>
-            <span className="font-jetbrains text-sm text-bb-text-3">{progress}%</span>
-          </div>
-          <div className="h-2 rounded-full bg-bb-navy-3">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-bb-indigo to-bb-violet transition-all"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
+          ) : (
+            <p className="mt-3 text-bb-text-3">No new matching prospects were found this run.</p>
+          )}
         </DarkCard>
       ) : null}
-      <DashButton variant="gradient" onClick={start} disabled={running}>
-        <SparklesIcon className="h-3.5 w-3.5" />
-        {running ? "Running preview..." : "Preview Discovery"}
-      </DashButton>
+
+      {!result && discovery.lastRun ? (
+        <DarkCard className="p-5 text-sm text-bb-text-2">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="font-medium text-bb-text">Last run:</span>
+            <span className="capitalize">{discovery.lastRun.status.replace(/_/g, " ")}</span>
+            {discovery.lastRun.completedAt ? <span className="text-bb-text-3">· {formatDate(discovery.lastRun.completedAt)}</span> : null}
+          </div>
+          {lastRunOutput?.message ? <p className="text-bb-text-3">{lastRunOutput.message}</p> : null}
+          {lastRunOutput?.prospectsFound !== undefined ? (
+            <div className="mt-3 grid grid-cols-3 gap-3 text-center">
+              <DiscoveryStat label="Found" value={lastRunOutput.prospectsFound ?? 0} />
+              <DiscoveryStat label="New leads" value={lastRunOutput.newLeadsCreated ?? 0} />
+              <DiscoveryStat label="Duplicates skipped" value={lastRunOutput.duplicatesSkipped ?? 0} />
+            </div>
+          ) : null}
+        </DarkCard>
+      ) : null}
+
+      {discovery.discoveredLeads.length > 0 ? (
+        <div>
+          <div className="mb-2 text-xs font-medium text-bb-text-3">DISCOVERED LEADS ({discovery.discoveredLeads.length})</div>
+          <div className="space-y-3">
+            {discovery.discoveredLeads.map((lead) => (
+              <DiscoveredLeadCard key={lead.leadId} lead={lead} />
+            ))}
+          </div>
+        </div>
+      ) : !result && !discovery.lastRun ? (
+        <DarkEmptyState
+          icon={ProspectsIcon}
+          title="No discovery runs yet"
+          description="Start Discovery to search for real prospects matching this campaign's ICP."
+        />
+      ) : null}
     </div>
+  );
+}
+
+function DiscoveryStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg bg-bb-navy-3 p-3">
+      <div className="font-jetbrains text-sm font-semibold text-bb-text">{value}</div>
+      <div className="mt-0.5 text-xs text-bb-text-3">{label}</div>
+    </div>
+  );
+}
+
+function normalizeHref(website: string): string {
+  return /^https?:\/\//i.test(website) ? website : `https://${website}`;
+}
+
+function ProspectCard({ prospect }: { prospect: DiscoveredProspectSummary }) {
+  return (
+    <div className="rounded-lg border border-bb-border bg-bb-navy p-4 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium text-bb-text">{prospect.companyName}</span>
+        {prospect.website ? (
+          <a href={normalizeHref(prospect.website)} target="_blank" rel="noreferrer" className="text-xs text-bb-indigo-2 hover:underline">
+            {prospect.website}
+          </a>
+        ) : null}
+      </div>
+      <div className="mt-1 text-xs text-bb-text-3">
+        {[prospect.industry, prospect.location].filter(Boolean).join(" · ") || "No additional details found"}
+      </div>
+      <p className="mt-2 text-xs text-bb-text-2">&ldquo;{prospect.evidenceSnippet}&rdquo;</p>
+      <a href={prospect.sourceUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-bb-indigo-2 hover:underline">
+        View source →
+      </a>
+    </div>
+  );
+}
+
+function DiscoveredLeadCard({ lead }: { lead: DiscoveredLeadRow }) {
+  return (
+    <Link href={`/leads/${lead.leadId}`} className="block rounded-lg border border-bb-border bg-bb-navy p-4 text-sm transition-colors hover:border-bb-indigo/30">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium text-bb-text">{lead.companyName ?? "Unnamed prospect"}</span>
+        <span className="text-xs capitalize text-bb-text-3">{lead.leadStatus}</span>
+      </div>
+      <div className="mt-1 text-xs text-bb-text-3">{[lead.industry, lead.location].filter(Boolean).join(" · ") || "No additional details"}</div>
+      {lead.evidenceSnippet ? <p className="mt-2 text-xs text-bb-text-2">&ldquo;{lead.evidenceSnippet}&rdquo;</p> : null}
+      {lead.discoveredAt ? <p className="mt-2 text-xs text-bb-text-3">Discovered {formatDate(lead.discoveredAt)}</p> : null}
+    </Link>
   );
 }

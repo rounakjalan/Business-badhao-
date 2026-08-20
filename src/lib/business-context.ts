@@ -167,6 +167,17 @@ export function selectLossAnalysisContext(context: BusinessContext): BusinessCon
   return { ...EMPTY_BUSINESS_CONTEXT, productsServices: context.productsServices, policies: context.policies };
 }
 
+/** Lead Discovery: profile, products/services, value proposition, and relevant policies — context for interpreting the ICP into search queries, never the primary target (the ICP is). No FAQs/media — irrelevant to finding prospects. */
+export function selectDiscoveryContext(context: BusinessContext): BusinessContext {
+  return {
+    ...EMPTY_BUSINESS_CONTEXT,
+    businessProfile: context.businessProfile,
+    productsServices: context.productsServices,
+    valueProposition: context.valueProposition,
+    policies: context.policies,
+  };
+}
+
 /**
  * Intent Detection: deliberately NOT a BusinessContext at all — just the
  * names of what's offered, so the model can recognize e.g. "the Home

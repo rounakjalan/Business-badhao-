@@ -723,7 +723,7 @@ export interface Database {
           id: string;
           organization_id: string;
           agent_type: string;
-          status: "pending" | "running" | "completed" | "failed";
+          status: "pending" | "running" | "completed" | "failed" | "partially_completed";
           input: Json;
           output: Json;
           started_at: string | null;
@@ -734,7 +734,7 @@ export interface Database {
           id?: string;
           organization_id: string;
           agent_type: string;
-          status?: "pending" | "running" | "completed" | "failed";
+          status?: "pending" | "running" | "completed" | "failed" | "partially_completed";
           input?: Json;
           output?: Json;
           started_at?: string | null;
@@ -745,7 +745,7 @@ export interface Database {
           id?: string;
           organization_id?: string;
           agent_type?: string;
-          status?: "pending" | "running" | "completed" | "failed";
+          status?: "pending" | "running" | "completed" | "failed" | "partially_completed";
           input?: Json;
           output?: Json;
           started_at?: string | null;
