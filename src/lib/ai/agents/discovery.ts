@@ -302,7 +302,16 @@ async function searchWithFallback(
   exaApiKey: string | undefined,
   diag?: ProviderDiagnostics
 ): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
-  const tavilyResult = await tavilySearch(query, tavilyApiKey, diag);
+  // [TEMP-DIAG] Verification-only switch: when LEAD_DISCOVERY_DIAG_FORCE_TAVILY_FAIL=1
+  // the Tavily call is skipped and treated as failed, so the Exa fallback path can be
+  // proven to execute for real. Never touches the real TAVILY_API_KEY. Off unless the
+  // env var is explicitly set; remove with the rest of the [TEMP-DIAG] blocks.
+  const forceTavilyFail = process.env.LEAD_DISCOVERY_DIAG_FORCE_TAVILY_FAIL === "1";
+  if (forceTavilyFail) console.log("[LeadDiscovery] [TEMP-DIAG] forcing Tavily failure to verify Exa fallback"); // [TEMP-DIAG]
+
+  const tavilyResult = forceTavilyFail
+    ? ({ ok: false, message: "[TEMP-DIAG] forced Tavily failure for fallback verification" } as const) // [TEMP-DIAG]
+    : await tavilySearch(query, tavilyApiKey, diag);
   if (tavilyResult.ok) return tavilyResult;
   if (!exaApiKey) {
     console.log("[LeadDiscovery] Tavily failed and EXA_API_KEY is not set — no fallback available"); // [TEMP-DIAG]
