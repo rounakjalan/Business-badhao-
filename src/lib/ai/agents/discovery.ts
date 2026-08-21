@@ -116,7 +116,15 @@ async function generateDiscoveryQueries(
     taskType: "LEAD_DISCOVERY",
     systemPrompt: QUERY_SYSTEM_PROMPT,
     userPrompt,
-    maxTokens: 400,
+    // Both LEAD_DISCOVERY calls run on reasoning models (OpenRouter's
+    // Nemotron, Groq's gpt-oss), which spend part of the completion budget
+    // on reasoning before emitting any JSON. In JSON mode Groq rejects the
+    // whole request with HTTP 400 json_validate_failed / "max completion
+    // tokens reached before generating a valid document" when the budget
+    // runs out mid-document — observed in production killing entire
+    // discovery runs. These ceilings leave room for that reasoning; the
+    // response itself is still just a few short strings.
+    maxTokens: 1200,
     temperature: 0.4,
     responseFormat: "json",
   });
@@ -286,11 +294,46 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/**
+ * Identity of a *page*, for matching a model-cited URL back to the search
+ * result it came from: host (minus "www.") + path (minus any trailing
+ * slash) + query, scheme- and case-insensitive. Deliberately keeps the path
+ * and query — two different pages on the same site must never collide, or
+ * the grounding check would start accepting the wrong source.
+ */
+function canonicalizeUrl(url: string): string | null {
+  try {
+    const withScheme = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    const parsed = new URL(withScheme);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (!host) return null;
+    const path = parsed.pathname.replace(/\/+$/, "");
+    return `${host}${path}${parsed.search}`;
+  } catch {
+    return null;
+  }
+}
+
 async function extractProspectsFromResults(
   criteria: DiscoveryCriteria,
   searchesByQuery: { query: string; results: SearchHit[] }[]
 ): Promise<{ ok: true; prospects: DiscoveredProspect[] } | { ok: false; message: string }> {
-  const validUrls = new Set(searchesByQuery.flatMap((s) => s.results.map((r) => r.url)));
+  // Index the real search hits by a canonical form of their URL. The model
+  // reliably cites the right *page* but often reformats the URL slightly
+  // (adds/drops a trailing slash, drops "www.", changes scheme or case).
+  // A byte-exact match against the model's string therefore threw away
+  // perfectly good, genuinely-sourced prospects — the whole extraction
+  // could come back empty even though every result was real. Matching
+  // canonically keeps the anti-fabrication guarantee (an invented URL still
+  // has a different host/path and is still dropped) while no longer losing
+  // real ones to formatting noise.
+  const realHitByCanonicalUrl = new Map<string, SearchHit>();
+  for (const search of searchesByQuery) {
+    for (const hit of search.results) {
+      const key = canonicalizeUrl(hit.url);
+      if (key && !realHitByCanonicalUrl.has(key)) realHitByCanonicalUrl.set(key, hit);
+    }
+  }
 
   const resultsText = searchesByQuery
     .flatMap((s) =>
@@ -314,7 +357,9 @@ async function extractProspectsFromResults(
     taskType: "LEAD_DISCOVERY",
     systemPrompt: EXTRACTION_SYSTEM_PROMPT,
     userPrompt,
-    maxTokens: 1800,
+    // Headroom for reasoning tokens plus a multi-prospect JSON document —
+    // see the note on the query-generation call above.
+    maxTokens: 6000,
     temperature: 0.2,
     responseFormat: "json",
   });
@@ -326,8 +371,30 @@ async function extractProspectsFromResults(
 
   // Anti-fabrication guard: drop anything citing a URL that wasn't
   // actually in the search results — the model is not trusted to have
-  // cited real evidence just because it was instructed to.
-  const grounded = parsed.data.prospects.filter((p) => validUrls.has(p.sourceUrl));
+  // cited real evidence just because it was instructed to. Anything that
+  // survives is rewritten to carry the provider's own URL and, when the
+  // model's quote can't be found in the real page text, the provider's own
+  // excerpt — so a stored prospect's source and evidence always come from
+  // the actual search result rather than from the model's rendering of it.
+  const grounded: DiscoveredProspect[] = [];
+  for (const prospect of parsed.data.prospects) {
+    const companyName = prospect.companyName.trim();
+    if (!companyName) continue;
+
+    const canonical = canonicalizeUrl(prospect.sourceUrl);
+    const realHit = canonical ? realHitByCanonicalUrl.get(canonical) : undefined;
+    if (!realHit) continue;
+
+    const quote = prospect.evidenceSnippet.trim();
+    const quoteIsReal = quote.length > 0 && realHit.content.includes(quote);
+
+    grounded.push({
+      ...prospect,
+      companyName,
+      sourceUrl: realHit.url,
+      evidenceSnippet: quoteIsReal || !realHit.content ? quote : truncate(realHit.content, 300),
+    });
+  }
 
   return { ok: true, prospects: grounded };
 }

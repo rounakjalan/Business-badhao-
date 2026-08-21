@@ -551,6 +551,129 @@ describe("lead discovery", () => {
     });
   });
 
+  describe("structured extraction from real search results", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "tavily-key";
+      delete process.env.EXA_API_KEY;
+    });
+
+    /** Runs one discovery pass where Tavily returns SEARCH_HITS and the model replies with `extractionText`. */
+    async function runExtraction(extractionText: string) {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: extractionText, provider: "groq", model: "openai/gpt-oss-120b" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) }));
+      return new TavilyDiscoveryProvider().discover(baseCriteria);
+    }
+
+    it("converts a valid model response into a persisted-shape prospect", async () => {
+      const result = await runExtraction(JSON.stringify(EXTRACTION_RESPONSE));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects).toHaveLength(1);
+      expect(result.prospects[0]).toMatchObject({
+        companyName: "Sharma Boutique",
+        sourceUrl: "https://sharmaboutique.example/about",
+      });
+    });
+
+    it("accepts a code-fenced JSON response", async () => {
+      const result = await runExtraction("```json\n" + JSON.stringify(EXTRACTION_RESPONSE) + "\n```");
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects).toHaveLength(1);
+    });
+
+    it("keeps a prospect whose cited URL differs only in formatting, and stores the provider's real URL", async () => {
+      // Same page, reformatted by the model: scheme, "www." and trailing slash.
+      const reformatted = {
+        prospects: [{ ...EXTRACTION_RESPONSE.prospects[0], sourceUrl: "HTTP://WWW.sharmaboutique.example/about/" }],
+      };
+
+      const result = await runExtraction(JSON.stringify(reformatted));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects).toHaveLength(1);
+      // Stored URL is the one the search provider actually returned, not the model's rendering.
+      expect(result.prospects[0].sourceUrl).toBe("https://sharmaboutique.example/about");
+    });
+
+    it("still drops a fabricated URL — a different path on a real host is not a match", async () => {
+      const fabricated = {
+        prospects: [{ ...EXTRACTION_RESPONSE.prospects[0], sourceUrl: "https://sharmaboutique.example/invented-page" }],
+      };
+
+      const result = await runExtraction(JSON.stringify(fabricated));
+
+      expect(result).toMatchObject({ ok: true, prospects: [] });
+    });
+
+    it("replaces an evidence quote that does not appear in the real page text", async () => {
+      const invented = {
+        prospects: [{ ...EXTRACTION_RESPONSE.prospects[0], evidenceSnippet: "A sentence the page never actually contained." }],
+      };
+
+      const result = await runExtraction(JSON.stringify(invented));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      // Evidence is taken from the real search result instead of the model's invention.
+      expect(result.prospects[0].evidenceSnippet).not.toContain("never actually contained");
+      expect(SEARCH_HITS[0].content).toContain(result.prospects[0].evidenceSnippet.replace(/…$/, ""));
+    });
+
+    it("returns an honest failure (not a fabricated prospect) on a malformed model response", async () => {
+      const result = await runExtraction("this is not json at all");
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected failure");
+      expect(result.code).toBe("provider_error");
+    });
+
+    it("returns zero prospects when the model legitimately finds none", async () => {
+      const result = await runExtraction(JSON.stringify({ prospects: [] }));
+      expect(result).toMatchObject({ ok: true, prospects: [] });
+    });
+
+    it("drops an entry with an empty company name", async () => {
+      const nameless = { prospects: [{ ...EXTRACTION_RESPONSE.prospects[0], companyName: "   " }] };
+      const result = await runExtraction(JSON.stringify(nameless));
+      expect(result).toMatchObject({ ok: true, prospects: [] });
+    });
+
+    it("extracts from Exa results after a Tavily failure, preserving Exa's source URL", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXA_EXTRACTION_RESPONSE), provider: "groq", model: "openai/gpt-oss-120b" });
+      vi.stubGlobal(
+        "fetch",
+        mockFetchRouter({
+          tavily: async () => new Response("rate limited", { status: 429 }),
+          exa: async () => new Response(JSON.stringify({ results: EXA_HITS }), { status: 200 }),
+        })
+      );
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects).toHaveLength(1);
+      expect(result.prospects[0].companyName).toBe("Mehta Fashions");
+      expect(result.prospects[0].sourceUrl).toBe("https://mehtafashions.example/about");
+    });
+
+    it("requests a token budget large enough for a reasoning model to finish the JSON document", async () => {
+      await runExtraction(JSON.stringify(EXTRACTION_RESPONSE));
+      const extractionCall = vi.mocked(runHermesCompletion).mock.calls[1][0];
+      expect(extractionCall.responseFormat).toBe("json");
+      expect(extractionCall.maxTokens ?? 0).toBeGreaterThanOrEqual(4000);
+    });
+  });
+
   describe("Discovery/Qualification/Research boundary", () => {
     it("a DiscoveredProspect never carries a qualification score or research summary — those stages own that data, not Discovery", () => {
       const keys = Object.keys(EXTRACTION_RESPONSE.prospects[0]);

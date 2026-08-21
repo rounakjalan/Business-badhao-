@@ -96,9 +96,29 @@ function mapErrorCodeToAiError(provider: AiProviderName, code: number, message: 
   return new AiError({ code: "unknown", provider, message, statusCode: code });
 }
 
+/**
+ * Providers enforcing JSON mode server-side reject the *request* when the
+ * model fails to close a valid JSON document — Groq returns HTTP 400 with
+ * code "json_validate_failed" and a failed_generation of "max completion
+ * tokens reached before generating a valid document". A plain 400 maps to
+ * `unknown`, which is not retryable, so a single such hiccup permanently
+ * failed the whole run (observed killing real Lead Discovery runs). It is
+ * really the same transient generation problem as an empty completion, so
+ * it maps to malformed_response, which the existing retry path covers.
+ */
+function isTransientJsonGenerationFailure(status: number, bodyText: string): boolean {
+  return status === 400 && /json_validate_failed|failed to generate json/i.test(bodyText);
+}
+
 function mapHttpErrorToAiError(provider: AiProviderName, status: number, bodyText: string): AiError {
   const snippet = bodyText.slice(0, 300);
-  return mapErrorCodeToAiError(provider, status, `${provider} returned HTTP ${status}: ${snippet}`);
+  const message = `${provider} returned HTTP ${status}: ${snippet}`;
+
+  if (isTransientJsonGenerationFailure(status, bodyText)) {
+    return new AiError({ code: "malformed_response", provider, message, statusCode: status });
+  }
+
+  return mapErrorCodeToAiError(provider, status, message);
 }
 
 async function safeReadText(response: Response): Promise<string> {
