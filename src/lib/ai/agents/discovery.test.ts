@@ -666,11 +666,49 @@ describe("lead discovery", () => {
       expect(result.prospects[0].sourceUrl).toBe("https://mehtafashions.example/about");
     });
 
-    it("requests a token budget large enough for a reasoning model to finish the JSON document", async () => {
+    it("keeps the extraction request inside the provider's per-minute token window", async () => {
       await runExtraction(JSON.stringify(EXTRACTION_RESPONSE));
       const extractionCall = vi.mocked(runHermesCompletion).mock.calls[1][0];
+
       expect(extractionCall.responseFormat).toBe("json");
-      expect(extractionCall.maxTokens ?? 0).toBeGreaterThanOrEqual(4000);
+      // Two-sided, both bounds observed failing in production against Groq's
+      // 8k TPM free tier: too small and a reasoning model runs out mid-JSON
+      // (HTTP 400 json_validate_failed); too large and prompt + reserved
+      // completion tokens exceed the allowance (HTTP 413).
+      expect(extractionCall.maxTokens ?? 0).toBeGreaterThanOrEqual(2500);
+      const promptChars = extractionCall.systemPrompt.length + extractionCall.userPrompt.length;
+      expect(Math.ceil(promptChars / 4) + (extractionCall.maxTokens ?? 0)).toBeLessThan(8000);
+    });
+
+    it("caps how many search results are sent, taking a slice from every query rather than only the first", async () => {
+      const manyHits = (prefix: string) =>
+        Array.from({ length: 30 }, (_, i) => ({
+          title: `${prefix} ${i}`,
+          url: `https://${prefix}${i}.example/page`,
+          content: "x".repeat(5000),
+        }));
+
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(QUERIES_RESPONSE), provider: "openrouter", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: [] }), provider: "groq", model: "m" });
+      vi.stubGlobal(
+        "fetch",
+        mockFetchOk({
+          "retail store owners in Jaipur": manyHits("alpha"),
+          "boutique clothing shops Jaipur": manyHits("beta"),
+        })
+      );
+
+      await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      const prompt = vi.mocked(runHermesCompletion).mock.calls[1][0].userPrompt;
+      const resultCount = (prompt.match(/^URL: /gm) ?? []).length;
+      expect(resultCount).toBeLessThanOrEqual(20);
+      // Both queries are represented — capping must not silently drop one entirely.
+      expect(prompt).toContain("alpha0.example");
+      expect(prompt).toContain("beta0.example");
+      // Long pages are excerpted, not sent whole.
+      expect(prompt.length).toBeLessThan(20_000);
     });
   });
 

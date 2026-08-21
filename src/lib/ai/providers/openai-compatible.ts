@@ -87,7 +87,10 @@ function mapErrorCodeToAiError(provider: AiProviderName, code: number, message: 
   if (code === 404) {
     return new AiError({ code: "model_not_found", provider, message, statusCode: code });
   }
-  if (code === 429) {
+  if (code === 429 || code === 413) {
+    // 413 is Groq's shape for a tokens-per-minute overage ("Request too
+    // large ... on tokens per minute (TPM)") — a time-based limit, so it
+    // belongs with rate_limited (retryable) rather than a permanent error.
     return new AiError({ code: "rate_limited", provider, message, statusCode: code });
   }
   if (code >= 500) {

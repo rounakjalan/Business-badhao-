@@ -290,6 +290,18 @@ Respond with ONLY a single JSON object — no markdown fences, no commentary —
 
 Rules: every "sourceUrl" MUST be copied exactly from one of the given results' URLs — never a URL you construct or guess. "evidenceSnippet" MUST be an actual excerpt from that result's content — never invented text. Every field besides companyName, sourceUrl, evidenceSnippet, and searchQuery must be null unless the result's own content actually states it — a search result rarely states an email or phone directly, so leave those null unless genuinely present. Do not list the same company twice even if it appeared in multiple results — merge them into one entry citing the most informative result. Skip a result entirely if it isn't a real, identifiable business (e.g. a generic article, directory homepage, or listing with no single named company). If nothing in the results is a real matching prospect, return an empty array — never fabricate one to avoid returning nothing.`;
 
+/**
+ * Extraction request budget. The configured models for LEAD_DISCOVERY are
+ * reasoning models on free/low tiers, where the *whole* request — prompt
+ * plus the completion tokens it reserves — is charged against a per-minute
+ * allowance (Groq's free tier: 8k TPM). Both of these were tuned against
+ * real production failures at either end of that window; raise them only
+ * together with the tier they run on.
+ */
+const MAX_RESULTS_SENT_TO_EXTRACTION = 20;
+const RESULT_EXCERPT_CHARS = 280;
+const EXTRACTION_MAX_TOKENS = 3000;
+
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
@@ -327,19 +339,28 @@ async function extractProspectsFromResults(
   // canonically keeps the anti-fabrication guarantee (an invented URL still
   // has a different host/path and is still dropped) while no longer losing
   // real ones to formatting noise.
+  // The whole extraction request (prompt + reserved completion tokens) has
+  // to fit inside the model's per-minute token allowance — Groq's free tier
+  // is 8k TPM and rejects anything larger with HTTP 413, which previously
+  // failed the run outright. Take an even slice from each query rather than
+  // the first N overall, so capping never silently drops a whole query's
+  // results, and keep excerpts short: identifying a business needs a couple
+  // of sentences, not the whole page.
+  const perQueryCap = Math.max(1, Math.ceil(MAX_RESULTS_SENT_TO_EXTRACTION / Math.max(1, searchesByQuery.length)));
+  const sentResults = searchesByQuery
+    .flatMap((s) => s.results.slice(0, perQueryCap).map((r) => ({ query: s.query, hit: r })))
+    .slice(0, MAX_RESULTS_SENT_TO_EXTRACTION);
+
   const realHitByCanonicalUrl = new Map<string, SearchHit>();
-  for (const search of searchesByQuery) {
-    for (const hit of search.results) {
-      const key = canonicalizeUrl(hit.url);
-      if (key && !realHitByCanonicalUrl.has(key)) realHitByCanonicalUrl.set(key, hit);
-    }
+  for (const { hit } of sentResults) {
+    const key = canonicalizeUrl(hit.url);
+    if (key && !realHitByCanonicalUrl.has(key)) realHitByCanonicalUrl.set(key, hit);
   }
 
-  const resultsText = searchesByQuery
-    .flatMap((s) =>
-      s.results.map(
-        (r, i) => `[Query: "${s.query}"] Result ${i + 1}: "${r.title}"\nURL: ${r.url}\nContent: ${truncate(r.content, 600)}`
-      )
+  const resultsText = sentResults
+    .map(
+      ({ query, hit }, i) =>
+        `[Query: "${query}"] Result ${i + 1}: "${hit.title}"\nURL: ${hit.url}\nContent: ${truncate(hit.content, RESULT_EXCERPT_CHARS)}`
     )
     .join("\n\n");
 
@@ -357,9 +378,12 @@ async function extractProspectsFromResults(
     taskType: "LEAD_DISCOVERY",
     systemPrompt: EXTRACTION_SYSTEM_PROMPT,
     userPrompt,
-    // Headroom for reasoning tokens plus a multi-prospect JSON document —
-    // see the note on the query-generation call above.
-    maxTokens: 6000,
+    // Balances the two opposite failures seen in production: too low and a
+    // reasoning model runs out mid-JSON (Groq HTTP 400 json_validate_failed);
+    // too high and prompt + reserved completion tokens blow the 8k TPM
+    // allowance (Groq HTTP 413). Together with the capped prompt above this
+    // keeps the whole request comfortably inside that budget.
+    maxTokens: EXTRACTION_MAX_TOKENS,
     temperature: 0.2,
     responseFormat: "json",
   });
