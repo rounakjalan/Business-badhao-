@@ -89,8 +89,16 @@ export async function createCampaign(formData: FormData) {
   // can never produce duplicate campaigns or duplicate ICP rows.
   let idealCustomerProfileId: string | null = null;
   if (icpRaw) {
-    const icpParse = IcpSchema.safeParse(JSON.parse(icpRaw));
-    if (icpParse.success) {
+    // Malformed hidden-field JSON should never abort campaign creation
+    // entirely — treat it the same as no ICP having been generated.
+    let parsedIcpJson: unknown = undefined;
+    try {
+      parsedIcpJson = JSON.parse(icpRaw);
+    } catch {
+      parsedIcpJson = undefined;
+    }
+    const icpParse = parsedIcpJson !== undefined ? IcpSchema.safeParse(parsedIcpJson) : null;
+    if (icpParse?.success) {
       const icp = icpParse.data;
       const { data: savedIcp } = await supabase
         .from("ideal_customer_profiles")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { createCampaign, generateCampaignPlan, generateIcp } from "@/app/(dashboard)/campaigns/actions";
 import type { CampaignPlan } from "@/lib/ai/agents/campaign-planner";
@@ -77,6 +77,32 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
   // submits the form, so this reliably blocks any submission after the
   // first one, regardless of which button was clicked first.
   const [submitting, setSubmitting] = useState(false);
+  // A native <form action={serverAction}> gives no client-side hook for
+  // "the request failed/never arrived" (only "it succeeded", via the
+  // resulting navigation) — so a dropped connection or a slow/hung request
+  // would otherwise leave both buttons disabled forever with no way to
+  // retry. This timeout is the recovery path: if nothing has navigated
+  // away by then, assume the submission didn't go through and let the user
+  // try again. Harmless if the real response is just slow — the page
+  // navigates away as soon as it does arrive, timeout or not.
+  const [submitTimedOut, setSubmitTimedOut] = useState(false);
+  const submitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
+    };
+  }, []);
+
+  const beginSubmit = () => {
+    setSubmitting(true);
+    setSubmitTimedOut(false);
+    if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
+    submitTimeoutRef.current = setTimeout(() => {
+      setSubmitting(false);
+      setSubmitTimedOut(true);
+    }, 20_000);
+  };
 
   const targetAudience = [customerType, location].filter(Boolean).join(" · ");
 
@@ -351,6 +377,11 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <Row label="Target Audience" val={targetAudience || "—"} />
             <Row label="ICP" val={icp ? icp.targetCustomer : "Not generated"} />
           </div>
+          {submitTimedOut ? (
+            <DarkAlert variant="error">
+              That took too long to respond — check your connection and try again. Nothing was created yet.
+            </DarkAlert>
+          ) : null}
           <form action={createCampaign} className="flex justify-center gap-3">
             <input type="hidden" name="name" value={name} />
             <input type="hidden" name="objective" value={objective} />
@@ -358,7 +389,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="targetAudience" value={targetAudience} />
             <input type="hidden" name="icp" value={icpForSubmit ? JSON.stringify(icpForSubmit) : ""} />
             <input type="hidden" name="launch" value="false" />
-            <DashButton type="submit" variant="ghost" disabled={submitting} onClick={() => setSubmitting(true)}>
+            <DashButton type="submit" variant="ghost" disabled={submitting} onClick={beginSubmit}>
               Save as Draft
             </DashButton>
           </form>
@@ -369,7 +400,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="targetAudience" value={targetAudience} />
             <input type="hidden" name="icp" value={icpForSubmit ? JSON.stringify(icpForSubmit) : ""} />
             <input type="hidden" name="launch" value="true" />
-            <DashButton type="submit" variant="gradient" disabled={submitting || !name.trim()} onClick={() => setSubmitting(true)}>
+            <DashButton type="submit" variant="gradient" disabled={submitting || !name.trim()} onClick={beginSubmit}>
               {submitting ? "Launching..." : "Launch Campaign 🚀"}
             </DashButton>
           </form>
