@@ -51,10 +51,8 @@ export type DiscoveryCriteria = {
 };
 
 export type DiscoveryResult =
-  // `diagnostics` is [TEMP-DIAG] only — optional so every pre-existing caller
-  // and test is unaffected. Remove with the rest of the [TEMP-DIAG] blocks.
-  | { ok: true; prospects: DiscoveredProspect[]; queriesRun: string[]; queriesFailed: string[]; diagnostics?: ProviderDiagnostics }
-  | { ok: false; code: "not_configured" | "provider_error"; message: string; diagnostics?: ProviderDiagnostics };
+  | { ok: true; prospects: DiscoveredProspect[]; queriesRun: string[]; queriesFailed: string[] }
+  | { ok: false; code: "not_configured" | "provider_error"; message: string };
 
 export interface DiscoveryProvider {
   readonly name: string;
@@ -137,53 +135,9 @@ async function generateDiscoveryQueries(
 
 type SearchHit = { title: string; url: string; content: string };
 
-// [TEMP-DIAG] Provider execution evidence for a single discovery run. Records
-// only request counts, result counts and safe error strings — never the API
-// key, never an Authorization header, never prospect/customer data. Remove
-// this block and every other `[TEMP-DIAG]` marker once verification is done.
-export type ProviderDiagnostics = {
-  tavilyKeyPresent: boolean;
-  exaKeyPresent: boolean;
-  tavilyRequests: number;
-  tavilySucceeded: number;
-  tavilyResults: number;
-  tavilyErrors: string[];
-  exaRequests: number;
-  exaSucceeded: number;
-  exaResults: number;
-  exaErrors: string[];
-  extractedRaw: number;
-  extractedGrounded: number;
-  afterDedupe: number;
-};
-
-function newDiagnostics(tavilyKeyPresent: boolean, exaKeyPresent: boolean): ProviderDiagnostics {
-  return {
-    tavilyKeyPresent,
-    exaKeyPresent,
-    tavilyRequests: 0,
-    tavilySucceeded: 0,
-    tavilyResults: 0,
-    tavilyErrors: [],
-    exaRequests: 0,
-    exaSucceeded: 0,
-    exaResults: 0,
-    exaErrors: [],
-    extractedRaw: 0,
-    extractedGrounded: 0,
-    afterDedupe: 0,
-  };
-}
-
 const TAVILY_URL = "https://api.tavily.com/search";
 
-async function tavilySearch(
-  query: string,
-  apiKey: string,
-  diag?: ProviderDiagnostics
-): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
-  if (diag) diag.tavilyRequests += 1; // [TEMP-DIAG]
-  console.log("[LeadDiscovery] Tavily request started"); // [TEMP-DIAG]
+async function tavilySearch(query: string, apiKey: string): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
   let response: Response;
   try {
     response = await fetch(TAVILY_URL, {
@@ -193,16 +147,11 @@ async function tavilySearch(
       signal: AbortSignal.timeout(20_000),
     });
   } catch (cause) {
-    const message = `Search failed for "${query}": ${cause instanceof Error ? cause.message : "network error"}`;
-    console.log(`[LeadDiscovery] Tavily network error: ${cause instanceof Error ? cause.message : "network error"}`); // [TEMP-DIAG]
-    if (diag) diag.tavilyErrors.push(cause instanceof Error ? cause.message : "network error"); // [TEMP-DIAG]
-    return { ok: false, message };
+    return { ok: false, message: `Search failed for "${query}": ${cause instanceof Error ? cause.message : "network error"}` };
   }
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
-    console.log(`[LeadDiscovery] Tavily failed: HTTP ${response.status}`); // [TEMP-DIAG]
-    if (diag) diag.tavilyErrors.push(`HTTP ${response.status} ${bodyText.slice(0, 120)}`); // [TEMP-DIAG]
     return { ok: false, message: `Search failed for "${query}": HTTP ${response.status} ${bodyText.slice(0, 200)}` };
   }
 
@@ -210,20 +159,12 @@ async function tavilySearch(
   try {
     data = await response.json();
   } catch {
-    console.log("[LeadDiscovery] Tavily returned an unparseable response"); // [TEMP-DIAG]
-    if (diag) diag.tavilyErrors.push("unparseable JSON response"); // [TEMP-DIAG]
     return { ok: false, message: `Search for "${query}" returned a response that could not be parsed.` };
   }
 
   const results = (data.results ?? [])
     .filter((r): r is { title: string; url: string; content?: string } => Boolean(r.title && r.url))
     .map((r) => ({ title: r.title, url: r.url, content: r.content ?? "" }));
-
-  console.log(`[LeadDiscovery] Tavily returned ${results.length} results`); // [TEMP-DIAG]
-  if (diag) {
-    diag.tavilySucceeded += 1; // [TEMP-DIAG]
-    diag.tavilyResults += results.length; // [TEMP-DIAG]
-  }
 
   return { ok: true, results };
 }
@@ -238,13 +179,7 @@ async function tavilySearch(
 
 const EXA_URL = "https://api.exa.ai/search";
 
-async function exaSearch(
-  query: string,
-  apiKey: string,
-  diag?: ProviderDiagnostics
-): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
-  if (diag) diag.exaRequests += 1; // [TEMP-DIAG]
-  console.log("[LeadDiscovery] Exa request started"); // [TEMP-DIAG]
+async function exaSearch(query: string, apiKey: string): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
   let response: Response;
   try {
     response = await fetch(EXA_URL, {
@@ -254,15 +189,11 @@ async function exaSearch(
       signal: AbortSignal.timeout(20_000),
     });
   } catch (cause) {
-    console.log(`[LeadDiscovery] Exa network error: ${cause instanceof Error ? cause.message : "network error"}`); // [TEMP-DIAG]
-    if (diag) diag.exaErrors.push(cause instanceof Error ? cause.message : "network error"); // [TEMP-DIAG]
     return { ok: false, message: `Exa search failed for "${query}": ${cause instanceof Error ? cause.message : "network error"}` };
   }
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
-    console.log(`[LeadDiscovery] Exa failed: HTTP ${response.status}`); // [TEMP-DIAG]
-    if (diag) diag.exaErrors.push(`HTTP ${response.status} ${bodyText.slice(0, 120)}`); // [TEMP-DIAG]
     return { ok: false, message: `Exa search failed for "${query}": HTTP ${response.status} ${bodyText.slice(0, 200)}` };
   }
 
@@ -270,20 +201,12 @@ async function exaSearch(
   try {
     data = await response.json();
   } catch {
-    console.log("[LeadDiscovery] Exa returned an unparseable response"); // [TEMP-DIAG]
-    if (diag) diag.exaErrors.push("unparseable JSON response"); // [TEMP-DIAG]
     return { ok: false, message: `Exa search for "${query}" returned a response that could not be parsed.` };
   }
 
   const results = (data.results ?? [])
     .filter((r): r is { title: string; url: string; text?: string } => Boolean(r.title && r.url))
     .map((r) => ({ title: r.title, url: r.url, content: r.text ?? "" }));
-
-  console.log(`[LeadDiscovery] Exa returned ${results.length} results`); // [TEMP-DIAG]
-  if (diag) {
-    diag.exaSucceeded += 1; // [TEMP-DIAG]
-    diag.exaResults += results.length; // [TEMP-DIAG]
-  }
 
   return { ok: true, results };
 }
@@ -299,30 +222,15 @@ async function exaSearch(
 async function searchWithFallback(
   query: string,
   tavilyApiKey: string,
-  exaApiKey: string | undefined,
-  diag?: ProviderDiagnostics
+  exaApiKey: string | undefined
 ): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
-  // [TEMP-DIAG] Verification-only switch: when LEAD_DISCOVERY_DIAG_FORCE_TAVILY_FAIL=1
-  // the Tavily call is skipped and treated as failed, so the Exa fallback path can be
-  // proven to execute for real. Never touches the real TAVILY_API_KEY. Off unless the
-  // env var is explicitly set; remove with the rest of the [TEMP-DIAG] blocks.
-  const forceTavilyFail = process.env.LEAD_DISCOVERY_DIAG_FORCE_TAVILY_FAIL === "1";
-  if (forceTavilyFail) console.log("[LeadDiscovery] [TEMP-DIAG] forcing Tavily failure to verify Exa fallback"); // [TEMP-DIAG]
-
-  const tavilyResult = forceTavilyFail
-    ? ({ ok: false, message: "[TEMP-DIAG] forced Tavily failure for fallback verification" } as const) // [TEMP-DIAG]
-    : await tavilySearch(query, tavilyApiKey, diag);
+  const tavilyResult = await tavilySearch(query, tavilyApiKey);
   if (tavilyResult.ok) return tavilyResult;
-  if (!exaApiKey) {
-    console.log("[LeadDiscovery] Tavily failed and EXA_API_KEY is not set — no fallback available"); // [TEMP-DIAG]
-    return tavilyResult;
-  }
+  if (!exaApiKey) return tavilyResult;
 
-  console.log("[LeadDiscovery] Tavily failed, attempting Exa fallback"); // [TEMP-DIAG]
-  const exaResult = await exaSearch(query, exaApiKey, diag);
+  const exaResult = await exaSearch(query, exaApiKey);
   if (exaResult.ok) return exaResult;
 
-  console.log("[LeadDiscovery] both providers failed"); // [TEMP-DIAG]
   return {
     ok: false,
     message: `Tavily failed (${tavilyResult.message}) and Exa fallback also failed (${exaResult.message}).`,
@@ -380,8 +288,7 @@ function truncate(text: string, max: number): string {
 
 async function extractProspectsFromResults(
   criteria: DiscoveryCriteria,
-  searchesByQuery: { query: string; results: SearchHit[] }[],
-  diag?: ProviderDiagnostics
+  searchesByQuery: { query: string; results: SearchHit[] }[]
 ): Promise<{ ok: true; prospects: DiscoveredProspect[] } | { ok: false; message: string }> {
   const validUrls = new Set(searchesByQuery.flatMap((s) => s.results.map((r) => r.url)));
 
@@ -421,12 +328,6 @@ async function extractProspectsFromResults(
   // actually in the search results — the model is not trusted to have
   // cited real evidence just because it was instructed to.
   const grounded = parsed.data.prospects.filter((p) => validUrls.has(p.sourceUrl));
-
-  console.log(`[LeadDiscovery] extraction: ${parsed.data.prospects.length} extracted, ${grounded.length} verified against real source URLs`); // [TEMP-DIAG]
-  if (diag) {
-    diag.extractedRaw = parsed.data.prospects.length; // [TEMP-DIAG]
-    diag.extractedGrounded = grounded.length; // [TEMP-DIAG]
-  }
 
   return { ok: true, prospects: grounded };
 }
@@ -495,19 +396,13 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
 
     const exaApiKey = this.exaApiKey;
 
-    // [TEMP-DIAG] records only counts + safe error strings, never key values.
-    const diag = newDiagnostics(Boolean(apiKey), Boolean(exaApiKey));
-    console.log(`[LeadDiscovery] run starting — TAVILY_API_KEY present: ${Boolean(apiKey)}, EXA_API_KEY present: ${Boolean(exaApiKey)}`); // [TEMP-DIAG]
-
     const queriesResult = await generateDiscoveryQueries(criteria);
     if (!queriesResult.ok) {
       return { ok: false, code: "provider_error", message: queriesResult.message };
     }
 
-    console.log(`[LeadDiscovery] ${queriesResult.queries.length} search queries generated`); // [TEMP-DIAG]
-
     const outcomes = await Promise.all(
-      queriesResult.queries.map(async (query) => ({ query, result: await searchWithFallback(query, apiKey, exaApiKey, diag) }))
+      queriesResult.queries.map(async (query) => ({ query, result: await searchWithFallback(query, apiKey, exaApiKey) }))
     );
     const succeeded = outcomes.filter((o): o is { query: string; result: { ok: true; results: SearchHit[] } } => o.result.ok);
     const queriesFailed = outcomes.filter((o) => !o.result.ok).map((o) => o.query);
@@ -518,34 +413,27 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
         ok: false,
         code: "provider_error",
         message: `All ${queriesResult.queries.length} discovery searches failed.${firstError ? ` First error: ${firstError.message}` : ""}`,
-        diagnostics: diag, // [TEMP-DIAG]
       };
     }
 
     const totalHits = succeeded.reduce((sum, o) => sum + o.result.results.length, 0);
     if (totalHits === 0) {
-      return { ok: true, prospects: [], queriesRun: succeeded.map((o) => o.query), queriesFailed, diagnostics: diag };
+      return { ok: true, prospects: [], queriesRun: succeeded.map((o) => o.query), queriesFailed };
     }
 
     const extraction = await extractProspectsFromResults(
       criteria,
-      succeeded.map((o) => ({ query: o.query, results: o.result.results })),
-      diag
+      succeeded.map((o) => ({ query: o.query, results: o.result.results }))
     );
     if (!extraction.ok) {
-      return { ok: false, code: "provider_error", message: extraction.message, diagnostics: diag }; // [TEMP-DIAG]
+      return { ok: false, code: "provider_error", message: extraction.message };
     }
-
-    const deduped = dedupeProspects(extraction.prospects);
-    diag.afterDedupe = deduped.length; // [TEMP-DIAG]
-    console.log(`[LeadDiscovery] run complete — tavily(req=${diag.tavilyRequests},ok=${diag.tavilySucceeded},results=${diag.tavilyResults}) exa(req=${diag.exaRequests},ok=${diag.exaSucceeded},results=${diag.exaResults}) extracted=${diag.extractedRaw} verified=${diag.extractedGrounded} deduped=${deduped.length}`); // [TEMP-DIAG]
 
     return {
       ok: true,
-      prospects: deduped,
+      prospects: dedupeProspects(extraction.prospects),
       queriesRun: succeeded.map((o) => o.query),
       queriesFailed,
-      diagnostics: diag, // [TEMP-DIAG]
     };
   }
 }
