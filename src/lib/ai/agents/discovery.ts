@@ -12,6 +12,11 @@ import type { BusinessContext } from "@/lib/business-context";
 // for the one reference implementation; NullDiscoveryProvider remains the
 // honest default until TAVILY_API_KEY is set.
 //
+// Tavily is PRIMARY. Exa (EXA_API_KEY, also optional) is a fallback used
+// only inside TavilyDiscoveryProvider's search step, only for a query whose
+// Tavily call actually failed (quota/rate-limit/unavailable/network) — never
+// because Tavily legitimately found zero results. See searchWithFallback.
+//
 // Deliberately NOT Lead Qualification and NOT Lead Research: this module
 // only surfaces candidates worth researching, with evidence for why. It
 // never scores ICP fit (qualification.ts's job) and never produces a
@@ -165,6 +170,74 @@ async function tavilySearch(query: string, apiKey: string): Promise<{ ok: true; 
 }
 
 // ---------------------------------------------------------------------------
+// Fallback search provider: Exa, gated behind EXA_API_KEY. Only ever called
+// from searchWithFallback below, and only after Tavily's own call for that
+// query has actually failed. Normalizes into the exact same SearchHit shape
+// Tavily produces, so extractProspectsFromResults never needs to know which
+// provider a given result came from.
+// ---------------------------------------------------------------------------
+
+const EXA_URL = "https://api.exa.ai/search";
+
+async function exaSearch(query: string, apiKey: string): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
+  let response: Response;
+  try {
+    response = await fetch(EXA_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey },
+      body: JSON.stringify({ query, numResults: 5, contents: { text: true } }),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (cause) {
+    return { ok: false, message: `Exa search failed for "${query}": ${cause instanceof Error ? cause.message : "network error"}` };
+  }
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    return { ok: false, message: `Exa search failed for "${query}": HTTP ${response.status} ${bodyText.slice(0, 200)}` };
+  }
+
+  let data: { results?: { title?: string; url?: string; text?: string }[] };
+  try {
+    data = await response.json();
+  } catch {
+    return { ok: false, message: `Exa search for "${query}" returned a response that could not be parsed.` };
+  }
+
+  const results = (data.results ?? [])
+    .filter((r): r is { title: string; url: string; text?: string } => Boolean(r.title && r.url))
+    .map((r) => ({ title: r.title, url: r.url, content: r.text ?? "" }));
+
+  return { ok: true, results };
+}
+
+/**
+ * Search Provider Router: try Tavily first — always. Only attempt Exa when
+ * Tavily's own call for this specific query failed (an actual provider
+ * error, never a legitimate zero-result search, which tavilySearch already
+ * reports as ok:true with an empty array) and EXA_API_KEY is configured.
+ * If Exa isn't configured, or Exa also fails, this surfaces exactly the
+ * same failure shape callers already handled before Exa existed.
+ */
+async function searchWithFallback(
+  query: string,
+  tavilyApiKey: string,
+  exaApiKey: string | undefined
+): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
+  const tavilyResult = await tavilySearch(query, tavilyApiKey);
+  if (tavilyResult.ok) return tavilyResult;
+  if (!exaApiKey) return tavilyResult;
+
+  const exaResult = await exaSearch(query, exaApiKey);
+  if (exaResult.ok) return exaResult;
+
+  return {
+    ok: false,
+    message: `Tavily failed (${tavilyResult.message}) and Exa fallback also failed (${exaResult.message}).`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Step 3 (AI, bounded to the given results): extract distinct real
 // prospects from real search results. Every sourceUrl is cross-checked
 // against the actual URLs returned by the search — an extracted prospect
@@ -302,6 +375,11 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     return process.env.TAVILY_API_KEY;
   }
 
+  /** Exa is an optional fallback for this provider's own search step — never required for Tavily discovery to work. */
+  private get exaApiKey(): string | undefined {
+    return process.env.EXA_API_KEY;
+  }
+
   isConfigured(): boolean {
     return Boolean(this.apiKey);
   }
@@ -316,13 +394,15 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       };
     }
 
+    const exaApiKey = this.exaApiKey;
+
     const queriesResult = await generateDiscoveryQueries(criteria);
     if (!queriesResult.ok) {
       return { ok: false, code: "provider_error", message: queriesResult.message };
     }
 
     const outcomes = await Promise.all(
-      queriesResult.queries.map(async (query) => ({ query, result: await tavilySearch(query, apiKey) }))
+      queriesResult.queries.map(async (query) => ({ query, result: await searchWithFallback(query, apiKey, exaApiKey) }))
     );
     const succeeded = outcomes.filter((o): o is { query: string; result: { ok: true; results: SearchHit[] } } => o.result.ok);
     const queriesFailed = outcomes.filter((o) => !o.result.ok).map((o) => o.query);

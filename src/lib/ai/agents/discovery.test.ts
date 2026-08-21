@@ -40,6 +40,30 @@ const EXTRACTION_RESPONSE = {
   ],
 };
 
+const SINGLE_QUERY_RESPONSE = { queries: ["retail store owners in Jaipur"] };
+
+const EXA_HITS = [
+  { title: "Mehta Fashions — Jaipur", url: "https://mehtafashions.example/about", text: "Mehta Fashions is a boutique clothing retailer in Jaipur, family-owned since 2015." },
+];
+
+const EXA_EXTRACTION_RESPONSE = {
+  prospects: [
+    {
+      companyName: "Mehta Fashions",
+      website: "mehtafashions.example",
+      location: "Jaipur",
+      industry: "Retail",
+      businessType: "Boutique",
+      email: null,
+      phone: null,
+      matchedIcpCriteria: ["location: Jaipur", "industry: Retail"],
+      evidenceSnippet: "Mehta Fashions is a boutique clothing retailer in Jaipur, family-owned since 2015.",
+      sourceUrl: "https://mehtafashions.example/about",
+      searchQuery: "retail store owners in Jaipur",
+    },
+  ],
+};
+
 const baseCriteria: DiscoveryCriteria = {
   organizationId: "org-1",
   campaignName: "Jaipur Retail Push",
@@ -56,8 +80,24 @@ function mockFetchOk(hitsByQuery: Record<string, { title: string; url: string; c
   });
 }
 
+/** Routes fetch by URL to distinct Tavily/Exa handlers, so fallback tests can assert precisely which provider was actually called. */
+function mockFetchRouter(handlers: { tavily?: () => Response | Promise<Response>; exa?: () => Response | Promise<Response> }) {
+  return vi.fn(async (url: string) => {
+    if (url === "https://api.tavily.com/search") {
+      if (!handlers.tavily) throw new Error("unexpected Tavily call in this test");
+      return handlers.tavily();
+    }
+    if (url === "https://api.exa.ai/search") {
+      if (!handlers.exa) throw new Error("unexpected Exa call in this test");
+      return handlers.exa();
+    }
+    throw new Error(`unexpected fetch url: ${url}`);
+  });
+}
+
 describe("lead discovery", () => {
   const originalTavilyKey = process.env.TAVILY_API_KEY;
+  const originalExaKey = process.env.EXA_API_KEY;
 
   afterEach(() => {
     // resetAllMocks (not clearAllMocks) — several tests below intentionally
@@ -69,6 +109,8 @@ describe("lead discovery", () => {
     vi.unstubAllGlobals();
     if (originalTavilyKey === undefined) delete process.env.TAVILY_API_KEY;
     else process.env.TAVILY_API_KEY = originalTavilyKey;
+    if (originalExaKey === undefined) delete process.env.EXA_API_KEY;
+    else process.env.EXA_API_KEY = originalExaKey;
   });
 
   describe("provider selection — never fabricates without a real provider", () => {
@@ -327,6 +369,154 @@ describe("lead discovery", () => {
       for (const call of vi.mocked(runHermesCompletion).mock.calls) {
         expect(call[0].organizationId).toBe("org-42");
       }
+    });
+  });
+
+  describe("Tavily -> Exa fallback (Exa is a fallback only, never a replacement)", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "tavily-key";
+    });
+
+    it("Tavily succeeds -> Exa is never called", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      const fetchMock = mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result).toMatchObject({ ok: true, queriesFailed: [] });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith("https://api.tavily.com/search", expect.anything());
+    });
+
+    it("Tavily fails (rate limit) -> Exa is automatically called and its results are used", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXA_EXTRACTION_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      const fetchMock = mockFetchRouter({
+        tavily: async () => new Response(JSON.stringify({ detail: { error: "Unauthorized: quota exceeded" } }), { status: 429 }),
+        exa: async () => new Response(JSON.stringify({ results: EXA_HITS }), { status: 200 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok result");
+      expect(result.queriesFailed).toEqual([]);
+      expect(result.queriesRun).toEqual(["retail store owners in Jaipur"]);
+      expect(result.prospects).toHaveLength(1);
+      expect(result.prospects[0].companyName).toBe("Mehta Fashions");
+      expect(result.prospects[0].sourceUrl).toBe("https://mehtafashions.example/about");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("Tavily succeeds with zero results -> Exa is not called, and zero results stays zero (not treated as failure)", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({
+        ok: true,
+        text: JSON.stringify(SINGLE_QUERY_RESPONSE),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      const fetchMock = mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: [] }), { status: 200 }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result).toMatchObject({ ok: true, prospects: [], queriesFailed: [] });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // Extraction is skipped entirely on zero hits, same as before Exa existed.
+      expect(vi.mocked(runHermesCompletion)).toHaveBeenCalledTimes(1);
+    });
+
+    it("Exa's normalized results (title/url/text->content) flow through the existing extraction pipeline unchanged", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXA_EXTRACTION_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      const fetchMock = mockFetchRouter({
+        tavily: async () => new Response("Service Unavailable", { status: 503 }),
+        exa: async () => new Response(JSON.stringify({ results: EXA_HITS }), { status: 200 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      // The extraction prompt (2nd Hermes call) is built from SearchHit[]
+      // (title/url/content) regardless of provider — assert Exa's "text"
+      // field actually made it into "content" in that prompt.
+      const extractionPrompt = vi.mocked(runHermesCompletion).mock.calls[1][0].userPrompt;
+      expect(extractionPrompt).toContain("Mehta Fashions is a boutique clothing retailer in Jaipur, family-owned since 2015.");
+      expect(extractionPrompt).toContain("https://mehtafashions.example/about");
+    });
+
+    it("Exa API key missing -> Tavily's failure is not rescued; existing failure behavior is preserved", async () => {
+      delete process.env.EXA_API_KEY;
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({
+        ok: true,
+        text: JSON.stringify(SINGLE_QUERY_RESPONSE),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      const fetchMock = mockFetchRouter({ tavily: async () => new Response("Service Unavailable", { status: 503 }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected failure result");
+      expect(result.code).toBe("provider_error");
+      expect(result.message).toContain("HTTP 503");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("both Tavily and Exa fail -> existing discovery failure behavior, no fabricated prospects", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({
+        ok: true,
+        text: JSON.stringify(SINGLE_QUERY_RESPONSE),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      const fetchMock = mockFetchRouter({
+        tavily: async () => new Response("Service Unavailable", { status: 503 }),
+        exa: async () => new Response("Internal Server Error", { status: 500 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected failure result");
+      expect(result.code).toBe("provider_error");
+      expect(result.message).toMatch(/Tavily[\s\S]*Exa/);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("Tavily-only configuration (EXA_API_KEY never set) continues to work exactly as before", async () => {
+      delete process.env.EXA_API_KEY;
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      const fetchMock = mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result).toMatchObject({ ok: true, prospects: [{ companyName: "Sharma Boutique" }] });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 
