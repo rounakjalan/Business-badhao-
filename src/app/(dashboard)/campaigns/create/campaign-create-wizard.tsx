@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
+import { useFormStatus } from "react-dom";
 import Link from "next/link";
 import { createCampaign, generateCampaignPlan, generateIcp } from "@/app/(dashboard)/campaigns/actions";
 import type { CampaignPlan } from "@/lib/ai/agents/campaign-planner";
@@ -71,38 +72,6 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
   const [generatingIcp, startGeneratingIcp] = useTransition();
   const [icp, setIcp] = useState<Icp | null>(null);
   const [icpError, setIcpError] = useState<string | null>(null);
-  // Guards against a double-click (or clicking both buttons) creating more
-  // than one campaign/ICP — createCampaign has no idempotency of its own,
-  // it just inserts on every call. onClick fires before the browser
-  // submits the form, so this reliably blocks any submission after the
-  // first one, regardless of which button was clicked first.
-  const [submitting, setSubmitting] = useState(false);
-  // A native <form action={serverAction}> gives no client-side hook for
-  // "the request failed/never arrived" (only "it succeeded", via the
-  // resulting navigation) — so a dropped connection or a slow/hung request
-  // would otherwise leave both buttons disabled forever with no way to
-  // retry. This timeout is the recovery path: if nothing has navigated
-  // away by then, assume the submission didn't go through and let the user
-  // try again. Harmless if the real response is just slow — the page
-  // navigates away as soon as it does arrive, timeout or not.
-  const [submitTimedOut, setSubmitTimedOut] = useState(false);
-  const submitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
-    };
-  }, []);
-
-  const beginSubmit = () => {
-    setSubmitting(true);
-    setSubmitTimedOut(false);
-    if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
-    submitTimeoutRef.current = setTimeout(() => {
-      setSubmitting(false);
-      setSubmitTimedOut(true);
-    }, 20_000);
-  };
 
   const targetAudience = [customerType, location].filter(Boolean).join(" · ");
 
@@ -377,11 +346,6 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <Row label="Target Audience" val={targetAudience || "—"} />
             <Row label="ICP" val={icp ? icp.targetCustomer : "Not generated"} />
           </div>
-          {submitTimedOut ? (
-            <DarkAlert variant="error">
-              That took too long to respond — check your connection and try again. Nothing was created yet.
-            </DarkAlert>
-          ) : null}
           <form action={createCampaign} className="flex justify-center gap-3">
             <input type="hidden" name="name" value={name} />
             <input type="hidden" name="objective" value={objective} />
@@ -389,9 +353,7 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="targetAudience" value={targetAudience} />
             <input type="hidden" name="icp" value={icpForSubmit ? JSON.stringify(icpForSubmit) : ""} />
             <input type="hidden" name="launch" value="false" />
-            <DashButton type="submit" variant="ghost" disabled={submitting} onClick={beginSubmit}>
-              Save as Draft
-            </DashButton>
+            <WizardSubmitButton variant="ghost" idleLabel="Save as Draft" pendingLabel="Saving..." />
           </form>
           <form action={createCampaign} className="flex justify-center gap-3">
             <input type="hidden" name="name" value={name} />
@@ -400,9 +362,12 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             <input type="hidden" name="targetAudience" value={targetAudience} />
             <input type="hidden" name="icp" value={icpForSubmit ? JSON.stringify(icpForSubmit) : ""} />
             <input type="hidden" name="launch" value="true" />
-            <DashButton type="submit" variant="gradient" disabled={submitting || !name.trim()} onClick={beginSubmit}>
-              {submitting ? "Launching..." : "Launch Campaign 🚀"}
-            </DashButton>
+            <WizardSubmitButton
+              variant="gradient"
+              idleLabel="Launch Campaign 🚀"
+              pendingLabel="Launching..."
+              disabled={!name.trim()}
+            />
           </form>
         </div>
       ) : null}
@@ -420,6 +385,41 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Submit button for the two Review & Launch forms.
+ *
+ * Deliberately derives its disabled/pending state from useFormStatus() rather
+ * than from an onClick handler that flips a state flag. Disabling the button
+ * synchronously in onClick — which is what this used to do to guard against
+ * double-submits — re-renders it as `disabled` *before* the browser dispatches
+ * the form's submit event, and a disabled button cannot submit a form. The
+ * submission was therefore dropped silently: no request, no error, no campaign
+ * created, and the UI sat on "Launching..." forever.
+ *
+ * useFormStatus reports the parent form's real submission state, so the button
+ * only disables once the submit is genuinely in flight, and re-enables by
+ * itself if the action fails instead of navigating away.
+ */
+function WizardSubmitButton({
+  variant,
+  idleLabel,
+  pendingLabel,
+  disabled = false,
+}: {
+  variant: "ghost" | "gradient";
+  idleLabel: string;
+  pendingLabel: string;
+  disabled?: boolean;
+}) {
+  const { pending } = useFormStatus();
+
+  return (
+    <DashButton type="submit" variant={variant} disabled={pending || disabled}>
+      {pending ? pendingLabel : idleLabel}
+    </DashButton>
   );
 }
 
