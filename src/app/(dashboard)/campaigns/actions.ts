@@ -196,7 +196,33 @@ export type DiscoveryFollowUpSummary = {
   disqualified: number;
   /** Left "pending"/"qualifying" — research failed, or research succeeded but the evidence wasn't enough to finalize a verdict. */
   qualifying: number;
+  /** Discovered and saved, but not researched in this run because it ran out of time budget. They stay "pending" and can be picked up per-lead. */
+  deferred: number;
 };
+
+/**
+ * How much of the request to spend starting new leads.
+ *
+ * The platform kills a serverless function at 300s. Research plus
+ * qualification for a single lead measured ~48s against the real providers,
+ * so a run that discovers more than a handful of leads cannot finish them
+ * all in one request — an 8-lead run needs ~430s. Left unbounded it dies at
+ * the ceiling: the response is lost, the agent run is never closed out, and
+ * the leads it never reached sit at "pending" with nothing recording why.
+ *
+ * So stop *starting* leads once this much of the request is gone and report
+ * the rest as deferred. The worst case is one lead starting just under the
+ * line and running long, which still lands well inside 300s.
+ */
+const FOLLOW_UP_BUDGET_MS = 225_000;
+
+/**
+ * How long a "running" discovery run can sit before the duplicate-run guard
+ * stops believing it. Comfortably longer than the 300s a request can
+ * possibly take, so it never releases a genuinely live run — it only clears
+ * one that died without writing a terminal status.
+ */
+const STALE_RUN_AFTER_MS = 15 * 60 * 1000;
 
 /**
  * Runs Lead Research, then (only on success) Qualification, for each newly
@@ -206,20 +232,31 @@ export type DiscoveryFollowUpSummary = {
  * on discovery evidence alone.
  *
  * Never fails the discovery run: the prospects/leads are already saved and
- * real, so a per-lead research or qualification failure is just reflected
- * in the summary counts rather than throwing away a good discovery run.
+ * real, so a per-lead research or qualification failure — or running out of
+ * budget before reaching a lead — is reflected in the summary counts rather
+ * than throwing away a good discovery run.
  */
-async function runResearchAndQualification(leadIds: string[]): Promise<DiscoveryFollowUpSummary> {
+async function runResearchAndQualification(leadIds: string[], startedAtMs: number): Promise<DiscoveryFollowUpSummary> {
   const summary: DiscoveryFollowUpSummary = {
-    researchAttempted: leadIds.length,
+    researchAttempted: 0,
     researchSucceeded: 0,
     researchFailed: 0,
     qualified: 0,
     disqualified: 0,
     qualifying: 0,
+    deferred: 0,
   };
 
-  for (const leadId of leadIds) {
+  for (const [index, leadId] of leadIds.entries()) {
+    if (Date.now() - startedAtMs >= FOLLOW_UP_BUDGET_MS) {
+      // Out of budget. Everything from here stays "pending" — untouched and
+      // still qualifiable per-lead — rather than being cut off mid-request.
+      summary.deferred = leadIds.length - index;
+      break;
+    }
+
+    summary.researchAttempted += 1;
+
     const researchResult = await runLeadResearchAction(leadId);
     if (!researchResult.ok) {
       summary.researchFailed += 1;
@@ -240,6 +277,9 @@ async function runResearchAndQualification(leadIds: string[]): Promise<Discovery
 }
 
 export async function startLeadDiscoveryAction(campaignId: string): Promise<LeadDiscoveryActionResult> {
+  // Budget the whole request, not just the follow-up loop — discovery and
+  // extraction have already spent ~45s by the time the loop starts.
+  const startedAtMs = Date.now();
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) {
     return { ok: false, code: "unauthorized", message: "Sign in to a workspace to run lead discovery." };
@@ -276,14 +316,24 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   // campaign while one is already in flight.
   const { data: runningRuns } = await supabase
     .from("agent_runs")
-    .select("input")
+    .select("input, started_at")
     .eq("organization_id", currentOrg.organizationId)
     .eq("agent_type", "lead_discovery")
     .eq("status", "running");
 
-  const alreadyRunning = (runningRuns ?? []).some(
-    (r) => (r.input as { campaignId?: string } | null)?.campaignId === campaignId
-  );
+  const alreadyRunning = (runningRuns ?? []).some((r) => {
+    if ((r.input as { campaignId?: string } | null)?.campaignId !== campaignId) return false;
+
+    // A run killed mid-flight — function timeout, deploy, crash — never gets
+    // its terminal status written and would otherwise hold this lock
+    // forever, permanently blocking discovery for the campaign with no way
+    // back from the UI. Past the stale window, treat it as dead and let a
+    // new run proceed.
+    const startedAt = r.started_at ? Date.parse(r.started_at) : NaN;
+    if (!Number.isNaN(startedAt) && Date.now() - startedAt > STALE_RUN_AFTER_MS) return false;
+
+    return true;
+  });
   if (alreadyRunning) {
     return { ok: false, code: "already_running", message: "A discovery run is already in progress for this campaign." };
   }
@@ -416,7 +466,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     }
   }
 
-  const followUpSummary = await runResearchAndQualification(newLeadIds);
+  const followUpSummary = await runResearchAndQualification(newLeadIds, startedAtMs);
 
   const finalStatus: "completed" | "partially_completed" = result.queriesFailed.length > 0 ? "partially_completed" : "completed";
   await completeAgentRun(agentRun, finalStatus, {
