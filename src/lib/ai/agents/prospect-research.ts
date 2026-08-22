@@ -89,7 +89,16 @@ export async function runProspectResearch(input: ProspectResearchInput): Promise
     taskType: "PROSPECT_RESEARCH",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
-    maxTokens: 800,
+    // This schema is the largest of any agent — 12 keys, 10 of them string
+    // arrays — so 800 could not fit a complete document: the sparsest
+    // possible lead (no contact, no website, no title) already spent ~660 of
+    // it. Providers in strict JSON mode then reject the truncated output
+    // outright ("max completion tokens reached before generating a valid
+    // document") rather than returning partial JSON, so research failed for
+    // any lead with real substance. 1600 matches what campaign-planner and
+    // icp-generator use for comparably sized schemas. This is a ceiling, not
+    // a reservation — small responses still cost what they cost.
+    maxTokens: 1600,
     temperature: 0.4,
     responseFormat: "json",
   });
