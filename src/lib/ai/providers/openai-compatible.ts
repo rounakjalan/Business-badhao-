@@ -1,4 +1,4 @@
-import { AiError } from "@/lib/ai/errors";
+import { AiError, parseRetryAfterMs } from "@/lib/ai/errors";
 import type { AiCompletionRequest, AiCompletionResponse, AiProviderName, AiToolDefinition } from "@/lib/ai/types";
 
 // OpenRouter, Hugging Face's Inference Providers router, and Groq all speak
@@ -91,7 +91,15 @@ function mapErrorCodeToAiError(provider: AiProviderName, code: number, message: 
     // 413 is Groq's shape for a tokens-per-minute overage ("Request too
     // large ... on tokens per minute (TPM)") — a time-based limit, so it
     // belongs with rate_limited (retryable) rather than a permanent error.
-    return new AiError({ code: "rate_limited", provider, message, statusCode: code });
+    // These responses say how long the window needs to clear; carry that
+    // through so the retry waits that long instead of giving up early.
+    return new AiError({
+      code: "rate_limited",
+      provider,
+      message,
+      statusCode: code,
+      retryAfterMs: parseRetryAfterMs(message),
+    });
   }
   if (code >= 500) {
     return new AiError({ code: "provider_unavailable", provider, message, statusCode: code });

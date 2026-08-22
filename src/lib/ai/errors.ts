@@ -36,15 +36,43 @@ export class AiError extends Error {
   readonly provider: AiProviderName;
   readonly retryable: boolean;
   readonly statusCode?: number;
+  /** How long the provider itself asked us to wait, when it said so (see parseRetryAfterMs). */
+  readonly retryAfterMs?: number;
 
-  constructor(params: { code: AiErrorCode; provider: AiProviderName; message: string; statusCode?: number; cause?: unknown }) {
+  constructor(params: {
+    code: AiErrorCode;
+    provider: AiProviderName;
+    message: string;
+    statusCode?: number;
+    retryAfterMs?: number;
+    cause?: unknown;
+  }) {
     super(params.message, params.cause !== undefined ? { cause: params.cause } : undefined);
     this.name = "AiError";
     this.code = params.code;
     this.provider = params.provider;
     this.statusCode = params.statusCode;
+    this.retryAfterMs = params.retryAfterMs;
     this.retryable = RETRYABLE_CODES.has(params.code);
   }
+}
+
+/**
+ * Rate-limit responses state how long to wait ("Please try again in
+ * 2.5125s"), and that wait is routinely longer than a short fixed backoff.
+ * Honoring the provider's own number turns a give-up into a success; a
+ * generic backoff just retries too early and burns the remaining attempts.
+ *
+ * Returns undefined when no wait is stated, so the caller keeps its default.
+ */
+export function parseRetryAfterMs(message: string): number | undefined {
+  const match = /try again in ([\d.]+)\s*(ms|s)\b/i.exec(message);
+  if (!match) return undefined;
+
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+
+  return match[2].toLowerCase() === "ms" ? Math.ceil(value) : Math.ceil(value * 1000);
 }
 
 /** Thrown for invalid *configuration* (bad env values) — distinct from a runtime provider failure. */

@@ -48,4 +48,42 @@ describe("withRetry", () => {
     await expect(withRetry(fn, 3)).rejects.toThrow("boom");
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  // A rate limit clears on the provider's schedule, not ours. Retrying on a
+  // shorter fixed backoff spends every attempt before the window reopens —
+  // which is exactly how a real discovery run lost a lead's research.
+  it("waits at least as long as a rate-limited provider asked before retrying", async () => {
+    const rateLimited = new AiError({
+      code: "rate_limited",
+      provider: "groq",
+      message: "Rate limit reached ... Please try again in 2.5125s.",
+      statusCode: 429,
+      retryAfterMs: 2513,
+    });
+    const fn = vi.fn().mockRejectedValueOnce(rateLimited).mockResolvedValueOnce("recovered");
+
+    const startedAt = Date.now();
+    await expect(withRetry(fn, 2)).resolves.toBe("recovered");
+
+    // The old fixed backoff would have retried after 300ms and failed again.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(2400);
+    expect(fn).toHaveBeenCalledTimes(2);
+  }, 10000);
+
+  it("ignores an implausibly long provider wait rather than holding the request open", async () => {
+    const longWait = new AiError({
+      code: "rate_limited",
+      provider: "groq",
+      message: "Please try again in 3600s.",
+      statusCode: 429,
+      retryAfterMs: 3_600_000,
+    });
+    const fn = vi.fn().mockRejectedValueOnce(longWait).mockResolvedValueOnce("recovered");
+
+    const startedAt = Date.now();
+    await expect(withRetry(fn, 2)).resolves.toBe("recovered");
+
+    // Falls back to the normal short backoff instead of sleeping for an hour.
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
 });

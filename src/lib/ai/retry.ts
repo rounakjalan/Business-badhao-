@@ -9,6 +9,23 @@ function backoffMs(attempt: number): number {
 }
 
 /**
+ * Upper bound on honoring a provider-stated wait. Rate limits clear in a
+ * few seconds; anything longer is not worth holding a request open for,
+ * so we fall back to the normal backoff and let the next provider try.
+ */
+const MAX_RETRY_AFTER_MS = 6000;
+
+function waitMs(err: unknown, attempt: number): number {
+  const requested = err instanceof AiError ? err.retryAfterMs : undefined;
+  if (requested !== undefined && requested <= MAX_RETRY_AFTER_MS) {
+    // The provider told us exactly when its window clears. Retrying before
+    // then just spends an attempt on a guaranteed failure.
+    return Math.max(requested, backoffMs(attempt));
+  }
+  return backoffMs(attempt);
+}
+
+/**
  * Retries `fn` only for transient failures (AiError.retryable), with a
  * small exponential backoff. Auth failures, bad requests, and
  * model-not-found errors are never retried — retrying those just repeats
@@ -29,7 +46,7 @@ export async function withRetry<T>(fn: () => Promise<T>, maxRetries: number): Pr
       if (!retryable || attempt === maxRetries) {
         throw err;
       }
-      await sleep(backoffMs(attempt));
+      await sleep(waitMs(err, attempt));
     }
   }
 
