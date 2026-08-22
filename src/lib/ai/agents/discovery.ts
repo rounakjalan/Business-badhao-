@@ -86,12 +86,143 @@ export class NullDiscoveryProvider implements DiscoveryProvider {
 
 const DiscoveryQueriesSchema = z.object({ queries: z.array(z.string().min(1)).min(1).max(5) });
 
-const QUERY_SYSTEM_PROMPT = `You turn a business's Ideal Customer Profile and campaign into real web search queries that would surface actual companies/prospects matching that profile. You are given BUSINESS KNOWLEDGE (what this business offers — context only, do not search for the business itself), the CAMPAIGN, and the IDEAL CUSTOMER PROFILE (the primary target — who to find).
+const QUERY_SYSTEM_PROMPT = `You write web search queries that find POTENTIAL CUSTOMERS for a business.
+
+You are given WHAT THIS BUSINESS SELLS (seller-side context) and an IDEAL CUSTOMER PROFILE describing the buyer to find. Your queries must find the BUYER.
+
+THE MOST IMPORTANT RULE: never search for other businesses that sell or supply what this business sells. Agencies, firms, studios, freelancers, vendors, consultants and service providers in the seller's own field are COMPETITORS, not customers. A query like "web design agency in <city>" finds competitors and is always wrong for a business that sells web design. The only exception is when the ICP's targetCustomer / industry / businessType explicitly names those providers as the people to find.
+
+How to use each ICP field:
+- targetCustomer, industry, businessType — WHO to find. These define the kind of organisation the query should return.
+- location / service area — WHERE. Include it in most queries.
+- painPoints, needs, and any stated website/quality signals — qualifying characteristics of the buyer. Combine these with the WHO to narrow the search (e.g. an industry plus "outdated website").
+- buyingSignals — use ONLY signals that are an observable property of the prospect itself. Never turn a signal that describes the buyer looking for, hiring, comparing or contacting a provider into a query — searching for that phrase returns the providers, not the buyer.
+- preferredChannels, decisionFactors, qualificationCriteria, disqualifiers — these describe how to reach, evaluate or exclude a buyer. They are NOT search targets. Do not build queries from them.
+
+Ignore the campaign's name and the seller's own name: they describe the seller, not the prospect.
 
 Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly this key:
 { "queries": string[] }
 
-Produce 3-5 distinct, realistic search-engine queries (not questions, not full sentences with filler words) that a human researcher would actually type to find real businesses/prospects matching the ICP's location, industry, business type, and buying signals. Ground every query in the ICP fields actually given — never invent an industry, location, or characteristic not present in the ICP.`;
+Produce 3-5 distinct, realistic search-engine queries (keywords a researcher would actually type, not questions or full sentences). Each query should name the kind of business to find plus its location, and where useful one qualifying characteristic. Ground every query in the ICP fields actually given — never invent an industry, location, need or characteristic that is not present in the ICP.`;
+
+/**
+ * Words that name a *supplier of services* almost regardless of context —
+ * "digital marketing agencies in Noida" is looking for vendors whichever
+ * trade is named. When the ICP is after ordinary businesses, any query
+ * built around one of these is off-target.
+ */
+const SUPPLIER_NOUNS = new Set([
+  "agency",
+  "agencies",
+  "freelancer",
+  "freelancers",
+  "consultancy",
+  "consultancies",
+  "vendor",
+  "vendors",
+]);
+
+/**
+ * Words that name a supplier only when paired with what this business
+ * sells. A "web development company" is a competitor; a "law firm", a
+ * "yoga studio" or plain "companies in Noida" is a perfectly good buyer —
+ * so these only count next to one of the seller's own offering words.
+ */
+const AMBIGUOUS_PROVIDER_NOUNS = new Set([
+  "firm",
+  "firms",
+  "studio",
+  "studios",
+  "provider",
+  "providers",
+  "consultant",
+  "consultants",
+  "company",
+  "companies",
+  "developer",
+  "developers",
+  "designer",
+  "designers",
+]);
+
+const PROVIDER_NOUNS = new Set([...SUPPLIER_NOUNS, ...AMBIGUOUS_PROVIDER_NOUNS]);
+
+const QUERY_STOPWORDS = new Set(["the", "and", "for", "with", "our", "your", "best", "top", "near", "list", "of", "in", "at", "to", "a", "an"]);
+
+function queryTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/** Loose token match so "design" and "designing" count as the same offering word. */
+function tokensRelated(a: string, b: string): boolean {
+  if (a === b) return true;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  return shorter.length >= 4 && longer.startsWith(shorter);
+}
+
+/**
+ * The words describing what this business itself sells — used only to
+ * recognise a query that has gone looking for a competitor. Drawn from the
+ * campaign name and, when Business Knowledge exists, the business's own
+ * category and product names. Provider nouns are stripped: in "Web
+ * designing agency" the offering is "web designing", not "agency".
+ */
+function sellerOfferingTokens(criteria: DiscoveryCriteria): string[] {
+  const sources = [criteria.campaignName];
+  const profile = criteria.businessContext?.businessProfile;
+  if (profile?.category) sources.push(profile.category);
+  if (profile?.name) sources.push(profile.name);
+  for (const product of criteria.businessContext?.productsServices ?? []) sources.push(product.name);
+
+  return [...new Set(sources.flatMap(queryTokens))].filter(
+    (token) => token.length >= 3 && !QUERY_STOPWORDS.has(token) && !PROVIDER_NOUNS.has(token)
+  );
+}
+
+/** True when the ICP itself is asking for providers (e.g. selling white-label to agencies), which makes competitor-shaped queries correct. */
+function icpTargetsProviders(icpCriteria: Record<string, unknown>): boolean {
+  const targeting = [icpCriteria.targetCustomer, icpCriteria.industry, icpCriteria.businessType]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ");
+  return queryTokens(targeting).some((token) => PROVIDER_NOUNS.has(token));
+}
+
+/**
+ * True when a query is looking for a supplier of what this business sells —
+ * i.e. a competitor rather than a buyer. Recognised as one of the seller's
+ * own offering words sitting immediately before a provider noun ("web
+ * design agency", "web development company"). The adjacency matters: it is
+ * what keeps a legitimate buyer query like "law firms with an outdated
+ * website" from being mistaken for a competitor search.
+ */
+export function isCompetitorSeekingQuery(query: string, sellerTokens: string[]): boolean {
+  const tokens = queryTokens(query);
+
+  return tokens.some((token, index) => {
+    // Unambiguous supplier word anywhere in the query — this covers the
+    // seller's own trade and the adjacent ones ("SEO agency", "digital
+    // marketing agencies"), which are competitors just the same.
+    if (SUPPLIER_NOUNS.has(token)) return true;
+
+    if (!AMBIGUOUS_PROVIDER_NOUNS.has(token) || sellerTokens.length === 0) return false;
+    const preceding = tokens.slice(Math.max(0, index - 3), index);
+    return preceding.some((prev) => sellerTokens.some((seller) => tokensRelated(prev, seller)));
+  });
+}
+
+/** Last-resort query built only from ICP fields the user actually saved — never invents a characteristic. */
+function icpDerivedQuery(icpCriteria: Record<string, unknown>): string | null {
+  const field = (key: string) => (typeof icpCriteria[key] === "string" ? (icpCriteria[key] as string).trim() : "");
+  const who = field("targetCustomer") || [field("businessType"), field("industry")].filter(Boolean).join(" ");
+  if (!who) return null;
+  const location = field("location");
+  return location && !who.toLowerCase().includes(location.toLowerCase().split(",")[0].trim()) ? `${who} ${location}` : who;
+}
 
 async function generateDiscoveryQueries(
   criteria: DiscoveryCriteria
@@ -99,14 +230,12 @@ async function generateDiscoveryQueries(
   const businessKnowledgeText = criteria.businessContext ? formatBusinessContext(criteria.businessContext) : null;
 
   const userPrompt = [
-    "=== BUSINESS KNOWLEDGE (context only — not the search target) ===",
+    "=== WHAT THIS BUSINESS SELLS (seller-side — never search for other suppliers of this) ===",
     businessKnowledgeText ?? "No Business Knowledge is on file for this organization yet.",
-    "",
-    "=== CAMPAIGN ===",
-    `Campaign: ${criteria.campaignName}`,
+    `Campaign name (the seller's own label for this effort, not a search target): ${criteria.campaignName}`,
     `Objective: ${criteria.campaignObjective ?? "unknown"}`,
     "",
-    "=== IDEAL CUSTOMER PROFILE (the search target) ===",
+    "=== IDEAL CUSTOMER PROFILE — the BUYER to find (the search target) ===",
     JSON.stringify(criteria.icpCriteria),
   ].join("\n");
 
@@ -134,7 +263,27 @@ async function generateDiscoveryQueries(
   const parsed = parseAiJson(result.text, DiscoveryQueriesSchema);
   if (!parsed.ok) return { ok: false, message: "Could not generate discovery search queries — please try again." };
 
-  return { ok: true, queries: parsed.data.queries };
+  // The prompt above asks for buyer-focused queries; this enforces it. A
+  // competitor-shaped query is dropped outright rather than searched, so a
+  // single stray one can't fill the run with rival agencies. Skipped when
+  // the ICP genuinely targets providers.
+  if (icpTargetsProviders(criteria.icpCriteria)) {
+    return { ok: true, queries: parsed.data.queries };
+  }
+
+  const sellerTokens = sellerOfferingTokens(criteria);
+  const buyerFocused = parsed.data.queries.filter((query) => !isCompetitorSeekingQuery(query, sellerTokens));
+  if (buyerFocused.length > 0) {
+    return { ok: true, queries: buyerFocused };
+  }
+
+  // Everything the model produced was aimed at competitors. Fall back to a
+  // query composed only of ICP fields the user actually saved, so discovery
+  // still runs against real targeting instead of searching for rivals.
+  const fallback = icpDerivedQuery(criteria.icpCriteria);
+  return fallback
+    ? { ok: true, queries: [fallback] }
+    : { ok: false, message: "Could not build buyer-focused search queries from this campaign's ICP — please refine the ICP and try again." };
 }
 
 // ---------------------------------------------------------------------------

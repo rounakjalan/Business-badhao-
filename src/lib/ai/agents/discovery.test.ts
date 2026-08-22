@@ -7,6 +7,7 @@ import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import {
   dedupeProspects,
   getDiscoveryProvider,
+  isCompetitorSeekingQuery,
   NullDiscoveryProvider,
   normalizeWebsite,
   prospectDedupeKey,
@@ -350,11 +351,11 @@ describe("lead discovery", () => {
       await new TavilyDiscoveryProvider().discover({ ...baseCriteria, businessContext });
 
       const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
-      const businessIdx = prompt.indexOf("=== BUSINESS KNOWLEDGE");
+      const sellerIdx = prompt.indexOf("=== WHAT THIS BUSINESS SELLS");
       const icpIdx = prompt.indexOf("=== IDEAL CUSTOMER PROFILE");
       expect(prompt).toContain("Acme Ads");
-      expect(businessIdx).toBeGreaterThanOrEqual(0);
-      expect(icpIdx).toBeGreaterThan(businessIdx);
+      expect(sellerIdx).toBeGreaterThanOrEqual(0);
+      expect(icpIdx).toBeGreaterThan(sellerIdx);
     });
 
     it("keeps organizationId scoped through both AI calls, so every tracked agent run stays attributable to the calling org", async () => {
@@ -548,6 +549,175 @@ describe("lead discovery", () => {
       const a: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: "sharmaboutique.example" };
       const b: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: "otherboutique.example", companyName: "Other Boutique" };
       expect(dedupeProspects([a, b])).toHaveLength(2);
+    });
+  });
+
+  describe("buyer-focused query targeting (never competitors)", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "tavily-key";
+      delete process.env.EXA_API_KEY;
+    });
+
+    // The real ICP that produced competitor results in production: a web
+    // design agency selling to SMEs. Note the buying signal and channels
+    // that name the seller's own category.
+    const webDesignIcp = {
+      targetCustomer: "Small to medium enterprises in Noida lacking a modern website",
+      location: "Noida, India",
+      industry: "Multiple industries (SMEs)",
+      businessType: "Small to medium enterprise",
+      needs: ["Modern responsive website"],
+      painPoints: ["Outdated design hurting brand perception"],
+      buyingSignals: ["Searching for web design agencies online", "Requesting quotes for redesign"],
+      preferredChannels: ["Networking at Noida business chambers"],
+      decisionFactors: ["Portfolio quality"],
+      disqualifiers: ["Business located outside Noida"],
+      qualificationCriteria: ["Existing website older than 3 years or none"],
+    };
+
+    const webDesignCriteria: DiscoveryCriteria = {
+      ...baseCriteria,
+      campaignName: "Web designing agency",
+      campaignObjective: "Get more customers",
+      icpCriteria: webDesignIcp,
+    };
+
+    /** Runs discovery with the model returning `queries`, and reports which ones actually reached the search provider. */
+    async function queriesActuallySearched(criteria: DiscoveryCriteria, queries: string[]) {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: [] }), provider: "groq", model: "m" });
+      const searched: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          searched.push(JSON.parse(String(init?.body ?? "{}")).query);
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        })
+      );
+      await new TavilyDiscoveryProvider().discover(criteria);
+      return searched;
+    }
+
+    it("1. keeps buyer-focused queries for a buyer-focused ICP", async () => {
+      const searched = await queriesActuallySearched(webDesignCriteria, [
+        "Noida SME manufacturers outdated website",
+        "Noida retail businesses no website",
+        "small businesses Noida website redesign needed",
+      ]);
+      expect(searched).toHaveLength(3);
+      expect(searched).toContain("Noida SME manufacturers outdated website");
+    });
+
+    it("2. drops competitor-seeking queries before they are ever searched", async () => {
+      const searched = await queriesActuallySearched(webDesignCriteria, [
+        "Noida SME manufacturers outdated website",
+        "web design agency in Noida",
+        "web development company Noida",
+        "digital marketing agencies Noida",
+      ]);
+      expect(searched).toEqual(["Noida SME manufacturers outdated website"]);
+    });
+
+    it("2b. falls back to an ICP-derived query when every generated query targets competitors", async () => {
+      const searched = await queriesActuallySearched(webDesignCriteria, [
+        "web design agency in Noida",
+        "best web designers Noida",
+      ]);
+      expect(searched).toHaveLength(1);
+      // Composed from saved ICP fields only — nothing invented.
+      expect(searched[0]).toContain("Small to medium enterprises in Noida lacking a modern website");
+      expect(isCompetitorSeekingQuery(searched[0], ["web", "designing"])).toBe(false);
+    });
+
+    it("2c. keeps provider-shaped queries when the ICP genuinely targets providers", async () => {
+      const agencyIcp = {
+        ...webDesignIcp,
+        targetCustomer: "Marketing agencies needing white-label web development",
+        industry: "Marketing agencies",
+        businessType: "Agency",
+      };
+      const searched = await queriesActuallySearched(
+        { ...webDesignCriteria, icpCriteria: agencyIcp },
+        ["marketing agencies in Noida", "white label web development agency partners Noida"]
+      );
+      expect(searched).toHaveLength(2);
+    });
+
+    it("3. sends the ICP's location and business type, and frames the ICP as the buyer", async () => {
+      await queriesActuallySearched(webDesignCriteria, ["Noida SME outdated website"]);
+      const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+      const system = vi.mocked(runHermesCompletion).mock.calls[0][0].systemPrompt;
+
+      expect(prompt).toContain("Noida, India");
+      expect(prompt).toContain("Small to medium enterprise");
+      expect(prompt).toContain("the BUYER to find");
+      // The campaign name is present but explicitly marked as seller-side, not a target.
+      expect(prompt).toContain("not a search target");
+      expect(system).toMatch(/never search for other businesses that sell or supply/i);
+    });
+
+    it("4. instructs the model to use problem/buying signals but not provider-seeking ones", async () => {
+      await queriesActuallySearched(webDesignCriteria, ["Noida SME outdated website"]);
+      const system = vi.mocked(runHermesCompletion).mock.calls[0][0].systemPrompt;
+      expect(system).toMatch(/painPoints/);
+      expect(system).toMatch(/buyingSignals/);
+      expect(system).toMatch(/looking for, hiring, comparing or contacting a provider/i);
+      // Outreach/evaluation fields are explicitly excluded as search targets.
+      expect(system).toMatch(/preferredChannels[\s\S]*NOT search targets/i);
+    });
+
+    it("does not flag a legitimate buyer query that merely mentions an ambiguous provider noun", () => {
+      const sellerTokens = ["web", "designing"];
+      // Real buyers that happen to be named with a provider-ish word.
+      expect(isCompetitorSeekingQuery("Noida law firms with an outdated website", sellerTokens)).toBe(false);
+      expect(isCompetitorSeekingQuery("Noida yoga studios outdated website", sellerTokens)).toBe(false);
+      expect(isCompetitorSeekingQuery("Noida companies needing website redesign", sellerTokens)).toBe(false);
+      expect(isCompetitorSeekingQuery("Noida manufacturing companies no website", sellerTokens)).toBe(false);
+
+      // The seller's own trade, and adjacent trades that are competitors too.
+      expect(isCompetitorSeekingQuery("web design agency Noida", sellerTokens)).toBe(true);
+      expect(isCompetitorSeekingQuery("web development company Noida", sellerTokens)).toBe(true);
+      expect(isCompetitorSeekingQuery("digital marketing agencies Noida", sellerTokens)).toBe(true);
+      expect(isCompetitorSeekingQuery("SEO agency in Noida", sellerTokens)).toBe(true);
+      expect(isCompetitorSeekingQuery("freelancers for website work Noida", sellerTokens)).toBe(true);
+    });
+
+    it("5. leaves the Tavily -> Exa fallback untouched under the new targeting", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["Noida SME outdated website"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXA_EXTRACTION_RESPONSE), provider: "groq", model: "m" });
+      const fetchMock = mockFetchRouter({
+        tavily: async () => new Response("rate limited", { status: 429 }),
+        exa: async () => new Response(JSON.stringify({ results: EXA_HITS }), { status: 200 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(webDesignCriteria);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(fetchMock).toHaveBeenCalledTimes(2); // Tavily attempted, then Exa
+      expect(result.prospects).toHaveLength(1);
+    });
+
+    it("6. leaves extraction -> verification -> persistence shape untouched under the new targeting", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["Noida SME outdated website"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "groq", model: "m" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) }));
+
+      const result = await new TavilyDiscoveryProvider().discover(webDesignCriteria);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      // Same verified, persistence-ready shape as before this change.
+      expect(result.prospects[0]).toMatchObject({
+        companyName: "Sharma Boutique",
+        sourceUrl: "https://sharmaboutique.example/about",
+      });
+      expect(result.prospects[0].evidenceSnippet).toBeTruthy();
     });
   });
 
