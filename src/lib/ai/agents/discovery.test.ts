@@ -1160,6 +1160,31 @@ describe("lead discovery", () => {
       expect(result.telemetry?.servedByExa).toEqual(["manufacturing businesses Noida directory listings"]);
     });
 
+    it("rejects an extracted company whose own name advertises it as a competitor", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["manufacturing businesses Noida directory listings"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({
+          ok: true,
+          text: JSON.stringify({ prospects: [entry("Pixel Web Design Studio"), entry("H.V. Metal Arc Private Limited")] }),
+          provider: "groq",
+          model: "m",
+        });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: [LISTING_HIT] }), { status: 200 }) }));
+
+      const result = await new TavilyDiscoveryProvider().discover({ ...baseCriteria, campaignName: "Web designing agency" });
+      if (!result.ok) throw new Error("expected ok");
+
+      expect(result.prospects.map((p) => p.companyName)).toEqual(["H.V. Metal Arc Private Limited"]);
+      expect(result.telemetry?.rejectedCompetitor).toBe(1);
+    });
+
+    it("tells extraction to skip businesses described as providers of what the seller sells", async () => {
+      await extractFrom(["H.V. Metal Arc Private Limited"]);
+      const system = vi.mocked(runHermesCompletion).mock.calls[1][0].systemPrompt;
+      expect(system).toMatch(/NEVER INCLUDE A COMPETITOR/i);
+      expect(system).toMatch(/described as an agency, studio or provider of the seller's service must be skipped/i);
+    });
+
     it("counts a prospect citing an ungrounded URL as rejected, not persisted", async () => {
       vi.mocked(runHermesCompletion)
         .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["manufacturing businesses Noida directory listings"] }), provider: "groq", model: "m" })

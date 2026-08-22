@@ -65,6 +65,7 @@ export type ProviderTelemetry = {
   extracted: number;
   rejectedNotGrounded: number;
   rejectedNotABusiness: number;
+  rejectedCompetitor: number;
   verified: number;
 };
 
@@ -76,6 +77,7 @@ export function newTelemetry(): ProviderTelemetry {
     extracted: 0,
     rejectedNotGrounded: 0,
     rejectedNotABusiness: 0,
+    rejectedCompetitor: 0,
     verified: 0,
   };
 }
@@ -519,6 +521,8 @@ EVERY ENTRY MUST BE AN ACTUAL ORGANISATION that could become a customer — a co
 - the directory, portal, blog or association whose page you are reading.
 If you cannot tell whether a name is a company or one of the above, leave it out.
 
+NEVER INCLUDE A COMPETITOR. If a business supplies what the seller sells — an agency, studio, firm, consultancy or freelancer in the seller's own or an adjacent field — it is a rival, not a customer, no matter how well it fits the location or size. Read the result's own description of the business before including it: a company described as an agency, studio or provider of the seller's service must be skipped. The only exception is when the ICP's targetCustomer / industry / businessType explicitly asks for those providers.
+
 APPLY THE ICP BEFORE INCLUDING A BUSINESS. Skip any business that plainly contradicts it: outside the ICP's location, in an industry the ICP excludes, or matching any of the ICP's disqualifiers. Respect the ICP's company size — when it asks for small or medium businesses, do not include large enterprises, multinationals or household-name corporations; those are the wrong buyer even though directories list them prominently. Skip a business whose scale is obviously far outside what the ICP describes.
 
 Take at most 3 businesses from any single result, choosing the ones that best fit the ICP, and spread your entries across the different results rather than exhausting the first one. If the same company appears under variant names ("TCS" and "Tata Consultancy Services"), emit it once under its fullest name.
@@ -682,6 +686,7 @@ async function extractProspectsFromResults(
   // the actual search result rather than from the model's rendering of it.
   if (telemetry) telemetry.extracted = parsed.data.prospects.length;
 
+  const sellerTokens = sellerOfferingTokens(criteria);
   const grounded: DiscoveredProspect[] = [];
   for (const prospect of parsed.data.prospects) {
     const companyName = prospect.companyName.trim();
@@ -690,6 +695,15 @@ async function extractProspectsFromResults(
     // directory that published the page.
     if (isNonBusinessName(companyName) || isSourceSiteName(companyName, prospect.sourceUrl)) {
       if (telemetry) telemetry.rejectedNotABusiness += 1;
+      continue;
+    }
+
+    // Backstop under the extraction prompt's competitor rule: a company
+    // whose own name advertises it as a supplier of what we sell ("… Web
+    // Design Studio") is a rival, not a buyer. Name only — evidence text
+    // mentions words like "agency" far too incidentally to judge on.
+    if (!icpTargetsProviders(criteria.icpCriteria) && isCompetitorSeekingQuery(companyName, sellerTokens)) {
+      if (telemetry) telemetry.rejectedCompetitor += 1;
       continue;
     }
 
