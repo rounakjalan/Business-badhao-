@@ -457,11 +457,15 @@ If nothing in the results is a real matching prospect, return an empty array —
  */
 // Fewer results, longer excerpts: a directory or "top <industry> in <city>"
 // page carries many businesses, and a short excerpt truncates away the very
-// names we are there to collect. 12 x 600 chars plus the reserved completion
-// tokens still leaves clear headroom under the 8k window.
-const MAX_RESULTS_SENT_TO_EXTRACTION = 12;
+// names we are there to collect. The completion budget matters just as much
+// now that one page can yield a dozen entries — a production run finished
+// with finish_reason "length", having spent the whole budget on the first
+// listing page and never reaching the other queries' results, which is why
+// output is weighted over input here. The whole request still sits under
+// the 8k window.
+const MAX_RESULTS_SENT_TO_EXTRACTION = 10;
 const RESULT_EXCERPT_CHARS = 600;
-const EXTRACTION_MAX_TOKENS = 3000;
+const EXTRACTION_MAX_TOKENS = 4200;
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;

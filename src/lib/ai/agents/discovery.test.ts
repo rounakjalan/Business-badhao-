@@ -873,7 +873,7 @@ describe("lead discovery", () => {
 
       const prompt = vi.mocked(runHermesCompletion).mock.calls[1][0].userPrompt;
       const resultCount = (prompt.match(/^URL: /gm) ?? []).length;
-      expect(resultCount).toBeLessThanOrEqual(12);
+      expect(resultCount).toBeLessThanOrEqual(10);
       // Both queries are represented — capping must not silently drop one entirely.
       expect(prompt).toContain("alpha0.example");
       expect(prompt).toContain("beta0.example");
