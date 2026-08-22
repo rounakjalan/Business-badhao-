@@ -89,7 +89,15 @@ export async function runLeadQualification(input: LeadQualificationInput): Promi
     taskType: "LEAD_QUALIFICATION",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
-    maxTokens: 700,
+    // Qualification now always runs *after* Lead Research and receives its
+    // findings, so the model has substantially more to weigh and explain
+    // than when it scored a bare lead record. Measured: the same lead with
+    // no research on file completed in ~270 tokens, while with research the
+    // primary model hit the old 700 ceiling every time — truncating
+    // mid-document (finishReason "length") so schema validation rejected an
+    // otherwise good result. 1600 matches the research agent's budget. A
+    // ceiling, not a reservation.
+    maxTokens: 1600,
     temperature: 0.3,
     responseFormat: "json",
   });
