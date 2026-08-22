@@ -521,6 +521,8 @@ EVERY ENTRY MUST BE AN ACTUAL ORGANISATION that could become a customer — a co
 - the directory, portal, blog or association whose page you are reading.
 If you cannot tell whether a name is a company or one of the above, leave it out.
 
+USE THE SELLER CONTEXT FOR RELEVANCE, NOT AS A SEARCH TARGET. It tells you what this business sells, its products/services, its value proposition and the kinds of customer it serves. Use it to judge whether a discovered business is a plausible customer for that offering, and to recognise a rival. It never names a company to extract — the seller is not a prospect, and nothing in that section may be emitted as a business.
+
 NEVER INCLUDE A COMPETITOR. If a business supplies what the seller sells — an agency, studio, firm, consultancy or freelancer in the seller's own or an adjacent field — it is a rival, not a customer, no matter how well it fits the location or size. Read the result's own description of the business before including it: a company described as an agency, studio or provider of the seller's service must be skipped. The only exception is when the ICP's targetCustomer / industry / businessType explicitly asks for those providers.
 
 APPLY THE ICP BEFORE INCLUDING A BUSINESS. Skip any business that plainly contradicts it: outside the ICP's location, in an industry the ICP excludes, or matching any of the ICP's disqualifiers. Respect the ICP's company size — when it asks for small or medium businesses, do not include large enterprises, multinationals or household-name corporations; those are the wrong buyer even though directories list them prominently. Skip a business whose scale is obviously far outside what the ICP describes.
@@ -549,7 +551,9 @@ If nothing in the results is a real matching prospect, return an empty array —
 // the 8k window.
 const MAX_RESULTS_SENT_TO_EXTRACTION = 10;
 const RESULT_EXCERPT_CHARS = 600;
-const EXTRACTION_MAX_TOKENS = 4200;
+/** Seller-offering context is capped so adding it cannot push the request over the per-minute allowance. */
+const SELLER_CONTEXT_CHARS = 900;
+const EXTRACTION_MAX_TOKENS = 4000;
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -648,8 +652,18 @@ async function extractProspectsFromResults(
     )
     .join("\n\n");
 
+  // What the seller offers, so relevance can be judged ("would this kind of
+  // business plausibly buy this?") and rivals recognised. Truncated because
+  // the whole request shares one per-minute token allowance with the search
+  // results below. Offering only — selectDiscoveryContext has already
+  // stripped the seller's contact details and geography.
+  const sellerOffering = criteria.businessContext ? formatBusinessContext(criteria.businessContext) : null;
+
   const userPrompt = [
-    "=== IDEAL CUSTOMER PROFILE ===",
+    "=== WHAT THIS BUSINESS SELLS (seller-side — for judging relevance only, never a company to extract) ===",
+    sellerOffering ? truncate(sellerOffering, SELLER_CONTEXT_CHARS) : "No Business Knowledge is on file for this organization yet.",
+    "",
+    "=== IDEAL CUSTOMER PROFILE — the kind of BUYER wanted ===",
     JSON.stringify(criteria.icpCriteria),
     "",
     "=== REAL SEARCH RESULTS ===",

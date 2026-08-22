@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BusinessContext } from "@/lib/business-context";
+import { selectDiscoveryContext, type BusinessContext } from "@/lib/business-context";
 
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
@@ -1202,6 +1202,144 @@ describe("lead discovery", () => {
       expect(result.prospects).toEqual([]);
       expect(result.telemetry?.rejectedNotGrounded).toBe(1);
       expect(result.telemetry?.verified).toBe(0);
+    });
+  });
+
+  describe("Business Knowledge reaches extraction without becoming a search target", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "tavily-key";
+      delete process.env.EXA_API_KEY;
+    });
+
+    // A seller profile carrying BOTH offering info and seller-side identity.
+    // selectDiscoveryContext is what strips the identity half; this is the
+    // shape discovery actually receives after that.
+    const sellerContext: BusinessContext = {
+      businessProfile: {
+        name: "Acme Web Studio",
+        description: "We build and redesign websites for Indian SMEs",
+        category: "Web design",
+        about: "Specialists in mobile-first redesigns",
+        website: null,
+        phone: null,
+        email: null,
+        whatsapp: null,
+        address: null,
+        serviceArea: null,
+        openingHours: null,
+      },
+      productsServices: [
+        { name: "Website Redesign", description: "Rebuild of an outdated site", category: null, price: null, pricingType: "custom", features: [], benefits: ["mobile-friendly"], availability: "available", specialOffers: null },
+      ],
+      valueProposition: { keySellingPoints: ["10 years redesigning SME sites"], productBenefits: [] },
+      faqs: [],
+      policies: [],
+      aiCommunicationRules: null,
+      mediaReferences: [],
+    };
+
+    async function runWithSellerContext() {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "groq", model: "m" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) }));
+      return new TavilyDiscoveryProvider().discover({ ...baseCriteria, businessContext: sellerContext });
+    }
+
+    it("1. sends what the business sells into the extraction prompt", async () => {
+      await runWithSellerContext();
+      const extractionPrompt = vi.mocked(runHermesCompletion).mock.calls[1][0].userPrompt;
+
+      expect(extractionPrompt).toContain("WHAT THIS BUSINESS SELLS");
+      expect(extractionPrompt).toContain("Website Redesign");
+      expect(extractionPrompt).toContain("We build and redesign websites for Indian SMEs");
+      // The ICP is still there, and still distinct from the seller block.
+      const sellerIdx = extractionPrompt.indexOf("WHAT THIS BUSINESS SELLS");
+      const icpIdx = extractionPrompt.indexOf("IDEAL CUSTOMER PROFILE");
+      expect(icpIdx).toBeGreaterThan(sellerIdx);
+    });
+
+    it("1b. tells extraction to use the seller context for relevance only, never as a company to extract", async () => {
+      await runWithSellerContext();
+      const system = vi.mocked(runHermesCompletion).mock.calls[1][0].systemPrompt;
+      expect(system).toMatch(/USE THE SELLER CONTEXT FOR RELEVANCE, NOT AS A SEARCH TARGET/i);
+      expect(system).toMatch(/the seller is not a prospect/i);
+    });
+
+    it("2. selectDiscoveryContext strips seller identity so it can never become a buyer search target", () => {
+      const full: BusinessContext = {
+        ...sellerContext,
+        businessProfile: {
+          ...sellerContext.businessProfile!,
+          website: "https://acmewebstudio.example",
+          phone: "+91 99999 00000",
+          email: "hello@acmewebstudio.example",
+          whatsapp: "+91 99999 00000",
+          address: "Sector 62, Noida",
+          serviceArea: "Delhi NCR",
+          openingHours: "9-6",
+        },
+      };
+
+      const selected = selectDiscoveryContext(full);
+
+      // Offering survives...
+      expect(selected.businessProfile?.category).toBe("Web design");
+      expect(selected.productsServices).toHaveLength(1);
+      // ...identity and seller geography do not.
+      expect(selected.businessProfile?.website).toBeNull();
+      expect(selected.businessProfile?.phone).toBeNull();
+      expect(selected.businessProfile?.email).toBeNull();
+      expect(selected.businessProfile?.address).toBeNull();
+      expect(selected.businessProfile?.serviceArea).toBeNull();
+    });
+
+    it("2b. the seller's own geography never reaches the query prompt as a place to search", async () => {
+      const full: BusinessContext = {
+        ...sellerContext,
+        businessProfile: { ...sellerContext.businessProfile!, serviceArea: "Delhi NCR", address: "Sector 62, Noida" },
+      };
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: [] }), provider: "groq", model: "m" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) }));
+
+      await new TavilyDiscoveryProvider().discover({ ...baseCriteria, businessContext: selectDiscoveryContext(full) });
+
+      const queryPrompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+      expect(queryPrompt).not.toContain("Delhi NCR");
+      expect(queryPrompt).not.toContain("Sector 62");
+      // The ICP's own location is still the search geography.
+      expect(queryPrompt).toContain("Jaipur");
+    });
+
+    it("6. anti-fabrication and competitor guards still hold with seller context present", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({
+          ok: true,
+          text: JSON.stringify({
+            prospects: [
+              { ...EXTRACTION_RESPONSE.prospects[0], companyName: "Ghost Ltd", sourceUrl: "https://never-returned.example/x" },
+              { ...EXTRACTION_RESPONSE.prospects[0], companyName: "Rival Web Design Agency" },
+              EXTRACTION_RESPONSE.prospects[0],
+            ],
+          }),
+          provider: "groq",
+          model: "m",
+        });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) }));
+
+      const result = await new TavilyDiscoveryProvider().discover({
+        ...baseCriteria,
+        campaignName: "Web designing agency",
+        businessContext: sellerContext,
+      });
+      if (!result.ok) throw new Error("expected ok");
+
+      expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+      expect(result.telemetry?.rejectedNotGrounded).toBe(1);
+      expect(result.telemetry?.rejectedCompetitor).toBe(1);
     });
   });
 

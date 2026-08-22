@@ -167,11 +167,36 @@ export function selectLossAnalysisContext(context: BusinessContext): BusinessCon
   return { ...EMPTY_BUSINESS_CONTEXT, productsServices: context.productsServices, policies: context.policies };
 }
 
-/** Lead Discovery: profile, products/services, value proposition, and relevant policies — context for interpreting the ICP into search queries, never the primary target (the ICP is). No FAQs/media — irrelevant to finding prospects. */
+/**
+ * Lead Discovery: what this business SELLS — category, description,
+ * products/services, value proposition and the policies that can gate fit.
+ * Used to interpret the ICP into search queries and, later, to judge
+ * whether a discovered business is plausibly relevant. The ICP, never this,
+ * is the search target.
+ *
+ * The seller's own contact details and geography (website, phone, email,
+ * WhatsApp, address, service area, opening hours) are deliberately stripped:
+ * they are seller *identity*, not offering. They carry no signal about who
+ * to look for, and leaving the seller's own location in risks it competing
+ * with the ICP's location for the "where" of a search. No FAQs/media
+ * either — irrelevant to finding prospects.
+ */
 export function selectDiscoveryContext(context: BusinessContext): BusinessContext {
+  const profile = context.businessProfile;
   return {
     ...EMPTY_BUSINESS_CONTEXT,
-    businessProfile: context.businessProfile,
+    businessProfile: profile
+      ? {
+          ...profile,
+          website: null,
+          phone: null,
+          email: null,
+          whatsapp: null,
+          address: null,
+          serviceArea: null,
+          openingHours: null,
+        }
+      : null,
     productsServices: context.productsServices,
     valueProposition: context.valueProposition,
     policies: context.policies,
