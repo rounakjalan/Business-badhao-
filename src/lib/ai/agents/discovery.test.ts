@@ -873,12 +873,167 @@ describe("lead discovery", () => {
 
       const prompt = vi.mocked(runHermesCompletion).mock.calls[1][0].userPrompt;
       const resultCount = (prompt.match(/^URL: /gm) ?? []).length;
-      expect(resultCount).toBeLessThanOrEqual(20);
+      expect(resultCount).toBeLessThanOrEqual(12);
       // Both queries are represented — capping must not silently drop one entirely.
       expect(prompt).toContain("alpha0.example");
       expect(prompt).toContain("beta0.example");
       // Long pages are excerpted, not sent whole.
       expect(prompt.length).toBeLessThan(20_000);
+    });
+  });
+
+  describe("finding identifiable businesses via directories and listings", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "tavily-key";
+      delete process.env.EXA_API_KEY;
+    });
+
+    // A realistic directory page: one URL, several individually named businesses.
+    const DIRECTORY_HIT = {
+      title: "Top Packaging Manufacturers in Noida — Business Directory",
+      url: "https://directory.example/noida/packaging-manufacturers",
+      content:
+        "Shreeji Packaging Industries — corrugated box manufacturer based in Sector 63, Noida, serving FMCG clients since 2004. " +
+        "Noida Poly Pack Pvt Ltd — flexible packaging supplier in Sector 8, Noida. " +
+        "Anand Cartons — family-run carton maker operating from Phase 2, Noida.",
+    };
+
+    const DIRECTORY_EXTRACTION = {
+      prospects: ["Shreeji Packaging Industries", "Noida Poly Pack Pvt Ltd", "Anand Cartons"].map((companyName) => ({
+        companyName,
+        website: null,
+        location: "Noida",
+        industry: "Packaging",
+        businessType: "Manufacturer",
+        email: null,
+        phone: null,
+        matchedIcpCriteria: ["location: Noida"],
+        evidenceSnippet: DIRECTORY_HIT.content.slice(0, 100),
+        sourceUrl: DIRECTORY_HIT.url,
+        searchQuery: "packaging manufacturers in Noida directory",
+      })),
+    };
+
+    async function runWithHits(hits: { title: string; url: string; content: string }[], extractionText: string) {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["packaging manufacturers in Noida directory"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: extractionText, provider: "groq", model: "m" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: hits }), { status: 200 }) }));
+      return new TavilyDiscoveryProvider().discover(baseCriteria);
+    }
+
+    it("directs query generation at sources that actually name businesses, not at the buying need", async () => {
+      await runWithHits([DIRECTORY_HIT], JSON.stringify({ prospects: [] }));
+      const system = vi.mocked(runHermesCompletion).mock.calls[0][0].systemPrompt;
+
+      expect(system).toMatch(/business directories|local and chamber-of-commerce listings/i);
+      expect(system).toMatch(/FIND PAGES THAT NAME REAL BUSINESSES/i);
+      // Pain points are demoted to qualification, not mandatory search terms.
+      expect(system).toMatch(/QUALIFICATION signals[\s\S]*NOT required search terms/i);
+      // And the competitor guard is still stated.
+      expect(system).toMatch(/never search for other businesses that sell or supply/i);
+    });
+
+    it("extracts every individually named business from a single directory page", async () => {
+      const result = await runWithHits([DIRECTORY_HIT], JSON.stringify(DIRECTORY_EXTRACTION));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects.map((p) => p.companyName)).toEqual([
+        "Shreeji Packaging Industries",
+        "Noida Poly Pack Pvt Ltd",
+        "Anand Cartons",
+      ]);
+      // All three keep the real directory URL as their source.
+      for (const prospect of result.prospects) {
+        expect(prospect.sourceUrl).toBe(DIRECTORY_HIT.url);
+        expect(DIRECTORY_HIT.content).toContain(prospect.evidenceSnippet.replace(/…$/, ""));
+      }
+    });
+
+    it("tells the model to list the businesses, not the directory site itself", async () => {
+      await runWithHits([DIRECTORY_HIT], JSON.stringify({ prospects: [] }));
+      const system = vi.mocked(runHermesCompletion).mock.calls[1][0].systemPrompt;
+      expect(system).toMatch(/extract EVERY individually named business/i);
+      expect(system).toMatch(/never the site doing the listing/i);
+    });
+
+    it("fabricates nothing from a listing page that names no companies", async () => {
+      const emptyDirectory = {
+        title: "Noida Business Directory",
+        url: "https://directory.example/noida",
+        content: "Browse thousands of verified businesses across every category in Noida. Sign up to list your business.",
+      };
+      const result = await runWithHits([emptyDirectory], JSON.stringify({ prospects: [] }));
+      expect(result).toMatchObject({ ok: true, prospects: [] });
+    });
+
+    it("does not let the model claim a website problem the page never evidenced", async () => {
+      await runWithHits([DIRECTORY_HIT], JSON.stringify({ prospects: [] }));
+      const system = vi.mocked(runHermesCompletion).mock.calls[1][0].systemPrompt;
+      expect(system).toMatch(/Do not assert a problem the evidence does not show/i);
+      expect(system).toMatch(/do not claim its website is outdated, missing or poor/i);
+      expect(system).toMatch(/Leave "website" null unless the content actually gives that company's own site/i);
+    });
+
+    it("persists a discovered business that has no website yet, without inventing one", async () => {
+      const result = await runWithHits([DIRECTORY_HIT], JSON.stringify(DIRECTORY_EXTRACTION));
+      if (!result.ok) throw new Error("expected ok");
+      // Discovery's job ends at an identifiable business; website may legitimately be unknown.
+      expect(result.prospects[0].website).toBeNull();
+      expect(result.prospects[0].companyName).toBe("Shreeji Packaging Industries");
+    });
+
+    it("sends directory excerpts long enough to keep the listed company names", async () => {
+      await runWithHits([DIRECTORY_HIT], JSON.stringify({ prospects: [] }));
+      const prompt = vi.mocked(runHermesCompletion).mock.calls[1][0].userPrompt;
+      // All three names survive truncation into the extraction prompt.
+      expect(prompt).toContain("Shreeji Packaging Industries");
+      expect(prompt).toContain("Noida Poly Pack Pvt Ltd");
+      expect(prompt).toContain("Anand Cartons");
+    });
+
+    it("still excludes competitor-shaped queries under directory-first targeting", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({
+          ok: true,
+          text: JSON.stringify({ queries: ["packaging manufacturers Noida directory", "web design agencies in Noida"] }),
+          provider: "groq",
+          model: "m",
+        })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: [] }), provider: "groq", model: "m" });
+      const searched: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          searched.push(JSON.parse(String(init?.body ?? "{}")).query);
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        })
+      );
+
+      await new TavilyDiscoveryProvider().discover({ ...baseCriteria, campaignName: "Web designing agency" });
+
+      expect(searched).toEqual(["packaging manufacturers Noida directory"]);
+    });
+
+    it("still falls back to Exa when Tavily fails on a directory query", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["packaging manufacturers in Noida directory"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(DIRECTORY_EXTRACTION), provider: "groq", model: "m" });
+      const fetchMock = mockFetchRouter({
+        tavily: async () => new Response("rate limited", { status: 429 }),
+        exa: async () => new Response(JSON.stringify({ results: [{ title: DIRECTORY_HIT.title, url: DIRECTORY_HIT.url, text: DIRECTORY_HIT.content }] }), { status: 200 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects).toHaveLength(3);
+      expect(result.prospects[0].sourceUrl).toBe(DIRECTORY_HIT.url);
     });
   });
 

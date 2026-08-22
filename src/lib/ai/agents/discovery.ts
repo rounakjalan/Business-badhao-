@@ -92,10 +92,12 @@ You are given WHAT THIS BUSINESS SELLS (seller-side context) and an IDEAL CUSTOM
 
 THE MOST IMPORTANT RULE: never search for other businesses that sell or supply what this business sells. Agencies, firms, studios, freelancers, vendors, consultants and service providers in the seller's own field are COMPETITORS, not customers. A query like "web design agency in <city>" finds competitors and is always wrong for a business that sells web design. The only exception is when the ICP's targetCustomer / industry / businessType explicitly names those providers as the people to find.
 
+YOUR JOB IS TO FIND PAGES THAT NAME REAL BUSINESSES. A business that needs what the seller offers almost never publishes that need, so searching for the need itself ("small business with an outdated website") returns blog posts and listicles with no company in them. Instead, search the way you would to build a list of businesses: the kind of business plus its location, aimed at sources that actually name individual companies — business directories, local and chamber-of-commerce listings, association and member lists, marketplace or map-style category pages, "top/best <industry> in <city>" roundups, and industry association pages.
+
 How to use each ICP field:
-- targetCustomer, industry, businessType — WHO to find. These define the kind of organisation the query should return.
-- location / service area — WHERE. Include it in most queries.
-- painPoints, needs, and any stated website/quality signals — qualifying characteristics of the buyer. Combine these with the WHO to narrow the search (e.g. an industry plus "outdated website").
+- targetCustomer, industry, businessType — WHO to find. This is the backbone of every query. If the ICP names several industries or is broad ("SMEs"), pick concrete, searchable industries that fit it and vary them across queries.
+- location / service area — WHERE. Include it in essentially every query.
+- painPoints, needs, and any stated website/quality signals — these are QUALIFICATION signals, checked later once a real business is found. They are NOT required search terms. At most one of your queries may use them, and never at the cost of naming an actual kind of business and place.
 - buyingSignals — use ONLY signals that are an observable property of the prospect itself. Never turn a signal that describes the buyer looking for, hiring, comparing or contacting a provider into a query — searching for that phrase returns the providers, not the buyer.
 - preferredChannels, decisionFactors, qualificationCriteria, disqualifiers — these describe how to reach, evaluate or exclude a buyer. They are NOT search targets. Do not build queries from them.
 
@@ -104,7 +106,7 @@ Ignore the campaign's name and the seller's own name: they describe the seller, 
 Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly this key:
 { "queries": string[] }
 
-Produce 3-5 distinct, realistic search-engine queries (keywords a researcher would actually type, not questions or full sentences). Each query should name the kind of business to find plus its location, and where useful one qualifying characteristic. Ground every query in the ICP fields actually given — never invent an industry, location, need or characteristic that is not present in the ICP.`;
+Produce 3-5 distinct, realistic search-engine queries (keywords a researcher would actually type, not questions or full sentences). Each query must name a kind of business and a place, and should aim at a source that lists real companies. Vary the industry and the kind of source across the queries rather than rewording one idea. Ground every query in the ICP fields actually given — never invent a location or a characteristic that is not present in the ICP; where the ICP's industry is broad, choosing concrete industries that genuinely fall inside it is expected, not invention.`;
 
 /**
  * Words that name a *supplier of services* almost regardless of context —
@@ -437,7 +439,13 @@ Respond with ONLY a single JSON object — no markdown fences, no commentary —
   ]
 }
 
-Rules: every "sourceUrl" MUST be copied exactly from one of the given results' URLs — never a URL you construct or guess. "evidenceSnippet" MUST be an actual excerpt from that result's content — never invented text. Every field besides companyName, sourceUrl, evidenceSnippet, and searchQuery must be null unless the result's own content actually states it — a search result rarely states an email or phone directly, so leave those null unless genuinely present. Do not list the same company twice even if it appeared in multiple results — merge them into one entry citing the most informative result. Skip a result entirely if it isn't a real, identifiable business (e.g. a generic article, directory homepage, or listing with no single named company). If nothing in the results is a real matching prospect, return an empty array — never fabricate one to avoid returning nothing.`;
+Rules: every "sourceUrl" MUST be copied exactly from one of the given results' URLs — never a URL you construct or guess. "evidenceSnippet" MUST be an actual excerpt from that result's content — never invented text. Every field besides companyName, sourceUrl, evidenceSnippet, and searchQuery must be null unless the result's own content actually states it — a search result rarely states an email or phone directly, so leave those null unless genuinely present. Do not list the same company twice even if it appeared in multiple results — merge them into one entry citing the most informative result.
+
+Many results are directory pages, local listings, association member lists or "top <industry> in <city>" roundups. These are valuable: extract EVERY individually named business the page actually lists, as a separate entry, all citing that page's URL. What you must never do is invent a business, or turn a page into an entry when it names none — skip a result only when it contains no identifiable company name at all (a general article, or a directory landing page that lists no companies in the text you were given). Extract the businesses being listed, never the site doing the listing.
+
+Do not assert a problem the evidence does not show. matchedIcpCriteria may only contain criteria the result's own content actually supports; if the content says nothing about the state of the company's website, do not claim its website is outdated, missing or poor — that is checked later, not guessed here. Leave "website" null unless the content actually gives that company's own site.
+
+If nothing in the results is a real matching prospect, return an empty array — never fabricate one to avoid returning nothing.`;
 
 /**
  * Extraction request budget. The configured models for LEAD_DISCOVERY are
@@ -447,8 +455,12 @@ Rules: every "sourceUrl" MUST be copied exactly from one of the given results' U
  * real production failures at either end of that window; raise them only
  * together with the tier they run on.
  */
-const MAX_RESULTS_SENT_TO_EXTRACTION = 20;
-const RESULT_EXCERPT_CHARS = 280;
+// Fewer results, longer excerpts: a directory or "top <industry> in <city>"
+// page carries many businesses, and a short excerpt truncates away the very
+// names we are there to collect. 12 x 600 chars plus the reserved completion
+// tokens still leaves clear headroom under the 8k window.
+const MAX_RESULTS_SENT_TO_EXTRACTION = 12;
+const RESULT_EXCERPT_CHARS = 600;
 const EXTRACTION_MAX_TOKENS = 3000;
 
 function truncate(text: string, max: number): string {
