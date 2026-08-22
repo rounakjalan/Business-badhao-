@@ -8,6 +8,8 @@ import {
   dedupeProspects,
   getDiscoveryProvider,
   isCompetitorSeekingQuery,
+  isNonBusinessName,
+  isSourceSiteName,
   NullDiscoveryProvider,
   normalizeWebsite,
   prospectDedupeKey,
@@ -927,7 +929,7 @@ describe("lead discovery", () => {
       const system = vi.mocked(runHermesCompletion).mock.calls[0][0].systemPrompt;
 
       expect(system).toMatch(/business directories|local and chamber-of-commerce listings/i);
-      expect(system).toMatch(/FIND PAGES THAT NAME REAL BUSINESSES/i);
+      expect(system).toMatch(/FIND PAGES THAT NAME REAL, INDIVIDUAL BUSINESSES/i);
       // Pain points are demoted to qualification, not mandatory search terms.
       expect(system).toMatch(/QUALIFICATION signals[\s\S]*NOT required search terms/i);
       // And the competitor guard is still stated.
@@ -954,7 +956,7 @@ describe("lead discovery", () => {
     it("tells the model to list the businesses, not the directory site itself", async () => {
       await runWithHits([DIRECTORY_HIT], JSON.stringify({ prospects: [] }));
       const system = vi.mocked(runHermesCompletion).mock.calls[1][0].systemPrompt;
-      expect(system).toMatch(/extract EVERY individually named business/i);
+      expect(system).toMatch(/extract the individually named businesses the page lists/i);
       expect(system).toMatch(/never the site doing the listing/i);
     });
 
@@ -1034,6 +1036,147 @@ describe("lead discovery", () => {
       if (!result.ok) throw new Error("expected ok");
       expect(result.prospects).toHaveLength(3);
       expect(result.prospects[0].sourceUrl).toBe(DIRECTORY_HIT.url);
+    });
+  });
+
+  describe("lead quality gates", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "tavily-key";
+      delete process.env.EXA_API_KEY;
+    });
+
+    const LISTING_HIT = {
+      title: "Noida Business Directory — Manufacturing",
+      url: "https://merithub.example/noida/listings",
+      content:
+        "H.V. Metal Arc Private Limited — sheet metal fabricator, Sector 63 Noida. " +
+        "Advanced Excel Course Noida — 6 week programme. " +
+        "SAS Base Training Institute Noida — analytics training provider. " +
+        "Top 10 IT Companies in Noida. Merithub. Senior Developer Job Noida.",
+    };
+
+    function entry(companyName: string) {
+      return {
+        companyName,
+        website: null,
+        location: "Noida",
+        industry: "Manufacturing",
+        businessType: "SME",
+        email: null,
+        phone: null,
+        matchedIcpCriteria: ["location: Noida"],
+        evidenceSnippet: LISTING_HIT.content.slice(0, 80),
+        sourceUrl: LISTING_HIT.url,
+        searchQuery: "manufacturing businesses Noida directory listings",
+      };
+    }
+
+    async function extractFrom(names: string[]) {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["manufacturing businesses Noida directory listings"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: names.map(entry) }), provider: "groq", model: "m" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: [LISTING_HIT] }), { status: 200 }) }));
+      return new TavilyDiscoveryProvider().discover(baseCriteria);
+    }
+
+    it("keeps a real company and rejects courses, headings, jobs and the directory itself", async () => {
+      const result = await extractFrom([
+        "H.V. Metal Arc Private Limited",
+        "Advanced Excel Course Noida",
+        "Top 10 IT Companies in Noida",
+        "Senior Developer Job Noida",
+        "Merithub",
+      ]);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.prospects.map((p) => p.companyName)).toEqual(["H.V. Metal Arc Private Limited"]);
+      expect(result.telemetry?.extracted).toBe(5);
+      expect(result.telemetry?.rejectedNotABusiness).toBe(4);
+      expect(result.telemetry?.verified).toBe(1);
+    });
+
+    it("does not mistake a training institute (an organisation) for a course", () => {
+      expect(isNonBusinessName("SAS Base Training Institute Noida")).toBe(false);
+      expect(isNonBusinessName("Advanced SAS Base Training Course Noida")).toBe(true);
+      expect(isNonBusinessName("Kent RO Systems Limited")).toBe(false);
+      expect(isNonBusinessName("Best Manufacturers in Noida")).toBe(true);
+      expect(isNonBusinessName("List of IT companies")).toBe(true);
+      expect(isNonBusinessName("Sunrise Dental Clinic")).toBe(false);
+    });
+
+    it("rejects the publishing site being extracted as its own prospect", () => {
+      expect(isSourceSiteName("Merithub", "https://merithub.example/noida/listings")).toBe(true);
+      // A real company that merely appears on that page is untouched.
+      expect(isSourceSiteName("H.V. Metal Arc Private Limited", "https://merithub.example/noida/listings")).toBe(false);
+    });
+
+    it("instructs extraction to require an organisation and to apply the ICP's size and disqualifiers", async () => {
+      await extractFrom(["H.V. Metal Arc Private Limited"]);
+      const system = vi.mocked(runHermesCompletion).mock.calls[1][0].systemPrompt;
+      expect(system).toMatch(/EVERY ENTRY MUST BE AN ACTUAL ORGANISATION/i);
+      expect(system).toMatch(/a course is not a company/i);
+      expect(system).toMatch(/APPLY THE ICP BEFORE INCLUDING A BUSINESS/i);
+      expect(system).toMatch(/do not include large enterprises, multinationals or household-name corporations/i);
+      expect(system).toMatch(/matching any of the ICP's disqualifiers/i);
+      expect(system).toMatch(/at most 3 businesses from any single result/i);
+    });
+
+    it("steers queries away from listicles, course catalogues and job boards", async () => {
+      await extractFrom(["H.V. Metal Arc Private Limited"]);
+      const system = vi.mocked(runHermesCompletion).mock.calls[0][0].systemPrompt;
+      expect(system).toMatch(/blog roundups and news articles/i);
+      expect(system).toMatch(/course catalogues, training-programme listings, job boards/i);
+      expect(system).toMatch(/favour local and sector directories/i);
+    });
+
+    it("records Tavily telemetry proving which provider served the run", async () => {
+      const result = await extractFrom(["H.V. Metal Arc Private Limited"]);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.telemetry?.tavily).toEqual({ requests: 1, succeeded: 1, failed: 0, results: 1 });
+      expect(result.telemetry?.exa).toEqual({ requests: 0, succeeded: 0, failed: 0, results: 0 });
+      expect(result.telemetry?.servedByExa).toEqual([]);
+    });
+
+    it("records Exa telemetry when the fallback actually serves the query", async () => {
+      process.env.EXA_API_KEY = "exa-key";
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["manufacturing businesses Noida directory listings"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: [] }), provider: "groq", model: "m" });
+      vi.stubGlobal(
+        "fetch",
+        mockFetchRouter({
+          tavily: async () => new Response("rate limited", { status: 429 }),
+          exa: async () => new Response(JSON.stringify({ results: [{ title: LISTING_HIT.title, url: LISTING_HIT.url, text: LISTING_HIT.content }] }), { status: 200 }),
+        })
+      );
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+      if (!result.ok) throw new Error("expected ok");
+
+      expect(result.telemetry?.tavily.requests).toBe(1);
+      expect(result.telemetry?.tavily.failed).toBe(1);
+      expect(result.telemetry?.exa).toEqual({ requests: 1, succeeded: 1, failed: 0, results: 1 });
+      expect(result.telemetry?.servedByExa).toEqual(["manufacturing businesses Noida directory listings"]);
+    });
+
+    it("counts a prospect citing an ungrounded URL as rejected, not persisted", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: ["manufacturing businesses Noida directory listings"] }), provider: "groq", model: "m" })
+        .mockResolvedValueOnce({
+          ok: true,
+          text: JSON.stringify({ prospects: [{ ...entry("Phantom Metals Ltd"), sourceUrl: "https://otherhost.example/never-returned" }] }),
+          provider: "groq",
+          model: "m",
+        });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: [LISTING_HIT] }), { status: 200 }) }));
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+      if (!result.ok) throw new Error("expected ok");
+
+      expect(result.prospects).toEqual([]);
+      expect(result.telemetry?.rejectedNotGrounded).toBe(1);
+      expect(result.telemetry?.verified).toBe(0);
     });
   });
 

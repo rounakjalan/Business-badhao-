@@ -50,9 +50,40 @@ export type DiscoveryCriteria = {
   businessContext: BusinessContext | null;
 };
 
+/**
+ * Per-run record of which search provider actually did the work, and where
+ * candidates were lost between extraction and persistence. Persisted into
+ * agent_runs.output so a completed run can always be shown to have used a
+ * real provider, and so a disappointing run can be explained without
+ * re-instrumenting the code. Counts only — never keys or page content.
+ */
+export type ProviderTelemetry = {
+  tavily: { requests: number; succeeded: number; failed: number; results: number };
+  exa: { requests: number; succeeded: number; failed: number; results: number };
+  /** Queries whose results came from Exa because Tavily failed for that query. */
+  servedByExa: string[];
+  extracted: number;
+  rejectedNotGrounded: number;
+  rejectedNotABusiness: number;
+  verified: number;
+};
+
+export function newTelemetry(): ProviderTelemetry {
+  return {
+    tavily: { requests: 0, succeeded: 0, failed: 0, results: 0 },
+    exa: { requests: 0, succeeded: 0, failed: 0, results: 0 },
+    servedByExa: [],
+    extracted: 0,
+    rejectedNotGrounded: 0,
+    rejectedNotABusiness: 0,
+    verified: 0,
+  };
+}
+
 export type DiscoveryResult =
-  | { ok: true; prospects: DiscoveredProspect[]; queriesRun: string[]; queriesFailed: string[] }
-  | { ok: false; code: "not_configured" | "provider_error"; message: string };
+  // `telemetry` is optional so pre-existing callers and tests are unaffected.
+  | { ok: true; prospects: DiscoveredProspect[]; queriesRun: string[]; queriesFailed: string[]; telemetry?: ProviderTelemetry }
+  | { ok: false; code: "not_configured" | "provider_error"; message: string; telemetry?: ProviderTelemetry };
 
 export interface DiscoveryProvider {
   readonly name: string;
@@ -92,7 +123,14 @@ You are given WHAT THIS BUSINESS SELLS (seller-side context) and an IDEAL CUSTOM
 
 THE MOST IMPORTANT RULE: never search for other businesses that sell or supply what this business sells. Agencies, firms, studios, freelancers, vendors, consultants and service providers in the seller's own field are COMPETITORS, not customers. A query like "web design agency in <city>" finds competitors and is always wrong for a business that sells web design. The only exception is when the ICP's targetCustomer / industry / businessType explicitly names those providers as the people to find.
 
-YOUR JOB IS TO FIND PAGES THAT NAME REAL BUSINESSES. A business that needs what the seller offers almost never publishes that need, so searching for the need itself ("small business with an outdated website") returns blog posts and listicles with no company in them. Instead, search the way you would to build a list of businesses: the kind of business plus its location, aimed at sources that actually name individual companies — business directories, local and chamber-of-commerce listings, association and member lists, marketplace or map-style category pages, "top/best <industry> in <city>" roundups, and industry association pages.
+YOUR JOB IS TO FIND PAGES THAT NAME REAL, INDIVIDUAL BUSINESSES. A business that needs what the seller offers almost never publishes that need, so searching for the need itself ("small business with an outdated website") returns blog posts with no company in them. Instead, search the way you would to build a list of companies: the kind of business plus its location, aimed at sources that carry per-company entries — business directories and registries with individual company listings, local/maps-style business listings, chamber-of-commerce and trade-association member lists, and industrial-estate or market-area business listings.
+
+Aim AWAY from these, they are where bad leads come from:
+- "top 10 / best <industry>" blog roundups and news articles — they name a handful of famous corporations, not the ordinary local businesses the ICP describes.
+- course catalogues, training-programme listings, job boards and admission pages — these list courses and vacancies, not companies that could buy anything.
+- pages about an industry rather than pages listing its businesses.
+
+If the ICP describes small or medium businesses, favour local and sector directories over anything that ranks or celebrates the biggest companies; word queries as a person building a prospect list would ("<industry> in <area> directory listings", "<industry> businesses <locality> contact"), never as a person shopping for the best provider.
 
 How to use each ICP field:
 - targetCustomer, industry, businessType — WHO to find. This is the backbone of every query. If the ICP names several industries or is broad ("SMEs"), pick concrete, searchable industries that fit it and vary them across queries.
@@ -296,7 +334,12 @@ type SearchHit = { title: string; url: string; content: string };
 
 const TAVILY_URL = "https://api.tavily.com/search";
 
-async function tavilySearch(query: string, apiKey: string): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
+async function tavilySearch(
+  query: string,
+  apiKey: string,
+  telemetry?: ProviderTelemetry
+): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
+  if (telemetry) telemetry.tavily.requests += 1;
   let response: Response;
   try {
     response = await fetch(TAVILY_URL, {
@@ -306,11 +349,13 @@ async function tavilySearch(query: string, apiKey: string): Promise<{ ok: true; 
       signal: AbortSignal.timeout(20_000),
     });
   } catch (cause) {
+    if (telemetry) telemetry.tavily.failed += 1;
     return { ok: false, message: `Search failed for "${query}": ${cause instanceof Error ? cause.message : "network error"}` };
   }
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
+    if (telemetry) telemetry.tavily.failed += 1;
     return { ok: false, message: `Search failed for "${query}": HTTP ${response.status} ${bodyText.slice(0, 200)}` };
   }
 
@@ -318,12 +363,18 @@ async function tavilySearch(query: string, apiKey: string): Promise<{ ok: true; 
   try {
     data = await response.json();
   } catch {
+    if (telemetry) telemetry.tavily.failed += 1;
     return { ok: false, message: `Search for "${query}" returned a response that could not be parsed.` };
   }
 
   const results = (data.results ?? [])
     .filter((r): r is { title: string; url: string; content?: string } => Boolean(r.title && r.url))
     .map((r) => ({ title: r.title, url: r.url, content: r.content ?? "" }));
+
+  if (telemetry) {
+    telemetry.tavily.succeeded += 1;
+    telemetry.tavily.results += results.length;
+  }
 
   return { ok: true, results };
 }
@@ -338,7 +389,12 @@ async function tavilySearch(query: string, apiKey: string): Promise<{ ok: true; 
 
 const EXA_URL = "https://api.exa.ai/search";
 
-async function exaSearch(query: string, apiKey: string): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
+async function exaSearch(
+  query: string,
+  apiKey: string,
+  telemetry?: ProviderTelemetry
+): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
+  if (telemetry) telemetry.exa.requests += 1;
   let response: Response;
   try {
     response = await fetch(EXA_URL, {
@@ -348,11 +404,13 @@ async function exaSearch(query: string, apiKey: string): Promise<{ ok: true; res
       signal: AbortSignal.timeout(20_000),
     });
   } catch (cause) {
+    if (telemetry) telemetry.exa.failed += 1;
     return { ok: false, message: `Exa search failed for "${query}": ${cause instanceof Error ? cause.message : "network error"}` };
   }
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
+    if (telemetry) telemetry.exa.failed += 1;
     return { ok: false, message: `Exa search failed for "${query}": HTTP ${response.status} ${bodyText.slice(0, 200)}` };
   }
 
@@ -360,12 +418,18 @@ async function exaSearch(query: string, apiKey: string): Promise<{ ok: true; res
   try {
     data = await response.json();
   } catch {
+    if (telemetry) telemetry.exa.failed += 1;
     return { ok: false, message: `Exa search for "${query}" returned a response that could not be parsed.` };
   }
 
   const results = (data.results ?? [])
     .filter((r): r is { title: string; url: string; text?: string } => Boolean(r.title && r.url))
     .map((r) => ({ title: r.title, url: r.url, content: r.text ?? "" }));
+
+  if (telemetry) {
+    telemetry.exa.succeeded += 1;
+    telemetry.exa.results += results.length;
+  }
 
   return { ok: true, results };
 }
@@ -381,14 +445,18 @@ async function exaSearch(query: string, apiKey: string): Promise<{ ok: true; res
 async function searchWithFallback(
   query: string,
   tavilyApiKey: string,
-  exaApiKey: string | undefined
+  exaApiKey: string | undefined,
+  telemetry?: ProviderTelemetry
 ): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
-  const tavilyResult = await tavilySearch(query, tavilyApiKey);
+  const tavilyResult = await tavilySearch(query, tavilyApiKey, telemetry);
   if (tavilyResult.ok) return tavilyResult;
   if (!exaApiKey) return tavilyResult;
 
-  const exaResult = await exaSearch(query, exaApiKey);
-  if (exaResult.ok) return exaResult;
+  const exaResult = await exaSearch(query, exaApiKey, telemetry);
+  if (exaResult.ok) {
+    if (telemetry) telemetry.servedByExa.push(query);
+    return exaResult;
+  }
 
   return {
     ok: false,
@@ -441,7 +509,19 @@ Respond with ONLY a single JSON object — no markdown fences, no commentary —
 
 Rules: every "sourceUrl" MUST be copied exactly from one of the given results' URLs — never a URL you construct or guess. "evidenceSnippet" MUST be an actual excerpt from that result's content — never invented text. Every field besides companyName, sourceUrl, evidenceSnippet, and searchQuery must be null unless the result's own content actually states it — a search result rarely states an email or phone directly, so leave those null unless genuinely present. Do not list the same company twice even if it appeared in multiple results — merge them into one entry citing the most informative result.
 
-Many results are directory pages, local listings, association member lists or "top <industry> in <city>" roundups. These are valuable: extract EVERY individually named business the page actually lists, as a separate entry, all citing that page's URL. What you must never do is invent a business, or turn a page into an entry when it names none — skip a result only when it contains no identifiable company name at all (a general article, or a directory landing page that lists no companies in the text you were given). Extract the businesses being listed, never the site doing the listing.
+Many results are directory pages, local listings or association member lists. These are valuable SOURCES: extract the individually named businesses the page lists, as separate entries, all citing that page's URL. Extract the businesses being listed, never the site doing the listing, and never invent one. Skip a result that names no identifiable company at all.
+
+EVERY ENTRY MUST BE AN ACTUAL ORGANISATION that could become a customer — a company, firm, shop, clinic, factory, school, hotel, practice or similar trading entity with a name. The following are NOT businesses and must never be extracted, even though directory pages are full of them:
+- a course, class, training programme, certification, degree or syllabus ("Advanced Excel Course Noida", "SAP FICO Training") — a course is not a company, though the institute that runs it may be.
+- a product, service, package or price plan.
+- a job posting, vacancy or admission notice.
+- a page title, article heading, section heading or category label ("Top 10 IT Companies in Noida", "Manufacturing Companies — Uttar Pradesh").
+- the directory, portal, blog or association whose page you are reading.
+If you cannot tell whether a name is a company or one of the above, leave it out.
+
+APPLY THE ICP BEFORE INCLUDING A BUSINESS. Skip any business that plainly contradicts it: outside the ICP's location, in an industry the ICP excludes, or matching any of the ICP's disqualifiers. Respect the ICP's company size — when it asks for small or medium businesses, do not include large enterprises, multinationals or household-name corporations; those are the wrong buyer even though directories list them prominently. Skip a business whose scale is obviously far outside what the ICP describes.
+
+Take at most 3 businesses from any single result, choosing the ones that best fit the ICP, and spread your entries across the different results rather than exhausting the first one. If the same company appears under variant names ("TCS" and "Tata Consultancy Services"), emit it once under its fullest name.
 
 Do not assert a problem the evidence does not show. matchedIcpCriteria may only contain criteria the result's own content actually supports; if the content says nothing about the state of the company's website, do not claim its website is outdated, missing or poor — that is checked later, not guessed here. Leave "website" null unless the content actually gives that company's own site.
 
@@ -478,6 +558,40 @@ function truncate(text: string, max: number): string {
  * and query — two different pages on the same site must never collide, or
  * the grounding check would start accepting the wrong source.
  */
+/**
+ * Names that are plainly not a trading organisation. This is a backstop
+ * under the extraction prompt's own rule, for the cases that leaked in
+ * production: directory pages list courses, job posts and their own section
+ * headings alongside real companies, and those were being persisted as
+ * prospects. Deliberately narrow — it rejects only wording that cannot
+ * belong to a company, so "SAS Base Training Institute" (an organisation)
+ * survives while "Advanced SAS Base Training Course" does not.
+ */
+const NON_BUSINESS_NAME_PATTERNS: RegExp[] = [
+  /\b(course|courses|classes|tutorial|tutorials|certification|certifications|syllabus|curriculum|internship|admissions?|scholarship|webinar)\b/i,
+  /^(top|best)\b.*\b(in|near)\b/i,
+  /^\d+\s+(top|best|leading)\b/i,
+  /^(list|directory|category|index)\s+of\b/i,
+  /^how to\b/i,
+  /\b(job|jobs|vacancy|vacancies|hiring|recruitment)\b/i,
+];
+
+export function isNonBusinessName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  return NON_BUSINESS_NAME_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/** True when the "business" is really the site that published the listing (a directory extracting itself). */
+export function isSourceSiteName(name: string, sourceUrl: string): boolean {
+  const host = canonicalizeUrl(sourceUrl)?.split("/")[0];
+  if (!host) return false;
+  const hostWord = host.split(".")[0].toLowerCase();
+  if (hostWord.length < 4) return false;
+  const nameWords = queryTokens(name);
+  return nameWords.length <= 3 && nameWords.some((word) => word === hostWord);
+}
+
 function canonicalizeUrl(url: string): string | null {
   try {
     const withScheme = /^https?:\/\//i.test(url) ? url : `https://${url}`;
@@ -493,7 +607,8 @@ function canonicalizeUrl(url: string): string | null {
 
 async function extractProspectsFromResults(
   criteria: DiscoveryCriteria,
-  searchesByQuery: { query: string; results: SearchHit[] }[]
+  searchesByQuery: { query: string; results: SearchHit[] }[],
+  telemetry?: ProviderTelemetry
 ): Promise<{ ok: true; prospects: DiscoveredProspect[] } | { ok: false; message: string }> {
   // Index the real search hits by a canonical form of their URL. The model
   // reliably cites the right *page* but often reformats the URL slightly
@@ -565,14 +680,25 @@ async function extractProspectsFromResults(
   // model's quote can't be found in the real page text, the provider's own
   // excerpt — so a stored prospect's source and evidence always come from
   // the actual search result rather than from the model's rendering of it.
+  if (telemetry) telemetry.extracted = parsed.data.prospects.length;
+
   const grounded: DiscoveredProspect[] = [];
   for (const prospect of parsed.data.prospects) {
     const companyName = prospect.companyName.trim();
-    if (!companyName) continue;
+
+    // Must actually be a business, not a course/job/heading, and not the
+    // directory that published the page.
+    if (isNonBusinessName(companyName) || isSourceSiteName(companyName, prospect.sourceUrl)) {
+      if (telemetry) telemetry.rejectedNotABusiness += 1;
+      continue;
+    }
 
     const canonical = canonicalizeUrl(prospect.sourceUrl);
     const realHit = canonical ? realHitByCanonicalUrl.get(canonical) : undefined;
-    if (!realHit) continue;
+    if (!realHit) {
+      if (telemetry) telemetry.rejectedNotGrounded += 1;
+      continue;
+    }
 
     const quote = prospect.evidenceSnippet.trim();
     const quoteIsReal = quote.length > 0 && realHit.content.includes(quote);
@@ -584,6 +710,8 @@ async function extractProspectsFromResults(
       evidenceSnippet: quoteIsReal || !realHit.content ? quote : truncate(realHit.content, 300),
     });
   }
+
+  if (telemetry) telemetry.verified = grounded.length;
 
   return { ok: true, prospects: grounded };
 }
@@ -651,6 +779,7 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     }
 
     const exaApiKey = this.exaApiKey;
+    const telemetry = newTelemetry();
 
     const queriesResult = await generateDiscoveryQueries(criteria);
     if (!queriesResult.ok) {
@@ -658,7 +787,7 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     }
 
     const outcomes = await Promise.all(
-      queriesResult.queries.map(async (query) => ({ query, result: await searchWithFallback(query, apiKey, exaApiKey) }))
+      queriesResult.queries.map(async (query) => ({ query, result: await searchWithFallback(query, apiKey, exaApiKey, telemetry) }))
     );
     const succeeded = outcomes.filter((o): o is { query: string; result: { ok: true; results: SearchHit[] } } => o.result.ok);
     const queriesFailed = outcomes.filter((o) => !o.result.ok).map((o) => o.query);
@@ -669,20 +798,22 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
         ok: false,
         code: "provider_error",
         message: `All ${queriesResult.queries.length} discovery searches failed.${firstError ? ` First error: ${firstError.message}` : ""}`,
+        telemetry,
       };
     }
 
     const totalHits = succeeded.reduce((sum, o) => sum + o.result.results.length, 0);
     if (totalHits === 0) {
-      return { ok: true, prospects: [], queriesRun: succeeded.map((o) => o.query), queriesFailed };
+      return { ok: true, prospects: [], queriesRun: succeeded.map((o) => o.query), queriesFailed, telemetry };
     }
 
     const extraction = await extractProspectsFromResults(
       criteria,
-      succeeded.map((o) => ({ query: o.query, results: o.result.results }))
+      succeeded.map((o) => ({ query: o.query, results: o.result.results })),
+      telemetry
     );
     if (!extraction.ok) {
-      return { ok: false, code: "provider_error", message: extraction.message };
+      return { ok: false, code: "provider_error", message: extraction.message, telemetry };
     }
 
     return {
@@ -690,6 +821,7 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       prospects: dedupeProspects(extraction.prospects),
       queriesRun: succeeded.map((o) => o.query),
       queriesFailed,
+      telemetry,
     };
   }
 }

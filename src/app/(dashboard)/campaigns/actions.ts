@@ -238,7 +238,11 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   });
 
   if (!result.ok) {
-    await completeAgentRun(agentRun, "failed", { code: result.code, message: result.message } as unknown as Json);
+    await completeAgentRun(agentRun, "failed", {
+      code: result.code,
+      message: result.message,
+      telemetry: result.telemetry ?? null,
+    } as unknown as Json);
     return { ok: false, code: result.code, message: result.message };
   }
 
@@ -353,6 +357,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     duplicatesSkipped,
     queriesRun: result.queriesRun,
     queriesFailed: result.queriesFailed,
+    telemetry: result.telemetry ?? null,
   } as unknown as Json);
 
   revalidatePath(`/campaigns/${campaignId}`);
