@@ -3,9 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
-import { runLeadQualification, runDiscoveryQualification, QUALIFICATION_STATUSES } from "@/lib/ai/agents/qualification";
+import {
+  runLeadQualification,
+  clampWithoutResearchEvidence,
+  QUALIFICATION_STATUSES,
+  type LeadQualification,
+} from "@/lib/ai/agents/qualification";
 
-const VALID_QUALIFICATION = {
+const VALID_QUALIFICATION: LeadQualification = {
   qualificationScore: 78,
   fitScore: 80,
   intentScore: 60,
@@ -113,118 +118,85 @@ describe("runLeadQualification", () => {
   });
 });
 
-describe("runDiscoveryQualification (automatic triage after discovery)", () => {
+describe("clampWithoutResearchEvidence", () => {
+  it("1/3. holds a 'qualified' verdict at 'qualifying' when there is no research evidence", () => {
+    const clamped = clampWithoutResearchEvidence({ ...VALID_QUALIFICATION, recommendedStatus: "qualified" }, false);
+    expect(clamped.recommendedStatus).toBe("qualifying");
+  });
+
+  it("1/3. holds a 'disqualified' verdict at 'qualifying' when there is no research evidence", () => {
+    const clamped = clampWithoutResearchEvidence({ ...VALID_QUALIFICATION, recommendedStatus: "disqualified" }, false);
+    expect(clamped.recommendedStatus).toBe("qualifying");
+  });
+
+  it("2. leaves a 'qualified' verdict untouched when research evidence exists", () => {
+    const clamped = clampWithoutResearchEvidence({ ...VALID_QUALIFICATION, recommendedStatus: "qualified" }, true);
+    expect(clamped.recommendedStatus).toBe("qualified");
+  });
+
+  it("leaves 'pending' and 'qualifying' verdicts untouched regardless of research evidence, since neither is a final decision", () => {
+    expect(clampWithoutResearchEvidence({ ...VALID_QUALIFICATION, recommendedStatus: "pending" }, false).recommendedStatus).toBe("pending");
+    expect(clampWithoutResearchEvidence({ ...VALID_QUALIFICATION, recommendedStatus: "qualifying" }, false).recommendedStatus).toBe("qualifying");
+  });
+
+  it("4. never fabricates reasons when clamping — only appends a note explaining why the verdict was held", () => {
+    const clamped = clampWithoutResearchEvidence({ ...VALID_QUALIFICATION, recommendedStatus: "qualified" }, false);
+    expect(clamped.positiveReasons).toEqual(VALID_QUALIFICATION.positiveReasons);
+    expect(clamped.negativeReasons).toEqual(VALID_QUALIFICATION.negativeReasons);
+    expect(clamped.missingInformation).toEqual([...VALID_QUALIFICATION.missingInformation, expect.stringContaining("Lead Research")]);
+    // Score and reasons are the model's real output, not invented — only the final status is held back.
+    expect(clamped.qualificationScore).toBe(VALID_QUALIFICATION.qualificationScore);
+  });
+});
+
+describe("runLeadQualification's no-research guard", () => {
   afterEach(() => vi.clearAllMocks());
 
-  const prospects = [
-    {
-      companyName: "Sharma Packaging Industries",
-      location: "Noida",
-      industry: "Manufacturing",
-      website: null,
-      sourceUrl: "https://directory.example/noida/packaging",
-      evidenceSnippet: "Sharma Packaging Industries — corrugated box manufacturer in Sector 63, Noida.",
-    },
-    {
-      companyName: "Mumbai Steel Corp",
-      location: "Mumbai",
-      industry: "Manufacturing",
-      website: null,
-      sourceUrl: "https://directory.example/noida/packaging",
-      evidenceSnippet: "Mumbai Steel Corp — steel supplier headquartered in Mumbai.",
-    },
-  ];
+  it("1/3. discovery-time evidence alone cannot produce a final 'qualified' decision — it is held at 'qualifying'", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({
+      ok: true,
+      text: JSON.stringify({ ...VALID_QUALIFICATION, recommendedStatus: "qualified" }),
+      provider: "openrouter",
+      model: "nousresearch/hermes-4-70b",
+    });
 
-  const baseDiscoveryInput = {
-    organizationId: "org-1",
-    campaignObjective: "Get more customers",
-    icpCriteria: { location: "Noida", businessType: "Small to medium enterprise", disqualifiers: ["Business located outside Noida"] },
-    businessContext: null,
-    prospects,
-  };
-
-  const ASSESSMENTS = {
-    assessments: [
-      {
-        companyName: "Sharma Packaging Industries",
-        qualificationScore: 72,
-        confidence: "medium",
-        recommendedStatus: "qualifying",
-        positiveReasons: ["Located in Noida", "SME manufacturer"],
-        negativeReasons: [],
-      },
-      {
-        companyName: "Mumbai Steel Corp",
-        qualificationScore: 8,
-        confidence: "high",
-        recommendedStatus: "disqualified",
-        positiveReasons: [],
-        negativeReasons: ["Located outside Noida, matching a stated disqualifier"],
-      },
-    ],
-  };
-
-  it("4/5. qualifies a matching prospect and disqualifies one that contradicts the ICP, in a single request", async () => {
-    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(ASSESSMENTS), provider: "groq", model: "m" });
-
-    const result = await runDiscoveryQualification(baseDiscoveryInput);
+    const result = await runLeadQualification({ ...baseInput, researchSummary: null });
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
-    expect(result.assessments).toHaveLength(2);
-    expect(result.assessments[0]).toMatchObject({ companyName: "Sharma Packaging Industries", recommendedStatus: "qualifying" });
-    expect(result.assessments[1]).toMatchObject({ companyName: "Mumbai Steel Corp", recommendedStatus: "disqualified" });
-    // One request for the whole run — per-lead scoring exceeds the provider's per-minute budget.
-    expect(vi.mocked(runHermesCompletion)).toHaveBeenCalledTimes(1);
+    expect(result.qualification.recommendedStatus).toBe("qualifying");
   });
 
-  it("receives Business Knowledge, the ICP and each prospect's source URL and evidence", async () => {
-    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(ASSESSMENTS), provider: "groq", model: "m" });
-
-    await runDiscoveryQualification({
-      ...baseDiscoveryInput,
-      businessContext: {
-        businessProfile: null,
-        productsServices: [{ name: "Website Redesign", description: null, category: null, price: null, pricingType: "custom", features: [], benefits: [], availability: "available", specialOffers: null }],
-        valueProposition: { keySellingPoints: [], productBenefits: [] },
-        faqs: [],
-        policies: [],
-        aiCommunicationRules: null,
-        mediaReferences: [],
-      },
-    });
-
-    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
-    expect(prompt).toContain("Website Redesign");
-    expect(prompt).toContain("BUSINESS KNOWLEDGE");
-    expect(prompt).toContain("CAMPAIGN ICP");
-    expect(prompt).toContain("https://directory.example/noida/packaging");
-    expect(prompt).toContain("corrugated box manufacturer");
-    // Seller knowledge and buyer targeting stay clearly separate concepts.
-    expect(prompt.indexOf("CAMPAIGN ICP")).toBeGreaterThan(prompt.indexOf("BUSINESS KNOWLEDGE"));
-  });
-
-  it("never invents a prospect: an assessment schema violation is rejected outright", async () => {
+  it("2. a lead with completed research can reach a final 'qualified' decision", async () => {
     vi.mocked(runHermesCompletion).mockResolvedValue({
       ok: true,
-      text: JSON.stringify({ assessments: [{ ...ASSESSMENTS.assessments[0], recommendedStatus: "VERY_HOT" }] }),
-      provider: "groq",
-      model: "m",
+      text: JSON.stringify({ ...VALID_QUALIFICATION, recommendedStatus: "qualified" }),
+      provider: "openrouter",
+      model: "nousresearch/hermes-4-70b",
     });
 
-    const result = await runDiscoveryQualification(baseDiscoveryInput);
-    expect(result.ok).toBe(false);
+    const result = await runLeadQualification({
+      ...baseInput,
+      researchSummary: "Sharma Retailers operates three stores in Noida and is actively hiring — a genuine research finding, not invented.",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.qualification.recommendedStatus).toBe("qualified");
   });
 
-  it("skips the request entirely when a run produced no prospects", async () => {
-    const result = await runDiscoveryQualification({ ...baseDiscoveryInput, prospects: [] });
-    expect(result).toEqual({ ok: true, assessments: [] });
-    expect(vi.mocked(runHermesCompletion)).not.toHaveBeenCalled();
-  });
+  it("3. an empty/whitespace-only research summary is treated the same as no research on file", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({
+      ok: true,
+      text: JSON.stringify({ ...VALID_QUALIFICATION, recommendedStatus: "disqualified" }),
+      provider: "openrouter",
+      model: "nousresearch/hermes-4-70b",
+    });
 
-  it("propagates a provider failure so the caller can leave the leads pending", async () => {
-    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: false, code: "rate_limited", message: "The AI provider is rate-limiting requests right now — try again shortly." });
-    const result = await runDiscoveryQualification(baseDiscoveryInput);
-    expect(result.ok).toBe(false);
+    const result = await runLeadQualification({ ...baseInput, researchSummary: "   " });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.qualification.recommendedStatus).toBe("qualifying");
   });
 });

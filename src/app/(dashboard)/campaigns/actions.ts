@@ -3,11 +3,11 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { runCampaignPlanner, type CampaignPlan, type CampaignPlannerResult } from "@/lib/ai/agents/campaign-planner";
-import { getDiscoveryProvider, prospectDedupeKey, type DiscoveredProspect } from "@/lib/ai/agents/discovery";
+import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discovery";
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
-import { runDiscoveryQualification } from "@/lib/ai/agents/qualification";
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
+import { runLeadResearchAction, runLeadQualificationAction } from "@/app/(dashboard)/leads/actions";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json, TablesUpdate } from "@/types/database.types";
@@ -148,14 +148,20 @@ export async function updateCampaignStatus(campaignId: string, status: TablesUpd
 // ---------------------------------------------------------------------------
 // Lead Discovery orchestration. Discovery's own job (src/lib/ai/agents/discovery.ts)
 // ends at a list of DiscoveredProspect — this function persists them as real
-// prospects/leads, then triages them so they do not sit at "pending" until
-// someone opens each one (see qualifyDiscoveredLeads below).
+// prospects/leads, then runs each one through the rest of the pipeline in
+// order (see runResearchAndQualification below):
 //
-// Discovery still does no scoring of its own: the triage is the qualification
-// agent, called once for the whole run. Research stays separate and untouched —
-// the existing runLeadResearchAction (leads/actions.ts) picks a lead up by id
-// exactly as before, and the deeper per-lead runLeadQualification remains the
-// pass to re-run once research has something to add.
+//   discovery -> persist prospect/lead -> Lead Research -> Qualification
+//
+// Qualification never runs on discovery evidence alone. It reuses the exact
+// same per-lead actions a user triggers by hand from a lead's page
+// (runLeadResearchAction / runLeadQualificationAction, leads/actions.ts), so
+// a newly discovered lead is scored only once real research evidence exists
+// for it — runLeadQualification's own clampWithoutResearchEvidence guard
+// (qualification.ts) additionally refuses to finalize "qualified"/
+// "disqualified" without it. A lead whose research fails or is skipped
+// simply stays at "pending" for later, exactly as a lead created any other
+// way would.
 // ---------------------------------------------------------------------------
 
 export type DiscoveredProspectSummary = {
@@ -178,96 +184,56 @@ export type LeadDiscoveryActionResult =
       queriesRun: string[];
       queriesFailed: string[];
       prospects: DiscoveredProspectSummary[];
-      qualification: DiscoveryQualificationSummary;
+      followUp: DiscoveryFollowUpSummary;
     }
   | { ok: false; code: "unauthorized" | "no_icp" | "already_running" | "not_configured" | "provider_error"; message: string };
 
-export type DiscoveryQualificationSummary = {
-  attempted: number;
-  scored: number;
+export type DiscoveryFollowUpSummary = {
+  researchAttempted: number;
+  researchSucceeded: number;
+  researchFailed: number;
   qualified: number;
   disqualified: number;
-  /** Present when qualification could not run; the leads stay "pending" and can still be qualified per-lead by hand. */
-  error: string | null;
+  /** Left "pending"/"qualifying" — research failed, or research succeeded but the evidence wasn't enough to finalize a verdict. */
+  qualifying: number;
 };
 
 /**
- * Scores everything a discovery run just persisted, so leads arrive already
- * triaged instead of sitting at "pending" until someone opens each one.
+ * Runs Lead Research, then (only on success) Qualification, for each newly
+ * discovered lead — the same two per-lead actions a user can trigger by
+ * hand from a lead's page. A lead whose research fails is left exactly as
+ * discovery created it ("pending"); qualification is never attempted for it
+ * on discovery evidence alone.
  *
- * Never fails the discovery run: the prospects are already saved and real,
- * so a qualification problem is reported in the summary and leaves those
- * leads "pending" for the existing per-lead pass, rather than throwing away
- * a good run.
+ * Never fails the discovery run: the prospects/leads are already saved and
+ * real, so a per-lead research or qualification failure is just reflected
+ * in the summary counts rather than throwing away a good discovery run.
  */
-async function qualifyDiscoveredLeads(params: {
-  organizationId: string;
-  campaignObjective: string | null;
-  icpCriteria: Record<string, unknown>;
-  businessContext: ReturnType<typeof selectDiscoveryContext>;
-  qualifiable: { leadId: string; prospect: DiscoveredProspect }[];
-}): Promise<DiscoveryQualificationSummary> {
-  const summary: DiscoveryQualificationSummary = {
-    attempted: params.qualifiable.length,
-    scored: 0,
+async function runResearchAndQualification(leadIds: string[]): Promise<DiscoveryFollowUpSummary> {
+  const summary: DiscoveryFollowUpSummary = {
+    researchAttempted: leadIds.length,
+    researchSucceeded: 0,
+    researchFailed: 0,
     qualified: 0,
     disqualified: 0,
-    error: null,
+    qualifying: 0,
   };
-  if (params.qualifiable.length === 0) return summary;
 
-  const result = await runDiscoveryQualification({
-    organizationId: params.organizationId,
-    campaignObjective: params.campaignObjective,
-    icpCriteria: params.icpCriteria,
-    businessContext: params.businessContext,
-    prospects: params.qualifiable.map(({ prospect }) => ({
-      companyName: prospect.companyName,
-      location: prospect.location,
-      industry: prospect.industry,
-      website: prospect.website,
-      sourceUrl: prospect.sourceUrl,
-      evidenceSnippet: prospect.evidenceSnippet,
-    })),
-  });
+  for (const leadId of leadIds) {
+    const researchResult = await runLeadResearchAction(leadId);
+    if (!researchResult.ok) {
+      summary.researchFailed += 1;
+      continue;
+    }
+    summary.researchSucceeded += 1;
 
-  if (!result.ok) {
-    summary.error = result.message;
-    return summary;
-  }
+    const qualificationResult = await runLeadQualificationAction(leadId);
+    if (!qualificationResult.ok) continue;
 
-  const supabase = await createClient();
-  const byName = new Map(result.assessments.map((a) => [a.companyName.trim().toLowerCase(), a]));
-
-  for (const { leadId, prospect } of params.qualifiable) {
-    // Matched back by name; an assessment for a company that was never sent
-    // is ignored rather than written to some other lead.
-    const assessment = byName.get(prospect.companyName.trim().toLowerCase());
-    if (!assessment) continue;
-
-    const score = Math.round(assessment.qualificationScore);
-    const reason = [
-      assessment.positiveReasons.length > 0 ? `Positive: ${assessment.positiveReasons.join("; ")}` : null,
-      assessment.negativeReasons.length > 0 ? `Negative: ${assessment.negativeReasons.join("; ")}` : null,
-    ]
-      .filter(Boolean)
-      .join(". ");
-
-    await supabase.from("lead_scores").insert({
-      organization_id: params.organizationId,
-      lead_id: leadId,
-      score,
-      reason: reason || null,
-      scored_by: "agent",
-    });
-    await supabase
-      .from("leads")
-      .update({ current_score: score, qualification_status: assessment.recommendedStatus })
-      .eq("id", leadId);
-
-    summary.scored += 1;
-    if (assessment.recommendedStatus === "qualified") summary.qualified += 1;
-    if (assessment.recommendedStatus === "disqualified") summary.disqualified += 1;
+    const status = qualificationResult.qualification.recommendedStatus;
+    if (status === "qualified") summary.qualified += 1;
+    else if (status === "disqualified") summary.disqualified += 1;
+    else summary.qualifying += 1;
   }
 
   return summary;
@@ -381,7 +347,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
 
   let newLeadsCreated = 0;
   const createdProspects: DiscoveredProspectSummary[] = [];
-  const qualifiable: { leadId: string; prospect: (typeof result.prospects)[number] }[] = [];
+  const newLeadIds: string[] = [];
 
   for (const prospect of newProspects) {
     const { data: prospectRow } = await supabase
@@ -427,7 +393,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     if (!leadRow) continue;
 
     newLeadsCreated += 1;
-    qualifiable.push({ leadId: leadRow.id, prospect });
+    newLeadIds.push(leadRow.id);
     createdProspects.push({
       companyName: prospect.companyName,
       website: prospect.website,
@@ -450,17 +416,11 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     }
   }
 
-  const qualificationSummary = await qualifyDiscoveredLeads({
-    organizationId: currentOrg.organizationId,
-    campaignObjective: campaign.objective,
-    icpCriteria,
-    businessContext: selectDiscoveryContext(businessContext),
-    qualifiable,
-  });
+  const followUpSummary = await runResearchAndQualification(newLeadIds);
 
   const finalStatus: "completed" | "partially_completed" = result.queriesFailed.length > 0 ? "partially_completed" : "completed";
   await completeAgentRun(agentRun, finalStatus, {
-    qualification: qualificationSummary,
+    followUp: followUpSummary,
     prospectsFound: result.prospects.length,
     newLeadsCreated,
     duplicatesSkipped,
@@ -480,7 +440,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     queriesRun: result.queriesRun,
     queriesFailed: result.queriesFailed,
     prospects: createdProspects,
-    qualification: qualificationSummary,
+    followUp: followUpSummary,
   };
 }
 
