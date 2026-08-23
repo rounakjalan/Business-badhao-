@@ -38,6 +38,12 @@ const NOTIFICATION_TOGGLES = [
 ];
 
 type TeamMember = { userId: string; role: OrgRole; name: string; email: string };
+type GmailStatus = { connected: boolean; emailAddress: string | null };
+type GmailNotice = { status: string; detail?: string } | null;
+
+function isSection(value: string | undefined): value is (typeof SECTIONS)[number] {
+  return Boolean(value) && (SECTIONS as readonly string[]).includes(value as string);
+}
 
 export function SettingsSections({
   error,
@@ -47,6 +53,10 @@ export function SettingsSections({
   teamMembers,
   updateProfileAction,
   updateOrganizationAction,
+  initialTab,
+  gmailStatus,
+  gmailNotice,
+  disconnectGmailAction,
 }: {
   error?: string;
   message?: string;
@@ -55,8 +65,12 @@ export function SettingsSections({
   teamMembers: TeamMember[];
   updateProfileAction: (formData: FormData) => void;
   updateOrganizationAction: (formData: FormData) => void;
+  initialTab?: string;
+  gmailStatus: GmailStatus;
+  gmailNotice: GmailNotice;
+  disconnectGmailAction: () => void;
 }) {
-  const [section, setSection] = useState<(typeof SECTIONS)[number]>("Account");
+  const [section, setSection] = useState<(typeof SECTIONS)[number]>(isSection(initialTab) ? initialTab : "Account");
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col md:flex-row">
@@ -163,19 +177,60 @@ export function SettingsSections({
 
         {section === "Integrations" ? (
           <Section title="Integrations" desc="Connect external tools and services">
+            {gmailNotice ? (
+              <div className="mb-1">
+                <DarkAlert variant={gmailNotice.status === "error" ? "error" : "success"}>
+                  {gmailNotice.status === "connected"
+                    ? "Gmail connected."
+                    : gmailNotice.status === "disconnected"
+                      ? "Gmail disconnected."
+                      : (gmailNotice.detail ?? "Something went wrong connecting Gmail.")}
+                </DarkAlert>
+              </div>
+            ) : null}
             <div className="bb-stagger space-y-3">
-              {INTEGRATIONS.map((int) => (
-                <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
-                  <div className="flex-1">
-                    <div className="text-sm font-medium text-bb-text">{int.name}</div>
-                    <div className="text-xs text-bb-text-3">{int.desc}</div>
+              {INTEGRATIONS.map((int) =>
+                int.name === "Gmail / Google Workspace" ? (
+                  <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-bb-text">{int.name}</div>
+                      <div className="text-xs text-bb-text-3">
+                        {gmailStatus.connected ? `Connected as ${gmailStatus.emailAddress}` : int.desc}
+                      </div>
+                    </div>
+                    {gmailStatus.connected ? (
+                      <>
+                        <span className="rounded-full border border-bb-emerald/25 bg-bb-emerald/10 px-2 py-0.5 text-xs text-bb-emerald">Connected</span>
+                        <form action={disconnectGmailAction}>
+                          <DashButton type="submit" variant="outline">
+                            Disconnect
+                          </DashButton>
+                        </form>
+                      </>
+                    ) : (
+                      <>
+                        <span className="rounded-full border border-bb-text-3/25 bg-bb-text-3/10 px-2 py-0.5 text-xs text-bb-text-3">Not Connected</span>
+                        <a href="/api/gmail/oauth/start">
+                          <DashButton type="button" variant="gradient">
+                            Connect
+                          </DashButton>
+                        </a>
+                      </>
+                    )}
                   </div>
-                  <span className="rounded-full border border-bb-text-3/25 bg-bb-text-3/10 px-2 py-0.5 text-xs text-bb-text-3">Not Connected</span>
-                  <DashButton variant="outline" disabled title="Coming soon">
-                    Connect
-                  </DashButton>
-                </div>
-              ))}
+                ) : (
+                  <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-bb-text">{int.name}</div>
+                      <div className="text-xs text-bb-text-3">{int.desc}</div>
+                    </div>
+                    <span className="rounded-full border border-bb-text-3/25 bg-bb-text-3/10 px-2 py-0.5 text-xs text-bb-text-3">Not Connected</span>
+                    <DashButton variant="outline" disabled title="Coming soon">
+                      Connect
+                    </DashButton>
+                  </div>
+                )
+              )}
             </div>
           </Section>
         ) : null}

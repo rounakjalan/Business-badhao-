@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { detectIntent, type IntentDetectionResult } from "@/lib/ai/agents/intent";
 import { runFollowUp, type FollowUpResult } from "@/lib/ai/agents/follow-up";
 import { getBusinessContext, selectFollowUpContext, selectIntentProductNames } from "@/lib/business-context";
+import { checkForReplies, type CheckRepliesResult } from "@/lib/gmail/replies";
 import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
@@ -167,4 +168,22 @@ export async function updateConversationStatus(conversationId: string, status: "
   await supabase.from("conversations").update({ status }).eq("id", conversationId);
   revalidatePath(`/conversations/${conversationId}`);
   revalidatePath("/conversations");
+}
+
+/**
+ * Polls the connected Gmail account for new replies and stores any that
+ * match a known lead's email into that lead's conversation. Manually
+ * triggered rather than automatic — see the comment on checkForReplies for
+ * why this is the deliberately smallest foundation for inbound mail
+ * rather than a real-time push subscription.
+ */
+export async function checkForRepliesAction(): Promise<CheckRepliesResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, code: "not_connected", message: "Sign in to a workspace to check for replies." };
+
+  const result = await checkForReplies(currentOrg.organizationId);
+  if (result.ok && result.newReplies > 0) {
+    revalidatePath("/conversations");
+  }
+  return result;
 }

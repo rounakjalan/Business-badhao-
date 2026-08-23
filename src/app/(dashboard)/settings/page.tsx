@@ -1,17 +1,20 @@
-import { updateOrganization, updateProfile } from "@/app/(dashboard)/settings/actions";
+import { disconnectGmailAction, updateOrganization, updateProfile } from "@/app/(dashboard)/settings/actions";
 import { SettingsSections } from "@/app/(dashboard)/settings/settings-sections";
+import { getConnectionStatus } from "@/lib/gmail/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; message?: string }>;
+  searchParams: Promise<{ error?: string; message?: string; tab?: string; gmail?: string; gmailMessage?: string }>;
 }) {
-  const { error, message } = await searchParams;
+  const { error, message, tab, gmail, gmailMessage } = await searchParams;
 
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return null;
+
+  const gmailStatus = await getConnectionStatus(currentOrg.organizationId);
 
   const supabase = await createClient();
   const {
@@ -50,6 +53,10 @@ export default async function SettingsPage({
       teamMembers={teamMembers}
       updateProfileAction={updateProfile}
       updateOrganizationAction={updateOrganization}
+      initialTab={tab}
+      gmailStatus={gmailStatus}
+      gmailNotice={gmail ? { status: gmail, detail: gmailMessage } : null}
+      disconnectGmailAction={disconnectGmailAction}
     />
   );
 }

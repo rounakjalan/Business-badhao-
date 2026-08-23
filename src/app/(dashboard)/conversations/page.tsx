@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CheckRepliesButton } from "@/app/(dashboard)/conversations/check-replies-button";
 import { PageHeader } from "@/components/layout/page-header";
 import { DarkCard } from "@/components/dashboard-ui/card";
 import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
@@ -29,7 +30,7 @@ export default async function ConversationsPage() {
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col gap-5 p-4 sm:p-6">
-      <PageHeader title="Conversations" description="Customer communication center" />
+      <PageHeader title="Conversations" description="Customer communication center" action={<CheckRepliesButton />} />
 
       {rows.length === 0 ? (
         <DarkEmptyState

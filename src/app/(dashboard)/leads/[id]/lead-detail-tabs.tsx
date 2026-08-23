@@ -8,7 +8,9 @@ import {
   quickCreateTaskForLead,
   runLeadQualificationAction,
   runLeadResearchAction,
+  sendLeadOutreachAction,
   updateLeadNotes,
+  type SendOutreachResult,
 } from "@/app/(dashboard)/leads/actions";
 import type { LeadQualification } from "@/lib/ai/agents/qualification";
 import type { OutreachDraft } from "@/lib/ai/agents/outreach";
@@ -17,6 +19,14 @@ import { DarkCard } from "@/components/dashboard-ui/card";
 import { LeadStatusBadge, QualificationBadge, ScorePill, TaskStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
+
+const SEND_ERROR_LABELS: Record<string, string> = {
+  not_connected: "Gmail isn't connected for this organization yet.",
+  not_configured: "Gmail isn't configured for this deployment yet.",
+  reauth_required: "Gmail authorization has expired — reconnect it in Settings.",
+  invalid_recipient: "Gmail rejected the recipient address.",
+  rate_limited: "Gmail is rate-limiting this account right now — try again shortly.",
+};
 
 const TABS = ["Overview", "Company", "Research", "Conversations", "Tasks", "Deals", "Notes"] as const;
 
@@ -40,6 +50,8 @@ export function LeadDetailTabs({
   lead,
   leadName,
   primaryContact,
+  recipientEmail,
+  gmailStatus,
   contacts,
   companyName,
   website,
@@ -52,6 +64,8 @@ export function LeadDetailTabs({
   lead: Lead;
   leadName: string;
   primaryContact: Contact | null;
+  recipientEmail: string | null;
+  gmailStatus: { connected: boolean; emailAddress: string | null };
   contacts: Contact[];
   companyName: string | null;
   website: string | null;
@@ -68,6 +82,10 @@ export function LeadDetailTabs({
   const [researchError, setResearchError] = useState<string | null>(null);
   const [qualification, setQualification] = useState<LeadQualification | { error: string } | null>(null);
   const [outreachDraft, setOutreachDraft] = useState<OutreachDraft | { error: string } | null>(null);
+  const [editedSubject, setEditedSubject] = useState("");
+  const [editedBody, setEditedBody] = useState("");
+  const [sendPending, startSendTransition] = useTransition();
+  const [sendResult, setSendResult] = useState<SendOutreachResult | null>(null);
 
   function runResearch() {
     setResearchError(null);
@@ -85,9 +103,36 @@ export function LeadDetailTabs({
   }
 
   function runOutreach(channel: string) {
+    setSendResult(null);
     startAiTransition(async () => {
       const result = await generateLeadOutreachAction(lead.id, channel);
       setOutreachDraft(result.ok ? result.draft : { error: result.message });
+      if (result.ok) {
+        setEditedSubject(result.draft.subject ?? "");
+        setEditedBody(result.draft.message);
+      }
+    });
+  }
+
+  function cancelOutreach() {
+    setOutreachDraft(null);
+    setEditedSubject("");
+    setEditedBody("");
+    setSendResult(null);
+  }
+
+  function sendOutreach() {
+    if (!recipientEmail) return;
+    setSendResult(null);
+    startSendTransition(async () => {
+      const idempotencyKey = crypto.randomUUID();
+      const result = await sendLeadOutreachAction(lead.id, { subject: editedSubject, body: editedBody, idempotencyKey });
+      setSendResult(result);
+      if (result.ok) {
+        setOutreachDraft(null);
+        setEditedSubject("");
+        setEditedBody("");
+      }
     });
   }
 
@@ -159,7 +204,7 @@ export function LeadDetailTabs({
             <div className="space-y-4 lg:col-span-2">
               <DarkCard className="p-5">
                 <h4 className="mb-3 border-b border-bb-border pb-3 text-sm font-semibold text-bb-text">Contact Information</h4>
-                <Row label="Email" val={primaryContact?.email ?? "—"} />
+                <Row label="Email" val={recipientEmail ?? "—"} />
                 <Row label="Phone" val={primaryContact?.phone ?? "—"} />
                 <Row label="Company" val={companyName ?? "—"} />
                 <Row label="Campaign" val={campaignName ?? "—"} />
@@ -195,25 +240,95 @@ export function LeadDetailTabs({
               <DarkCard className="p-5">
                 <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
                   <h4 className="flex items-center gap-1.5 text-sm font-semibold text-bb-text">
-                    <SparklesIcon className="h-4 w-4 text-bb-indigo" /> AI Outreach Draft
+                    <SparklesIcon className="h-4 w-4 text-bb-indigo" /> AI Outreach
                   </h4>
-                  <DashButton variant="outline" disabled={aiPending} onClick={() => runOutreach("email")}>
-                    Generate
-                  </DashButton>
+                  {!outreachDraft ? (
+                    <DashButton variant="outline" disabled={aiPending} onClick={() => runOutreach("email")}>
+                      {aiPending ? "Drafting…" : "Generate"}
+                    </DashButton>
+                  ) : null}
                 </div>
+
                 {!outreachDraft ? (
                   <p className="text-sm text-bb-text-3">
-                    Drafts a personalized message from real research and qualification on file. Never sent automatically.
+                    Drafts a personalized email from real research and qualification on file, for you to review, edit and send
+                    through Gmail. Never sent automatically.
                   </p>
                 ) : "error" in outreachDraft ? (
-                  <p className="text-sm text-bb-rose">{outreachDraft.error}</p>
+                  <div className="space-y-2">
+                    <p className="text-sm text-bb-rose">{outreachDraft.error}</p>
+                    <DashButton variant="outline" disabled={aiPending} onClick={() => runOutreach("email")}>
+                      Try again
+                    </DashButton>
+                  </div>
                 ) : (
-                  <div className="space-y-2 text-sm">
-                    {outreachDraft.subject ? <div className="font-medium text-bb-text">{outreachDraft.subject}</div> : null}
-                    <p className="whitespace-pre-wrap rounded-lg bg-bb-navy-3 p-3 text-bb-text-2">{outreachDraft.message}</p>
-                    <p className="text-xs text-bb-text-3">Draft only — copy and send manually; no channel is connected yet.</p>
+                  <div className="space-y-3">
+                    <Row label="To" val={recipientEmail ?? "No email on file"} />
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Subject</label>
+                      <input
+                        value={editedSubject}
+                        onChange={(e) => setEditedSubject(e.target.value)}
+                        placeholder="(no subject)"
+                        className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Message</label>
+                      <textarea
+                        value={editedBody}
+                        onChange={(e) => setEditedBody(e.target.value)}
+                        rows={7}
+                        className="w-full resize-none rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                      />
+                    </div>
+
+                    {!recipientEmail ? (
+                      <p className="text-xs text-bb-rose">No email address on file for this lead — add one before sending.</p>
+                    ) : !gmailStatus.connected ? (
+                      <p className="text-xs text-bb-amber">
+                        Gmail isn&apos;t connected.{" "}
+                        <Link href="/settings?tab=Integrations" className="underline">
+                          Connect it in Settings
+                        </Link>{" "}
+                        to send.
+                      </p>
+                    ) : (
+                      <p className="text-xs text-bb-text-3">Will send from {gmailStatus.emailAddress}.</p>
+                    )}
+
+                    {sendResult && !sendResult.ok ? (
+                      <p className="text-xs text-bb-rose">{SEND_ERROR_LABELS[sendResult.code] ?? sendResult.message}</p>
+                    ) : null}
+
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <DashButton
+                        variant="gradient"
+                        disabled={sendPending || !recipientEmail || !gmailStatus.connected || !editedBody.trim()}
+                        onClick={sendOutreach}
+                      >
+                        {sendPending ? "Sending…" : "Send"}
+                      </DashButton>
+                      <DashButton variant="outline" disabled={aiPending || sendPending} onClick={() => runOutreach("email")}>
+                        {aiPending ? "Regenerating…" : "Regenerate"}
+                      </DashButton>
+                      <DashButton variant="ghost" disabled={sendPending} onClick={cancelOutreach}>
+                        Cancel
+                      </DashButton>
+                    </div>
                   </div>
                 )}
+
+                {sendResult?.ok ? (
+                  <div className="mt-3 rounded-lg border border-bb-emerald/25 bg-bb-emerald/10 p-3 text-sm text-bb-emerald">
+                    Sent to {sendResult.sentTo}.{" "}
+                    {sendResult.conversationId ? (
+                      <Link href={`/conversations/${sendResult.conversationId}`} className="underline">
+                        View conversation →
+                      </Link>
+                    ) : null}
+                  </div>
+                ) : null}
               </DarkCard>
             </div>
             <DarkCard className="p-5">

@@ -1,5 +1,7 @@
 import { notFound } from "next/navigation";
 import { LeadDetailTabs } from "@/app/(dashboard)/leads/[id]/lead-detail-tabs";
+import { getConnectionStatus } from "@/lib/gmail/tokens";
+import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -32,11 +34,20 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 
   const primaryContact = contacts.data?.find((c) => c.is_primary) ?? contacts.data?.[0] ?? null;
 
+  // The send action resolves a recipient the same way (contact -> prospect,
+  // never fabricated) — this must agree with what Contact Information and
+  // the outreach panel display, or the UI could show "no email" while a
+  // send would actually find one, or the reverse.
+  const [identity, gmailStatus] = await Promise.all([resolveLeadIdentity(supabase, id), getConnectionStatus(currentOrg.organizationId)]);
+  const recipientEmail = primaryContact?.email ?? identity.email;
+
   return (
     <LeadDetailTabs
       lead={lead}
       leadName={primaryContact?.full_name ?? prospect.data?.company_name ?? "Unnamed lead"}
       primaryContact={primaryContact}
+      recipientEmail={recipientEmail}
+      gmailStatus={gmailStatus}
       contacts={contacts.data ?? []}
       companyName={prospect.data?.company_name ?? null}
       website={prospect.data?.website ?? null}

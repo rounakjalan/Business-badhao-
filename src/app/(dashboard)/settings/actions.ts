@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { disconnectAccount } from "@/lib/gmail/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -54,4 +55,15 @@ export async function updateOrganization(formData: FormData) {
 
   revalidatePath("/settings");
   redirect("/settings?message=organization-updated");
+}
+
+export async function disconnectGmailAction() {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  await disconnectAccount(currentOrg.organizationId);
+
+  revalidatePath("/settings");
+  revalidatePath("/leads");
+  redirect("/settings?tab=Integrations&gmail=disconnected");
 }
