@@ -160,6 +160,61 @@ export async function updateCampaignStatus(campaignId: string, status: TablesUpd
   revalidatePath("/campaigns");
 }
 
+export type UpdateCampaignResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * Edits a campaign's own details after it was created. The wizard writes
+ * these once and previously nothing could change them again — a typo in the
+ * name, or an objective that turned out wrong, was permanent.
+ *
+ * Scoped to the caller's organization and checked for a returned row, so a
+ * campaign belonging to someone else reports "not found" rather than
+ * silently reporting success against zero updated rows.
+ *
+ * Does not touch status (updateCampaignStatus owns that) or the linked ICP.
+ */
+export async function updateCampaign(
+  campaignId: string,
+  input: { name: string; objective: string; description: string; targetAudience: string }
+): Promise<UpdateCampaignResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) {
+    return { ok: false, message: "Sign in to a workspace to edit this campaign." };
+  }
+
+  // Matches the campaigns_name_check constraint, so an empty name is
+  // refused with a readable message instead of a database error.
+  const name = input.name.trim();
+  if (!name) {
+    return { ok: false, message: "Campaign name is required." };
+  }
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("campaigns")
+    .update({
+      name,
+      objective: input.objective.trim() || null,
+      description: input.description.trim() || null,
+      target_audience: input.targetAudience.trim() || null,
+    })
+    .eq("id", campaignId)
+    .eq("organization_id", currentOrg.organizationId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, message: error.message };
+  }
+  if (!data) {
+    return { ok: false, message: "Campaign not found." };
+  }
+
+  revalidatePath(`/campaigns/${campaignId}`);
+  revalidatePath("/campaigns");
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------------
 // Lead Discovery orchestration. Discovery's own job (src/lib/ai/agents/discovery.ts)
 // ends at a list of DiscoveredProspect — this function persists them as real

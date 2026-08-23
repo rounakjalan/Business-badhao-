@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import {
+  updateCampaign,
   updateCampaignStatus,
   startLeadDiscoveryAction,
   type DiscoveredLeadRow,
@@ -62,6 +63,7 @@ export function CampaignDetailTabs({
   const parsedIcp = icp ? IcpSchema.safeParse(icp) : null;
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [pending, setPending] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   const togglePause = async () => {
     setPending(true);
@@ -89,7 +91,16 @@ export function CampaignDetailTabs({
               {campaign.objective ?? "No objective set"} · Created {formatDate(campaign.created_at)}
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <DashButton
+              variant="ghost"
+              onClick={() => {
+                setTab("Overview");
+                setEditing((e) => !e);
+              }}
+            >
+              {editing ? "Cancel Edit" : "Edit Campaign"}
+            </DashButton>
             <DashButton variant="ghost" onClick={togglePause} disabled={pending || campaign.status === "won"}>
               {campaign.status === "paused" ? "Resume Campaign" : "Pause Campaign"}
             </DashButton>
@@ -130,16 +141,24 @@ export function CampaignDetailTabs({
 
       <div className="flex-1 p-4 sm:p-6">
         {tab === "Overview" ? (
-          <div className="max-w-2xl space-y-4 text-sm text-bb-text-2">
-            <DarkCard className="p-5">
-              <div className="mb-2 text-xs font-medium text-bb-text-3">DESCRIPTION</div>
-              <p>{campaign.description || "No description added."}</p>
-            </DarkCard>
-            <DarkCard className="p-5">
-              <div className="mb-2 text-xs font-medium text-bb-text-3">TARGET AUDIENCE</div>
-              <p>{campaign.target_audience || "No target audience set yet."}</p>
-            </DarkCard>
-          </div>
+          editing ? (
+            <CampaignEditForm campaign={campaign} onDone={() => setEditing(false)} />
+          ) : (
+            <div className="max-w-2xl space-y-4 text-sm text-bb-text-2">
+              <DarkCard className="p-5">
+                <div className="mb-2 text-xs font-medium text-bb-text-3">OBJECTIVE</div>
+                <p>{campaign.objective || "No objective set."}</p>
+              </DarkCard>
+              <DarkCard className="p-5">
+                <div className="mb-2 text-xs font-medium text-bb-text-3">DESCRIPTION</div>
+                <p>{campaign.description || "No description added."}</p>
+              </DarkCard>
+              <DarkCard className="p-5">
+                <div className="mb-2 text-xs font-medium text-bb-text-3">TARGET AUDIENCE</div>
+                <p>{campaign.target_audience || "No target audience set yet."}</p>
+              </DarkCard>
+            </div>
+          )
         ) : null}
 
         {tab === "ICP" ? <IcpTab icp={parsedIcp?.success ? parsedIcp.data : null} targetAudience={campaign.target_audience} /> : null}
@@ -182,6 +201,111 @@ export function CampaignDetailTabs({
 
         {tab === "Activity" ? <div className="py-16 text-center text-sm text-bb-text-3">Activity history is coming soon.</div> : null}
       </div>
+    </div>
+  );
+}
+
+function editFieldClass() {
+  return "w-full rounded-lg border border-bb-border bg-bb-navy px-4 py-2.5 text-sm text-bb-text outline-none placeholder:text-bb-text-3 focus:border-bb-indigo";
+}
+
+/**
+ * Edits the campaign's own details in place on the Overview tab. Kept to
+ * the four fields the wizard collects — status has its own control, and the
+ * ICP is generated rather than typed, so neither belongs in this form.
+ */
+function CampaignEditForm({ campaign, onDone }: { campaign: Campaign; onDone: () => void }) {
+  const [name, setName] = useState(campaign.name);
+  const [objective, setObjective] = useState(campaign.objective ?? "");
+  const [description, setDescription] = useState(campaign.description ?? "");
+  const [targetAudience, setTargetAudience] = useState(campaign.target_audience ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const result = await updateCampaign(campaign.id, { name, objective, description, targetAudience });
+    setSaving(false);
+    if (result.ok) {
+      onDone();
+    } else {
+      setError(result.message);
+    }
+  };
+
+  return (
+    <div className="max-w-2xl space-y-4">
+      {error ? <DarkAlert variant="error">{error}</DarkAlert> : null}
+
+      <DarkCard className="space-y-4 p-5">
+        <div className="space-y-1.5">
+          <label htmlFor="campaign-name" className="block text-xs font-medium text-bb-text-3">
+            CAMPAIGN NAME
+          </label>
+          <input
+            id="campaign-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className={editFieldClass()}
+            placeholder="e.g. Pune Local Business Websites"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="campaign-objective" className="block text-xs font-medium text-bb-text-3">
+            OBJECTIVE
+          </label>
+          <input
+            id="campaign-objective"
+            value={objective}
+            onChange={(e) => setObjective(e.target.value)}
+            className={editFieldClass()}
+            placeholder="What should this campaign achieve?"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="campaign-description" className="block text-xs font-medium text-bb-text-3">
+            DESCRIPTION
+          </label>
+          <textarea
+            id="campaign-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            className={`${editFieldClass()} resize-y`}
+            placeholder="What is this campaign about?"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="campaign-audience" className="block text-xs font-medium text-bb-text-3">
+            TARGET AUDIENCE
+          </label>
+          <input
+            id="campaign-audience"
+            value={targetAudience}
+            onChange={(e) => setTargetAudience(e.target.value)}
+            className={editFieldClass()}
+            placeholder="e.g. Small local businesses · Pune"
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-3 pt-1">
+          <DashButton variant="gradient" onClick={save} disabled={saving || !name.trim()}>
+            {saving ? "Saving..." : "Save changes"}
+          </DashButton>
+          <DashButton variant="ghost" onClick={onDone} disabled={saving}>
+            Cancel
+          </DashButton>
+        </div>
+
+        <p className="text-xs text-bb-text-3">
+          Changing the target audience here does not rewrite this campaign&apos;s Ideal Customer Profile — Lead Discovery
+          still searches using the saved ICP on the ICP tab.
+        </p>
+      </DarkCard>
     </div>
   );
 }
