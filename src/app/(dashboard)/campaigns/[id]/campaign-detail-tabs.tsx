@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   updateCampaign,
   updateCampaignStatus,
   startLeadDiscoveryAction,
+  getLeadDiscoveryProgressAction,
+  type DiscoveryProgress,
   type DiscoveredLeadRow,
   type DiscoveredProspectSummary,
   type LeadDiscoveryActionResult,
@@ -437,6 +439,46 @@ function IcpTab({ icp, targetAudience }: { icp: Icp | null; targetAudience: stri
   );
 }
 
+/**
+ * Tells the user a run finished when they are not looking at this tab.
+ * A discovery run takes minutes, so the realistic case is that they went
+ * elsewhere — a browser notification is the only way to reach them there.
+ *
+ * Entirely best-effort: no permission is ever requested here, and nothing
+ * breaks where the API is missing, blocked, or denied. The page itself
+ * always shows the outcome regardless.
+ */
+function notifyDiscoveryFinished(progress: DiscoveryProgress) {
+  try {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    if (typeof document !== "undefined" && document.visibilityState === "visible") return;
+
+    const leads = progress.followUp
+      ? (progress.followUp.researchSucceeded ?? 0)
+      : progress.scored;
+    new Notification("Lead discovery finished", {
+      body:
+        progress.status === "failed"
+          ? "The run did not complete. Open the campaign to see why."
+          : `${progress.leadsCreated} leads found, ${leads} researched and scored.`,
+      tag: "bb-lead-discovery",
+    });
+  } catch {
+    // A notification is a courtesy — never let it interfere with the page.
+  }
+}
+
+/** Asked for only when the user starts a run, so the prompt has obvious context. */
+function requestNotificationPermission() {
+  try {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "default") void Notification.requestPermission();
+  } catch {
+    // Ignore: some browsers throw on the promise-less legacy signature.
+  }
+}
+
 const DISCOVERY_ERROR_TITLES: Record<string, string> = {
   unauthorized: "Sign-in required",
   no_icp: "No Ideal Customer Profile yet",
@@ -521,23 +563,72 @@ function LeadDiscoveryTab({
   hasIcp: boolean;
   discovery: DiscoveryState;
 }) {
-  const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<LeadDiscoveryActionResult | null>(null);
+  const [progress, setProgress] = useState<DiscoveryProgress | null>(null);
+  const [justFinished, setJustFinished] = useState(false);
+  const router = useRouter();
 
-  // Guards against duplicate discovery runs from a double-click, and against
-  // starting a second run while the server already reports one in flight.
-  const alreadyRunning = discovery.lastRun?.status === "running";
+  // A run takes minutes and keeps going on the server whether or not this
+  // tab is open — closing the browser does not stop it. So "is a run in
+  // flight" is a fact about the server, not about this component: it comes
+  // from the last run's status, refreshed by polling, and survives a reload
+  // or a completely different device.
+  const liveStatus = progress?.status ?? discovery.lastRun?.status ?? null;
+  const isRunning = liveStatus === "running";
 
-  const start = async () => {
-    if (submitting || alreadyRunning) return;
-    setSubmitting(true);
+  const start = () => {
+    if (isRunning) return;
     setResult(null);
-    try {
-      setResult(await startLeadDiscoveryAction(campaignId));
-    } finally {
-      setSubmitting(false);
-    }
+    setJustFinished(false);
+    requestNotificationPermission();
+    // Deliberately not awaited. The run continues server-side regardless of
+    // this tab, so blocking the UI on it for several minutes would only
+    // make a closed tab look like a cancelled run. We flip straight into
+    // tracking mode and let polling report what happens.
+    void startLeadDiscoveryAction(campaignId).then((r) => {
+      // Only surface an immediate refusal (no ICP, already running). A
+      // completed run is reported by the poller, which works even if this
+      // promise never resolves here because the tab was closed.
+      if (!r.ok) setResult(r);
+    });
+    setProgress((p) => ({
+      status: "running",
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      leadsCreated: p?.leadsCreated ?? 0,
+      researched: p?.researched ?? 0,
+      scored: p?.scored ?? 0,
+      followUp: null,
+      message: null,
+    }));
   };
+
+  // Poll only while something is actually running, and stop as soon as it
+  // is not — no timers left behind on a finished campaign.
+  useEffect(() => {
+    if (!isRunning) return;
+
+    let cancelled = false;
+    const tick = async () => {
+      const next = await getLeadDiscoveryProgressAction(campaignId);
+      if (cancelled) return;
+      setProgress(next);
+      if (next.status && next.status !== "running") {
+        setJustFinished(true);
+        notifyDiscoveryFinished(next);
+        // The run wrote new leads and statuses; pull the server components
+        // on this page back in sync with them.
+        router.refresh();
+      }
+    };
+
+    void tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isRunning, campaignId, router]);
 
   if (!hasIcp) {
     return (
@@ -562,12 +653,48 @@ function LeadDiscoveryTab({
               here is invented.
             </p>
           </div>
-          <DashButton variant="gradient" onClick={start} disabled={submitting || alreadyRunning}>
+          <DashButton variant="gradient" onClick={start} disabled={isRunning}>
             <SparklesIcon className="h-3.5 w-3.5" />
-            {submitting ? "Running discovery..." : alreadyRunning ? "Discovery in progress..." : "Start Discovery"}
+            {isRunning ? "Discovery running..." : "Start Discovery"}
           </DashButton>
         </div>
       </DarkCard>
+
+      {isRunning ? (
+        <DarkCard className="border-bb-indigo/30 p-5 text-sm">
+          <div className="flex items-center gap-2 font-medium text-bb-indigo-2">
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-bb-indigo/30 border-t-bb-indigo" />
+            Discovery is running
+          </div>
+          <p className="mt-2 text-xs text-bb-text-3">
+            This keeps running on our servers — you can close this tab or shut your laptop and it will finish. Come back
+            here any time to see how it went.
+          </p>
+          {progress && progress.leadsCreated > 0 ? (
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
+              <span className="flex items-center gap-1.5">
+                <span className="font-jetbrains font-semibold text-bb-text-2">{progress.leadsCreated}</span> leads found
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="font-jetbrains font-semibold text-bb-text-2">{progress.researched}</span> researched
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="font-jetbrains font-semibold text-bb-text-2">{progress.scored}</span> scored
+              </span>
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-bb-text-3">Searching for prospects…</p>
+          )}
+        </DarkCard>
+      ) : null}
+
+      {justFinished && progress && !isRunning ? (
+        <DarkAlert variant={progress.status === "failed" ? "error" : "success"}>
+          {progress.status === "failed"
+            ? progress.message ?? "The discovery run did not complete."
+            : `Discovery finished — ${progress.leadsCreated} leads found, ${progress.scored} researched and scored.`}
+        </DarkAlert>
+      ) : null}
 
       {result && !result.ok ? (
         <DarkAlert variant="error">

@@ -596,6 +596,84 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   };
 }
 
+export type DiscoveryProgress = {
+  /** null when this campaign has never been run. */
+  status: "running" | "completed" | "partially_completed" | "failed" | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  leadsCreated: number;
+  researched: number;
+  scored: number;
+  followUp: DiscoveryFollowUpSummary | null;
+  message: string | null;
+};
+
+/**
+ * A light status poll for a campaign's discovery run.
+ *
+ * A run keeps going on the server after the browser that started it goes
+ * away — the work is server-side and does not depend on the request staying
+ * open. What was missing was any way to watch it: a user who closed the tab
+ * had no way to see progress or learn that the run had finished. This is
+ * what the Lead Discovery tab polls to answer both.
+ *
+ * Counts come from the rows themselves rather than the run's output, since
+ * output is only written once the run ends — while it is still going, the
+ * rows are the only live signal.
+ */
+export async function getLeadDiscoveryProgressAction(campaignId: string): Promise<DiscoveryProgress> {
+  const empty: DiscoveryProgress = {
+    status: null,
+    startedAt: null,
+    completedAt: null,
+    leadsCreated: 0,
+    researched: 0,
+    scored: 0,
+    followUp: null,
+    message: null,
+  };
+
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return empty;
+
+  const supabase = await createClient();
+
+  const [run, leadRows] = await Promise.all([
+    supabase
+      .from("agent_runs")
+      .select("status, started_at, completed_at, output")
+      .eq("organization_id", currentOrg.organizationId)
+      .eq("agent_type", "lead_discovery")
+      .contains("input", { campaignId })
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase.from("leads").select("id, qualification_status").eq("campaign_id", campaignId),
+  ]);
+
+  if (!run.data) return empty;
+
+  const leads = leadRows.data ?? [];
+  const leadIds = leads.map((l) => l.id);
+
+  const { count: researchCount } = leadIds.length
+    ? await supabase.from("lead_research").select("id", { count: "exact", head: true }).in("lead_id", leadIds)
+    : { count: 0 };
+
+  const output = (run.data.output ?? null) as { followUp?: DiscoveryFollowUpSummary; message?: string } | null;
+
+  return {
+    status: run.data.status as DiscoveryProgress["status"],
+    startedAt: run.data.started_at,
+    completedAt: run.data.completed_at,
+    leadsCreated: leads.length,
+    researched: researchCount ?? 0,
+    scored: leads.filter((l) => l.qualification_status !== "pending").length,
+    followUp: output?.followUp ?? null,
+    message: output?.message ?? null,
+  };
+}
+
 export type DiscoveredLeadRow = {
   leadId: string;
   leadStatus: string;
