@@ -64,7 +64,10 @@ export default async function AnalyticsPage() {
       <PageHeader title="Analytics" description="Complete acquisition funnel performance" />
 
       <DarkCard className="p-6">
-        <h3 className="mb-5 text-sm font-semibold text-bb-text">Acquisition Funnel</h3>
+        <div className="mb-5 flex items-baseline justify-between">
+          <h3 className="text-sm font-semibold text-bb-text">Acquisition Funnel</h3>
+          <span className="text-xs text-bb-text-3">Share of all prospects</span>
+        </div>
         <div className="bb-stagger space-y-2.5">
           {funnel.map((f, i) => (
             <div key={f.stage} className="bb-stagger-item flex items-center gap-4">
@@ -78,7 +81,7 @@ export default async function AnalyticsPage() {
                 </AnimatedBar>
               </div>
               <div className="w-16 shrink-0 text-right text-xs text-bb-text-3">
-                {i === 0 ? "100%" : funnel[i - 1].count > 0 ? `${((f.count / funnel[i - 1].count) * 100).toFixed(1)}%` : "—"}
+                {i === 0 ? "100%" : funnel[0].count > 0 ? `${((f.count / funnel[0].count) * 100).toFixed(1)}%` : "—"}
               </div>
             </div>
           ))}

@@ -55,6 +55,13 @@ export async function detectIntentAction(conversationId: string): Promise<Intent
   if (result.ok) {
     const supabase = await createClient();
     await supabase.from("conversations").update({ intent: result.analysis.intent }).eq("id", conversationId);
+    // The Leads list and detail page both show a lead's intent; without
+    // this the column has no writer anywhere and stays empty forever.
+    await supabase
+      .from("leads")
+      .update({ intent: result.analysis.intent })
+      .eq("id", context.conversation.lead_id)
+      .eq("organization_id", currentOrg.organizationId);
     await supabase.from("conversation_events").insert({
       organization_id: currentOrg.organizationId,
       conversation_id: conversationId,
@@ -62,6 +69,7 @@ export async function detectIntentAction(conversationId: string): Promise<Intent
       payload: result.analysis as unknown as Json,
     });
     revalidatePath(`/conversations/${conversationId}`);
+    revalidatePath("/leads");
   }
 
   return result;
@@ -102,7 +110,15 @@ export async function runFollowUpAction(conversationId: string): Promise<FollowU
       related_entity_type: "conversation",
       related_entity_id: conversationId,
     });
+    // Same reason as intent above: the lead's next action is displayed in
+    // two places but was never written by anything.
+    await supabase
+      .from("leads")
+      .update({ next_action: `Follow up ${plan.followUpTiming}` })
+      .eq("id", context.conversation.lead_id)
+      .eq("organization_id", currentOrg.organizationId);
     revalidatePath(`/conversations/${conversationId}`);
+    revalidatePath("/leads");
     revalidatePath("/tasks");
   }
 

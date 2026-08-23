@@ -134,7 +134,7 @@ export async function getDashboardStats(organizationId: string): Promise<Dashboa
 export async function getAcquisitionFunnel(organizationId: string): Promise<FunnelStage[]> {
   const supabase = await createClient();
 
-  const [prospects, leads, contacted, qualified, conversations, deals, won] = await Promise.all([
+  const [prospects, leads, contacted, qualified, conversations, deals] = await Promise.all([
     supabase.from("prospects").select("*", { count: "exact", head: true }).eq("organization_id", organizationId),
     supabase.from("leads").select("*", { count: "exact", head: true }).eq("organization_id", organizationId),
     supabase
@@ -147,23 +147,25 @@ export async function getAcquisitionFunnel(organizationId: string): Promise<Funn
       .select("*", { count: "exact", head: true })
       .eq("organization_id", organizationId)
       .eq("qualification_status", "qualified"),
-    supabase.from("conversations").select("*", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase.from("deals").select("*", { count: "exact", head: true }).eq("organization_id", organizationId),
-    supabase
-      .from("deals")
-      .select("*", { count: "exact", head: true })
-      .eq("organization_id", organizationId)
-      .eq("status", "won"),
+    supabase.from("conversations").select("lead_id").eq("organization_id", organizationId),
+    supabase.from("deals").select("lead_id, status").eq("organization_id", organizationId),
   ]);
+
+  // One lead can hold several conversations and several deals. Counting rows
+  // for these stages compares threads and quotes against people, which is
+  // what made the funnel report conversion rates above 100%.
+  const dealRows = deals.data ?? [];
+  const distinctLeads = (rows: { lead_id: string | null }[]) =>
+    new Set(rows.map((r) => r.lead_id).filter((id): id is string => Boolean(id))).size;
 
   return [
     { stage: "Prospects", count: prospects.count ?? 0 },
     { stage: "Leads", count: leads.count ?? 0 },
     { stage: "Contacted", count: contacted.count ?? 0 },
     { stage: "Qualified", count: qualified.count ?? 0 },
-    { stage: "Conversations", count: conversations.count ?? 0 },
-    { stage: "Deals", count: deals.count ?? 0 },
-    { stage: "Won", count: won.count ?? 0 },
+    { stage: "Conversations", count: distinctLeads(conversations.data ?? []) },
+    { stage: "Deals", count: distinctLeads(dealRows) },
+    { stage: "Won", count: distinctLeads(dealRows.filter((d) => d.status === "won")) },
   ];
 }
 

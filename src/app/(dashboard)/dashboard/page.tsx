@@ -122,7 +122,7 @@ export default async function DashboardPage() {
                   </AnimatedBar>
                 </div>
                 <div className="w-11 shrink-0 text-right text-xs text-bb-text-3">
-                  {i > 0 && funnel[i - 1].count > 0 ? `${((f.count / funnel[i - 1].count) * 100).toFixed(0)}%` : ""}
+                  {i > 0 && funnel[0].count > 0 ? `${((f.count / funnel[0].count) * 100).toFixed(0)}%` : ""}
                 </div>
               </div>
             ))}

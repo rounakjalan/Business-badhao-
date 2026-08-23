@@ -109,7 +109,7 @@ export function LeadDetailTabs({
             <div>
               <h2 className="font-display mb-1 text-xl font-semibold text-bb-text">{leadName}</h2>
               <div className="flex flex-wrap items-center gap-3 text-sm text-bb-text-3">
-                {companyName ? <span>{companyName}</span> : null}
+                {companyName && companyName !== leadName ? <span>{companyName}</span> : null}
                 {primaryContact?.email ? <span>{primaryContact.email}</span> : null}
                 {primaryContact?.phone ? <span>{primaryContact.phone}</span> : null}
               </div>
