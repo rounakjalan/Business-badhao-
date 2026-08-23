@@ -4,7 +4,7 @@ import type { BusinessContext } from "@/lib/business-context";
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
-import { runCampaignPlanner } from "@/lib/ai/agents/campaign-planner";
+import { runCampaignPlanner, diffPlanFields } from "@/lib/ai/agents/campaign-planner";
 
 const VALID_PLAN = {
   objective: "Book 20 demo calls",
@@ -89,7 +89,7 @@ describe("runCampaignPlanner", () => {
 
     const result = await runCampaignPlanner(baseInput);
 
-    expect(result).toEqual({ ok: true, plan: VALID_PLAN });
+    expect(result).toEqual({ ok: true, plan: VALID_PLAN, changedFields: [] });
     expect(vi.mocked(runHermesCompletion)).toHaveBeenCalledWith(
       expect.objectContaining({ organizationId: "org-1", agentType: "campaign_planner", responseFormat: "json" })
     );
@@ -140,7 +140,7 @@ describe("runCampaignPlanner", () => {
 
       const result = await runCampaignPlanner({ ...baseInput, businessContext: null });
 
-      expect(result).toEqual({ ok: true, plan: VALID_PLAN });
+      expect(result).toEqual({ ok: true, plan: VALID_PLAN, changedFields: [] });
       const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
       expect(call.userPrompt).toContain("No Business Knowledge is on file for this organization yet.");
     });
@@ -205,5 +205,99 @@ describe("runCampaignPlanner", () => {
       expect(call.systemPrompt).toContain("authoritative");
       expect(call.systemPrompt.toLowerCase()).toContain("never invent a product, price, policy");
     });
+  });
+});
+
+describe("revising an existing plan", () => {
+  afterEach(() => vi.clearAllMocks());
+
+  const REVISED = { ...VALID_PLAN, targetMarket: "Clinics only", suggestedChannels: ["Email"] };
+
+  const refineInput = {
+    ...baseInput,
+    currentPlan: VALID_PLAN,
+    refinementRequest: "Focus only on clinics and drop WhatsApp.",
+  };
+
+  it("edits the plan instead of writing a new one: sends the current plan and the request", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(REVISED), provider: "groq", model: "m" });
+
+    await runCampaignPlanner(refineInput);
+
+    const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
+    expect(call.userPrompt).toContain("=== CURRENT PLAN");
+    expect(call.userPrompt).toContain("=== REQUESTED CHANGES");
+    expect(call.userPrompt).toContain("Focus only on clinics");
+    // The plan being revised is actually in the prompt, not just described.
+    expect(call.userPrompt).toContain("Book 20 demo calls");
+    // And the model is told to preserve, which is what makes this a revision.
+    expect(call.systemPrompt).toContain("not replace it");
+    expect(call.systemPrompt).toContain("EXACTLY as it is");
+  });
+
+  it("still sends Business Knowledge when revising, so edits stay grounded", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(REVISED), provider: "groq", model: "m" });
+
+    await runCampaignPlanner({ ...refineInput, businessContext: FULL_BUSINESS_CONTEXT });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("=== BUSINESS KNOWLEDGE");
+    expect(prompt.indexOf("=== CURRENT PLAN")).toBeGreaterThan(prompt.indexOf("=== BUSINESS KNOWLEDGE"));
+  });
+
+  it("reports exactly which fields the revision changed", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(REVISED), provider: "groq", model: "m" });
+
+    const result = await runCampaignPlanner(refineInput);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.changedFields.sort()).toEqual(["suggestedChannels", "targetMarket"]);
+  });
+
+  it("reports no changes when the model returns the plan untouched", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_PLAN), provider: "groq", model: "m" });
+
+    const result = await runCampaignPlanner(refineInput);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.changedFields).toEqual([]);
+  });
+
+  it("treats a plan with no request, or a request with no plan, as a normal generation", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_PLAN), provider: "groq", model: "m" });
+
+    await runCampaignPlanner({ ...baseInput, currentPlan: VALID_PLAN, refinementRequest: "   " });
+    expect(vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt).not.toContain("=== CURRENT PLAN");
+
+    vi.mocked(runHermesCompletion).mockClear();
+    await runCampaignPlanner({ ...baseInput, refinementRequest: "make it shorter" });
+    expect(vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt).not.toContain("=== REQUESTED CHANGES");
+  });
+
+  it("a first-time generation reports no changed fields", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_PLAN), provider: "groq", model: "m" });
+
+    const result = await runCampaignPlanner(baseInput);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.changedFields).toEqual([]);
+  });
+});
+
+describe("diffPlanFields", () => {
+  it("sees a changed string field", () => {
+    expect(diffPlanFields(VALID_PLAN, { ...VALID_PLAN, valueProposition: "different" })).toEqual(["valueProposition"]);
+  });
+
+  it("sees list edits, including reordering and length changes", () => {
+    expect(diffPlanFields(VALID_PLAN, { ...VALID_PLAN, suggestedChannels: ["Instagram", "WhatsApp"] })).toEqual(["suggestedChannels"]);
+    expect(diffPlanFields(VALID_PLAN, { ...VALID_PLAN, painPoints: ["low foot traffic", "new"] })).toEqual(["painPoints"]);
+  });
+
+  it("returns nothing for an identical plan", () => {
+    expect(diffPlanFields(VALID_PLAN, { ...VALID_PLAN })).toEqual([]);
   });
 });

@@ -22,17 +22,17 @@ const OBJECTIVES = [
 
 function planSections(plan: CampaignPlan) {
   return [
-    { title: "Target Market", val: plan.targetMarket },
-    { title: "Customer Profile", val: plan.customerProfile },
-    { title: "Ideal Customer Characteristics", val: plan.idealCustomerCharacteristics.join(", ") },
-    { title: "Buying Signals", val: plan.buyingSignals.join(", ") },
-    { title: "Pain Points", val: plan.painPoints.join(", ") },
-    { title: "Value Proposition", val: plan.valueProposition },
-    { title: "Suggested Channels", val: plan.suggestedChannels.join(", ") },
-    { title: "Campaign Strategy", val: plan.campaignStrategy },
-    { title: "Qualification Criteria", val: plan.qualificationCriteria.join(", ") },
-    { title: "Outreach Strategy", val: plan.outreachStrategy },
-    { title: "Follow-up Strategy", val: plan.followUpStrategy },
+    { key: "targetMarket", title: "Target Market", val: plan.targetMarket },
+    { key: "customerProfile", title: "Customer Profile", val: plan.customerProfile },
+    { key: "idealCustomerCharacteristics", title: "Ideal Customer Characteristics", val: plan.idealCustomerCharacteristics.join(", ") },
+    { key: "buyingSignals", title: "Buying Signals", val: plan.buyingSignals.join(", ") },
+    { key: "painPoints", title: "Pain Points", val: plan.painPoints.join(", ") },
+    { key: "valueProposition", title: "Value Proposition", val: plan.valueProposition },
+    { key: "suggestedChannels", title: "Suggested Channels", val: plan.suggestedChannels.join(", ") },
+    { key: "campaignStrategy", title: "Campaign Strategy", val: plan.campaignStrategy },
+    { key: "qualificationCriteria", title: "Qualification Criteria", val: plan.qualificationCriteria.join(", ") },
+    { key: "outreachStrategy", title: "Outreach Strategy", val: plan.outreachStrategy },
+    { key: "followUpStrategy", title: "Follow-up Strategy", val: plan.followUpStrategy },
   ];
 }
 
@@ -69,6 +69,8 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
   const [generating, startGenerating] = useTransition();
   const [plan, setPlan] = useState<CampaignPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [refinement, setRefinement] = useState("");
+  const [changedFields, setChangedFields] = useState<string[]>([]);
   const [generatingIcp, startGeneratingIcp] = useTransition();
   const [icp, setIcp] = useState<Icp | null>(null);
   const [icpError, setIcpError] = useState<string | null>(null);
@@ -77,11 +79,42 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
 
   const generatePlan = () => {
     setPlanError(null);
+    setChangedFields([]);
     startGenerating(async () => {
       const result = await generateCampaignPlan({ name, objective, description, customerType, location });
       if (result.ok) {
         setPlan(result.plan);
+        setRefinement("");
         setIcp(null); // a regenerated plan invalidates any ICP already generated from the old one
+      } else {
+        setPlanError(result.message);
+      }
+    });
+  };
+
+  /**
+   * Asks the planner to change the plan already on screen, rather than
+   * write a new one. The ICP is cleared for the same reason a regenerate
+   * clears it — it was built from the plan as it was before these edits.
+   */
+  const refinePlan = () => {
+    if (!plan || !refinement.trim()) return;
+    setPlanError(null);
+    startGenerating(async () => {
+      const result = await generateCampaignPlan({
+        name,
+        objective,
+        description,
+        customerType,
+        location,
+        currentPlan: plan,
+        refinementRequest: refinement,
+      });
+      if (result.ok) {
+        setPlan(result.plan);
+        setChangedFields(result.changedFields);
+        setRefinement("");
+        setIcp(null);
       } else {
         setPlanError(result.message);
       }
@@ -234,26 +267,80 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
             </DashButton>
           ) : (
             <div className="bb-stagger space-y-3">
-              {planSections(plan).map((s) => (
-                <div key={s.title} className="bb-stagger-item rounded-lg border border-bb-border bg-bb-navy p-4">
-                  <div className="mb-1 text-xs font-medium text-bb-indigo-2">{s.title}</div>
-                  <div className="text-sm text-bb-text-2">{s.val}</div>
+              {changedFields.length > 0 ? (
+                <DarkAlert variant="success">
+                  Updated {changedFields.length === 1 ? "1 section" : `${changedFields.length} sections`}. Everything else
+                  was left as it was.
+                </DarkAlert>
+              ) : null}
+
+              {planSections(plan).map((s) => {
+                const changed = changedFields.includes(s.key);
+                return (
+                  <div
+                    key={s.title}
+                    className={`bb-stagger-item rounded-lg border bg-bb-navy p-4 ${
+                      changed ? "border-bb-indigo" : "border-bb-border"
+                    }`}
+                  >
+                    <div className="mb-1 flex items-center gap-2">
+                      <span className="text-xs font-medium text-bb-indigo-2">{s.title}</span>
+                      {changed ? (
+                        <span className="rounded bg-bb-indigo/20 px-1.5 py-0.5 text-[10px] font-medium text-bb-indigo-2">
+                          Updated
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="text-sm text-bb-text-2">{s.val}</div>
+                  </div>
+                );
+              })}
+
+              <div className="space-y-2 rounded-lg border border-bb-border bg-bb-navy p-4">
+                <label htmlFor="plan-refinement" className="block text-xs font-medium text-bb-indigo-2">
+                  Want something changed?
+                </label>
+                <textarea
+                  id="plan-refinement"
+                  value={refinement}
+                  onChange={(e) => setRefinement(e.target.value)}
+                  rows={3}
+                  placeholder="e.g. Focus only on clinics, drop the WhatsApp channel, and make the value proposition mention same-week delivery."
+                  className={`${inputClass()} resize-y`}
+                />
+                <div className="flex flex-wrap gap-3">
+                  <DashButton variant="gradient" onClick={refinePlan} disabled={generating || !refinement.trim()}>
+                    {generating ? (
+                      <>
+                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                        Applying changes...
+                      </>
+                    ) : (
+                      <>
+                        <SparklesIcon className="h-3.5 w-3.5" /> Apply changes
+                      </>
+                    )}
+                  </DashButton>
+                  <DashButton variant="ghost" onClick={generatePlan} disabled={generating}>
+                    Start over
+                  </DashButton>
+                  <DashButton
+                    variant="ghost"
+                    onClick={() => {
+                      setPlan(null);
+                      setIcp(null);
+                      setRefinement("");
+                      setChangedFields([]);
+                    }}
+                  >
+                    Discard
+                  </DashButton>
                 </div>
-              ))}
-              <div className="flex gap-3">
-                <DashButton variant="ghost" onClick={generatePlan} disabled={generating}>
-                  Regenerate
-                </DashButton>
-                <DashButton
-                  variant="ghost"
-                  onClick={() => {
-                    setPlan(null);
-                    setIcp(null);
-                  }}
-                >
-                  Discard
-                </DashButton>
+                <p className="text-xs text-bb-text-3">
+                  Apply changes edits this plan and keeps the rest. Start over writes a brand new plan from your basics.
+                </p>
               </div>
+
               <p className="text-xs text-bb-text-3">This plan will be used to build the Target Customer step next.</p>
             </div>
           )}

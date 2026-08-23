@@ -12,12 +12,25 @@ import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json, TablesUpdate } from "@/types/database.types";
 
+/**
+ * Generates a campaign plan, or revises the one the user already has.
+ *
+ * Passing currentPlan together with refinementRequest switches the planner
+ * into revision mode, where it edits that plan instead of writing a new
+ * one — see runCampaignPlanner. Both are optional so the wizard's
+ * first-time "Generate" call is unchanged.
+ *
+ * The organization's Business Knowledge is always loaded and passed in;
+ * it's what keeps the plan grounded in what this business actually sells.
+ */
 export async function generateCampaignPlan(input: {
   name: string;
   objective: string;
   description: string;
   customerType: string;
   location: string;
+  currentPlan?: CampaignPlan | null;
+  refinementRequest?: string | null;
 }): Promise<CampaignPlannerResult> {
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) {
@@ -35,6 +48,8 @@ export async function generateCampaignPlan(input: {
     customerType: input.customerType,
     location: input.location,
     businessContext,
+    currentPlan: input.currentPlan ?? null,
+    refinementRequest: input.refinementRequest ?? null,
   });
 }
 
