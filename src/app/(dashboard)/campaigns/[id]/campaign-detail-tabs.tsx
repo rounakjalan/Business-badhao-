@@ -75,11 +75,20 @@ export function CampaignDetailTabs({
   const [pending, setPending] = useState(false);
   const [editing, setEditing] = useState(false);
 
-  const togglePause = async () => {
+  const setStatus = async (status: "active" | "paused" | "completed" | "archived") => {
     setPending(true);
-    await updateCampaignStatus(campaign.id, campaign.status === "paused" ? "active" : "paused");
+    await updateCampaignStatus(campaign.id, status);
     setPending(false);
   };
+
+  // A campaign starts as "draft" (or "planning" from the older wizard).
+  // Those need a way to go live directly — previously the only control was
+  // a pause/resume toggle, so launching a draft meant pausing it first and
+  // then resuming, which made no sense. "completed" and "archived" were
+  // unreachable entirely despite the campaigns list offering filters for
+  // them.
+  const notYetLive = campaign.status === "draft" || campaign.status === "planning";
+  const isClosed = campaign.status === "completed" || campaign.status === "archived";
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col">
@@ -111,9 +120,38 @@ export function CampaignDetailTabs({
             >
               {editing ? "Cancel Edit" : "Edit Campaign"}
             </DashButton>
-            <DashButton variant="ghost" onClick={togglePause} disabled={pending || campaign.status === "won"}>
-              {campaign.status === "paused" ? "Resume Campaign" : "Pause Campaign"}
-            </DashButton>
+            {notYetLive ? (
+              <DashButton variant="ghost" onClick={() => setStatus("active")} disabled={pending}>
+                Launch Campaign
+              </DashButton>
+            ) : campaign.status === "paused" ? (
+              <DashButton variant="ghost" onClick={() => setStatus("active")} disabled={pending}>
+                Resume Campaign
+              </DashButton>
+            ) : campaign.status === "active" ? (
+              <DashButton variant="ghost" onClick={() => setStatus("paused")} disabled={pending}>
+                Pause Campaign
+              </DashButton>
+            ) : null}
+
+            {campaign.status === "active" || campaign.status === "paused" ? (
+              <DashButton variant="ghost" onClick={() => setStatus("completed")} disabled={pending}>
+                Mark Complete
+              </DashButton>
+            ) : null}
+
+            {campaign.status === "completed" ? (
+              <DashButton variant="ghost" onClick={() => setStatus("archived")} disabled={pending}>
+                Archive
+              </DashButton>
+            ) : null}
+
+            {isClosed ? (
+              <DashButton variant="ghost" onClick={() => setStatus("active")} disabled={pending}>
+                Reopen
+              </DashButton>
+            ) : null}
+
             <DashButton variant="gradient" onClick={() => setTab("Lead Discovery")}>
               Find Leads
             </DashButton>
