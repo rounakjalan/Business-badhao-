@@ -74,11 +74,14 @@ export function CampaignDetailTabs({
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [pending, setPending] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   const setStatus = async (status: "active" | "paused" | "completed" | "archived") => {
     setPending(true);
-    await updateCampaignStatus(campaign.id, status);
+    setStatusError(null);
+    const result = await updateCampaignStatus(campaign.id, status);
     setPending(false);
+    if (!result.ok) setStatusError(result.message);
   };
 
   // A campaign starts as "draft" (or "planning" from the older wizard).
@@ -171,6 +174,12 @@ export function CampaignDetailTabs({
             </div>
           ))}
         </div>
+
+        {statusError ? (
+          <div className="mt-3">
+            <DarkAlert variant="error">{statusError}</DarkAlert>
+          </div>
+        ) : null}
 
         {leadCount > 0 ? (
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">

@@ -153,11 +153,43 @@ export async function createCampaign(formData: FormData) {
   redirect(`/campaigns/${campaign.id}`);
 }
 
-export async function updateCampaignStatus(campaignId: string, status: TablesUpdate<"campaigns">["status"]) {
+/**
+ * Changes a campaign's status.
+ *
+ * Scoped to the caller's organization and error-checked. Row-level security
+ * already blocks a cross-organization write, so the scoping is defence in
+ * depth rather than the only guard — but without checking the result, a
+ * rejected update looked identical to a successful one and the button
+ * simply appeared to do nothing.
+ */
+export async function updateCampaignStatus(
+  campaignId: string,
+  status: TablesUpdate<"campaigns">["status"]
+): Promise<UpdateCampaignResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) {
+    return { ok: false, message: "Sign in to a workspace to change this campaign." };
+  }
+
   const supabase = await createClient();
-  await supabase.from("campaigns").update({ status }).eq("id", campaignId);
+  const { data, error } = await supabase
+    .from("campaigns")
+    .update({ status })
+    .eq("id", campaignId)
+    .eq("organization_id", currentOrg.organizationId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, message: error.message };
+  }
+  if (!data) {
+    return { ok: false, message: "Campaign not found." };
+  }
+
   revalidatePath(`/campaigns/${campaignId}`);
   revalidatePath("/campaigns");
+  return { ok: true };
 }
 
 export type UpdateCampaignResult = { ok: true } | { ok: false; message: string };
