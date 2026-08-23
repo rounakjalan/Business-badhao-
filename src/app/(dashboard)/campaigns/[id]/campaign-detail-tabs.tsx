@@ -72,6 +72,12 @@ export function CampaignDetailTabs({
   discovery: DiscoveryState;
 }) {
   const parsedIcp = icp ? IcpSchema.safeParse(icp) : null;
+
+  // criteria defaults to an empty object, and {} is truthy — so a plain
+  // Boolean(icp) offered Start Discovery on a campaign the server would
+  // then reject with no_icp. Match what startLeadDiscoveryAction actually
+  // requires: an object with something in it.
+  const hasUsableIcp = Boolean(icp && typeof icp === "object" && Object.keys(icp as object).length > 0);
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [pending, setPending] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -240,7 +246,7 @@ export function CampaignDetailTabs({
 
         {tab === "ICP" ? <IcpTab icp={parsedIcp?.success ? parsedIcp.data : null} targetAudience={campaign.target_audience} /> : null}
 
-        {tab === "Lead Discovery" ? <LeadDiscoveryTab campaignId={campaign.id} hasIcp={Boolean(icp)} discovery={discovery} /> : null}
+        {tab === "Lead Discovery" ? <LeadDiscoveryTab campaignId={campaign.id} hasIcp={hasUsableIcp} discovery={discovery} /> : null}
 
         {tab === "Conversations" ? (
           conversations.length === 0 ? (
