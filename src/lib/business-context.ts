@@ -1,4 +1,6 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import type { Database } from "@/types/database.types";
 
 // Server-side only — reads the Business Knowledge tables (business_profiles,
 // products_services, faqs, business_policies, ai_communication_rules,
@@ -215,8 +217,17 @@ export function selectIntentProductNames(context: BusinessContext): string[] {
   return context.productsServices.map((p) => p.name);
 }
 
-export async function getBusinessContext(organizationId: string): Promise<BusinessContext> {
-  const supabase = await createClient();
+/**
+ * @param client Optional client. Scheduled work has no signed-in user, so it
+ * must pass one that can read without auth.uid(); otherwise every query is
+ * denied by row-level security and the caller silently gets empty Business
+ * Knowledge, which quietly strips the AI of its grounding.
+ */
+export async function getBusinessContext(
+  organizationId: string,
+  client?: SupabaseClient<Database>
+): Promise<BusinessContext> {
+  const supabase = client ?? (await createClient());
 
   const [profile, products, faqs, policies, aiRules, media] = await Promise.all([
     supabase.from("business_profiles").select("*").eq("organization_id", organizationId).maybeSingle(),

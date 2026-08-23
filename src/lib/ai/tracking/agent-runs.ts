@@ -1,4 +1,9 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import type { Database } from "@/types/database.types";
+
+/** Scheduled work passes a client that does not depend on a signed-in user. */
+type TrackingClient = SupabaseClient<Database>;
 import type { Json } from "@/types/database.types";
 
 export type AgentRunHandle = { id: string };
@@ -12,12 +17,13 @@ export type AgentRunHandle = { id: string };
 export async function createAgentRun(
   organizationId: string | null,
   agentType: string,
-  input: Json
+  input: Json,
+  client?: TrackingClient
 ): Promise<AgentRunHandle | null> {
   if (!organizationId) return null;
 
   try {
-    const supabase = await createClient();
+    const supabase = client ?? (await createClient());
     const { data, error } = await supabase
       .from("agent_runs")
       .insert({
@@ -44,12 +50,13 @@ export async function createAgentRun(
 export async function completeAgentRun(
   run: AgentRunHandle | null,
   status: "completed" | "failed" | "partially_completed",
-  output: Json
+  output: Json,
+  client?: TrackingClient
 ): Promise<void> {
   if (!run) return;
 
   try {
-    const supabase = await createClient();
+    const supabase = client ?? (await createClient());
     const { error } = await supabase
       .from("agent_runs")
       .update({ status, output, completed_at: new Date().toISOString() })
@@ -78,9 +85,10 @@ export async function recordAgentAction(params: {
   targetEntityType?: string;
   targetEntityId?: string;
   payload?: Json;
+  client?: TrackingClient;
 }): Promise<void> {
   try {
-    const supabase = await createClient();
+    const supabase = params.client ?? (await createClient());
     const { error } = await supabase.from("agent_actions").insert({
       organization_id: params.organizationId,
       agent_run_id: params.agentRunId,
