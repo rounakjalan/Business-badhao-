@@ -35,7 +35,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   return (
     <LeadDetailTabs
       lead={lead}
-      leadName={primaryContact?.full_name ?? "Unnamed lead"}
+      leadName={primaryContact?.full_name ?? prospect.data?.company_name ?? "Unnamed lead"}
       primaryContact={primaryContact}
       contacts={contacts.data ?? []}
       companyName={prospect.data?.company_name ?? null}

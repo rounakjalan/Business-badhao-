@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { DealDetailTabs } from "@/app/(dashboard)/deals/[id]/deal-detail-tabs";
+import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -18,10 +19,10 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
 
   if (!deal) notFound();
 
-  const [contact, campaign, conversation, tasks, events, lossAnalysis] = await Promise.all([
+  const [identity, campaign, conversation, tasks, events, lossAnalysis] = await Promise.all([
     deal.lead_id
-      ? supabase.from("contacts").select("full_name").eq("lead_id", deal.lead_id).eq("is_primary", true).maybeSingle()
-      : Promise.resolve({ data: null }),
+      ? resolveLeadIdentity(supabase, deal.lead_id)
+      : Promise.resolve(null),
     deal.campaign_id ? supabase.from("campaigns").select("name").eq("id", deal.campaign_id).maybeSingle() : Promise.resolve({ data: null }),
     deal.lead_id
       ? supabase.from("conversations").select("id, channel, status").eq("lead_id", deal.lead_id).order("created_at", { ascending: false }).limit(1).maybeSingle()
@@ -34,7 +35,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
   return (
     <DealDetailTabs
       deal={deal}
-      customerName={contact.data?.full_name ?? "Unassigned"}
+      customerName={identity?.name ?? "Unassigned"}
       campaignName={campaign.data?.name ?? null}
       conversation={conversation.data}
       tasks={tasks.data ?? []}

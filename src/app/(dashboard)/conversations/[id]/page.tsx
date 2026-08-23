@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { ConversationDetailClient } from "@/app/(dashboard)/conversations/[id]/conversation-detail-client";
+import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -18,8 +19,8 @@ export default async function ConversationDetailPage({ params }: { params: Promi
 
   if (!conversation) notFound();
 
-  const [contact, lead, messages] = await Promise.all([
-    supabase.from("contacts").select("full_name, email").eq("lead_id", conversation.lead_id).eq("is_primary", true).maybeSingle(),
+  const [identity, lead, messages] = await Promise.all([
+    resolveLeadIdentity(supabase, conversation.lead_id),
     supabase.from("leads").select("current_score").eq("id", conversation.lead_id).maybeSingle(),
     supabase
       .from("messages")
@@ -31,8 +32,8 @@ export default async function ConversationDetailPage({ params }: { params: Promi
   return (
     <ConversationDetailClient
       conversation={conversation}
-      contactName={contact.data?.full_name ?? "Unnamed lead"}
-      contactEmail={contact.data?.email ?? null}
+      contactName={identity.name}
+      contactEmail={identity.email}
       leadScore={lead.data?.current_score ?? null}
       messages={messages.data ?? []}
     />

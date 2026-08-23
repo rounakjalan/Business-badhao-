@@ -1,3 +1,4 @@
+import { resolveLeadIdentities } from "@/lib/lead-names";
 import { createClient } from "@/lib/supabase/server";
 
 export type DashboardStats = {
@@ -185,20 +186,14 @@ export async function getRecentLeads(organizationId: string, limit = 4): Promise
 
   if (!leads || leads.length === 0) return [];
 
-  const { data: contacts } = await supabase
-    .from("contacts")
-    .select("lead_id, full_name")
-    .in(
-      "lead_id",
-      leads.map((l) => l.id)
-    )
-    .eq("is_primary", true);
-
-  const nameByLead = new Map((contacts ?? []).map((c) => [c.lead_id, c.full_name]));
+  const identities = await resolveLeadIdentities(
+    supabase,
+    leads.map((l) => l.id)
+  );
 
   return leads.map((l) => ({
     id: l.id,
-    name: nameByLead.get(l.id) ?? "Unnamed lead",
+    name: identities.get(l.id)?.name ?? "Unnamed lead",
     status: l.status,
     currentScore: l.current_score,
     createdAt: l.created_at,

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { detectIntent, type IntentDetectionResult } from "@/lib/ai/agents/intent";
 import { runFollowUp, type FollowUpResult } from "@/lib/ai/agents/follow-up";
 import { getBusinessContext, selectFollowUpContext, selectIntentProductNames } from "@/lib/business-context";
+import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
@@ -20,8 +21,8 @@ async function loadConversationContext(conversationId: string, organizationId: s
 
   if (!conversation) return null;
 
-  const [contact, messagesRes] = await Promise.all([
-    supabase.from("contacts").select("full_name").eq("lead_id", conversation.lead_id).eq("is_primary", true).maybeSingle(),
+  const [identity, messagesRes] = await Promise.all([
+    resolveLeadIdentity(supabase, conversation.lead_id),
     supabase
       .from("messages")
       .select("direction, sender_type, body")
@@ -31,7 +32,7 @@ async function loadConversationContext(conversationId: string, organizationId: s
 
   const messages = (messagesRes.data ?? []).map((m) => ({ direction: m.direction, senderType: m.sender_type, body: m.body ?? "" }));
 
-  return { conversation, leadName: contact.data?.full_name ?? "the lead", messages };
+  return { conversation, leadName: identity.name, messages };
 }
 
 export async function detectIntentAction(conversationId: string): Promise<IntentDetectionResult> {

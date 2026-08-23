@@ -1,4 +1,5 @@
 import { LeadsListClient } from "@/app/(dashboard)/leads/leads-list-client";
+import { resolveLeadIdentities } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -18,20 +19,17 @@ export default async function LeadsPage() {
   const leadIds = (leads ?? []).map((l) => l.id);
   const campaignIds = [...new Set((leads ?? []).map((l) => l.campaign_id).filter((id): id is string => Boolean(id)))];
 
-  const [contacts, campaigns] = await Promise.all([
-    leadIds.length
-      ? supabase.from("contacts").select("lead_id, full_name, email").in("lead_id", leadIds).eq("is_primary", true)
-      : Promise.resolve({ data: [] }),
+  const [identities, campaigns] = await Promise.all([
+    resolveLeadIdentities(supabase, leadIds),
     campaignIds.length ? supabase.from("campaigns").select("id, name").in("id", campaignIds) : Promise.resolve({ data: [] }),
   ]);
 
-  const contactByLead = new Map((contacts.data ?? []).map((c) => [c.lead_id, c]));
   const campaignNameById = new Map((campaigns.data ?? []).map((c) => [c.id, c.name]));
 
   const rows = (leads ?? []).map((l) => ({
     id: l.id,
-    name: contactByLead.get(l.id)?.full_name ?? "Unnamed lead",
-    email: contactByLead.get(l.id)?.email ?? null,
+    name: identities.get(l.id)?.name ?? "Unnamed lead",
+    email: identities.get(l.id)?.email ?? null,
     status: l.status,
     qualificationStatus: l.qualification_status,
     score: l.current_score,

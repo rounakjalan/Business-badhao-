@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { runDealAgent, type DealAgentResult } from "@/lib/ai/agents/deal-agent";
 import { runLossAnalysis, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
 import { getBusinessContext, selectDealContext, selectLossAnalysisContext } from "@/lib/business-context";
+import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
@@ -20,10 +21,8 @@ async function loadDealContext(dealId: string, organizationId: string) {
 
   if (!deal) return null;
 
-  const [contact, campaign, conversation] = await Promise.all([
-    deal.lead_id
-      ? supabase.from("contacts").select("full_name").eq("lead_id", deal.lead_id).eq("is_primary", true).maybeSingle()
-      : Promise.resolve({ data: null }),
+  const [identity, campaign, conversation] = await Promise.all([
+    deal.lead_id ? resolveLeadIdentity(supabase, deal.lead_id) : Promise.resolve(null),
     deal.campaign_id ? supabase.from("campaigns").select("objective").eq("id", deal.campaign_id).maybeSingle() : Promise.resolve({ data: null }),
     deal.lead_id
       ? supabase
@@ -48,7 +47,7 @@ async function loadDealContext(dealId: string, organizationId: string) {
 
   return {
     deal,
-    leadName: contact.data?.full_name ?? "the lead",
+    leadName: identity?.name ?? "the lead",
     campaignObjective: campaign.data?.objective ?? null,
     channel: conversation.data?.channel ?? null,
     messages,

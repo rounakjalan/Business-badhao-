@@ -63,7 +63,7 @@ export async function loadLeadContext(supabase: Client, leadId: string, organiza
 
   return {
     lead,
-    leadName: primaryContact?.full_name ?? "Unnamed lead",
+    leadName: primaryContact?.full_name ?? prospect.data?.company_name ?? "Unnamed lead",
     companyName: prospect.data?.company_name ?? null,
     website: prospect.data?.website ?? null,
     title: prospect.data?.title ?? null,

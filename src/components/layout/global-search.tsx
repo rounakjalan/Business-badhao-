@@ -42,13 +42,31 @@ function GlobalSearchModal({ onClose }: { onClose: () => void }) {
       const supabase = createClient();
       const term = `%${trimmed}%`;
 
-      const [campaigns, deals, contacts] = await Promise.all([
+      const [campaigns, deals, contacts, prospects] = await Promise.all([
         supabase.from("campaigns").select("id, name, status").ilike("name", term).limit(5),
         supabase.from("deals").select("id, title, value, currency").ilike("title", term).limit(5),
         supabase.from("contacts").select("lead_id, full_name, email").ilike("full_name", term).limit(5),
+        // Discovered leads have a company but no contact, so searching
+        // contacts alone can never find them.
+        supabase.from("prospects").select("id, company_name").ilike("company_name", term).limit(5),
       ]);
 
       if (cancelled) return;
+
+      const prospectIds = (prospects.data ?? []).map((p) => p.id);
+      const { data: leadsForProspects } = prospectIds.length
+        ? await supabase.from("leads").select("id, prospect_id").in("prospect_id", prospectIds)
+        : { data: [] };
+
+      if (cancelled) return;
+
+      const companyByProspect = new Map((prospects.data ?? []).map((p) => [p.id, p.company_name]));
+      const leadIdsFromContacts = new Set((contacts.data ?? []).map((c) => c.lead_id));
+      const companyResults = (leadsForProspects ?? []).flatMap((l) => {
+        const companyName = l.prospect_id ? companyByProspect.get(l.prospect_id) : null;
+        if (!companyName || leadIdsFromContacts.has(l.id)) return [];
+        return [{ leadId: l.id, companyName }];
+      });
 
       const next: SearchResult[] = [
         ...(campaigns.data ?? []).map((c) => ({
@@ -71,6 +89,13 @@ function GlobalSearchModal({ onClose }: { onClose: () => void }) {
           icon: LeadsIcon,
           label: c.full_name ?? "Unnamed contact",
           sub: `Lead · ${c.email ?? "No email"}`,
+        })),
+        ...companyResults.map((r) => ({
+          key: `company-${r.leadId}`,
+          href: `/leads/${r.leadId}`,
+          icon: LeadsIcon,
+          label: r.companyName,
+          sub: "Lead · Company",
         })),
       ];
 

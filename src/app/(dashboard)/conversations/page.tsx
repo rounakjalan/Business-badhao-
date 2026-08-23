@@ -5,6 +5,7 @@ import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
 import { ChannelBadge, ConversationStatusBadge } from "@/components/dashboard-ui/badge";
 import { ConversationsIcon } from "@/components/ui/icons";
 import { formatRelativeTime } from "@/lib/format";
+import { resolveLeadIdentities } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -22,12 +23,9 @@ export default async function ConversationsPage() {
   if (error) throw new Error(error.message);
 
   const leadIds = [...new Set((conversations ?? []).map((c) => c.lead_id))];
-  const { data: contacts } = leadIds.length
-    ? await supabase.from("contacts").select("lead_id, full_name").in("lead_id", leadIds).eq("is_primary", true)
-    : { data: [] };
-  const nameByLead = new Map((contacts ?? []).map((c) => [c.lead_id, c.full_name]));
+  const identities = await resolveLeadIdentities(supabase, leadIds);
 
-  const rows = (conversations ?? []).map((c) => ({ ...c, contactName: nameByLead.get(c.lead_id) ?? "Unnamed lead" }));
+  const rows = (conversations ?? []).map((c) => ({ ...c, contactName: identities.get(c.lead_id)?.name ?? "Unnamed lead" }));
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col gap-5 p-4 sm:p-6">
