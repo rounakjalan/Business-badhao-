@@ -388,6 +388,16 @@ const DISCOVERY_ERROR_TITLES: Record<string, string> = {
   provider_error: "Discovery run failed",
 };
 
+type FollowUpSummary = {
+  researchAttempted?: number;
+  researchSucceeded?: number;
+  researchFailed?: number;
+  qualified?: number;
+  disqualified?: number;
+  qualifying?: number;
+  deferred?: number;
+};
+
 type LastRunOutput = {
   message?: string;
   prospectsFound?: number;
@@ -395,7 +405,55 @@ type LastRunOutput = {
   duplicatesSkipped?: number;
   queriesRun?: string[];
   queriesFailed?: string[];
+  followUp?: FollowUpSummary;
 };
+
+/**
+ * What happened to the leads a run created, after they were saved. Without
+ * this the run reports only how many leads it found, so leads left
+ * unresearched because the run ran out of time budget are invisible — they
+ * just sit at "pending" with nothing explaining why.
+ */
+function FollowUpSummaryView({ followUp }: { followUp: FollowUpSummary }) {
+  const researched = followUp.researchSucceeded ?? 0;
+  const researchFailed = followUp.researchFailed ?? 0;
+  const deferred = followUp.deferred ?? 0;
+
+  return (
+    <div className="mt-4 border-t border-bb-border pt-3">
+      <div className="mb-2 text-xs font-medium text-bb-text-3">AFTER DISCOVERY</div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
+        <span className="flex items-center gap-1.5">
+          <span className="font-jetbrains font-semibold text-bb-text-2">{researched}</span> researched
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="font-jetbrains font-semibold text-bb-text-2">{followUp.qualified ?? 0}</span> qualified
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="font-jetbrains font-semibold text-bb-text-2">{followUp.qualifying ?? 0}</span> qualifying
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="font-jetbrains font-semibold text-bb-text-2">{followUp.disqualified ?? 0}</span> disqualified
+        </span>
+      </div>
+
+      {deferred > 0 ? (
+        <p className="mt-2 text-xs text-bb-amber">
+          {deferred} {deferred === 1 ? "lead was" : "leads were"} saved but not researched — this run reached its time
+          limit. {deferred === 1 ? "It is" : "They are"} waiting under Discovered Leads below; open{" "}
+          {deferred === 1 ? "it" : "any of them"} and use Run Research, then Run Qualification.
+        </p>
+      ) : null}
+
+      {researchFailed > 0 ? (
+        <p className="mt-2 text-xs text-bb-amber">
+          Research failed for {researchFailed} {researchFailed === 1 ? "lead" : "leads"}, so {researchFailed === 1 ? "it was" : "they were"}{" "}
+          left unscored rather than judged on search results alone. You can retry from the lead&apos;s page.
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 function LeadDiscoveryTab({
   campaignId,
@@ -477,6 +535,7 @@ function LeadDiscoveryTab({
               results below are from the queries that succeeded.
             </p>
           ) : null}
+          {result.followUp ? <FollowUpSummaryView followUp={result.followUp} /> : null}
           {result.prospects.length > 0 ? (
             <div className="mt-4 space-y-3">
               {result.prospects.map((p, i) => (
@@ -504,6 +563,7 @@ function LeadDiscoveryTab({
               <DiscoveryStat label="Duplicates skipped" value={lastRunOutput.duplicatesSkipped ?? 0} />
             </div>
           ) : null}
+          {lastRunOutput?.followUp ? <FollowUpSummaryView followUp={lastRunOutput.followUp} /> : null}
         </DarkCard>
       ) : null}
 
