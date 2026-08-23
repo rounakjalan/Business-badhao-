@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { runDiscoveryForCampaign, finishPendingLeads, type PipelineRunSummary } from "@/lib/pipeline/scheduled-pipeline";
+import { findEligibleCampaigns, runDiscoveryForCampaign, finishPendingLeads, type PipelineRunSummary } from "@/lib/pipeline/scheduled-pipeline";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
- * The scheduled half of the lead pipeline.
+ * The scheduled half of the lead pipeline — the part that connects the
+ * campaign space to the lead space with nobody clicking anything.
  *
  * Lead discovery finds only a handful of businesses per run — the extraction
  * step has to fit inside the AI provider's per-minute token allowance, so a
@@ -12,12 +13,21 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * continuously: each day adds a fresh batch, deduplicated against everything
  * already found.
  *
- * It also removes the clicking. Leads left unresearched because a run hit its
- * time budget, or whose research failed, are picked up here instead of
- * waiting for someone to open each one and press two buttons.
+ * It also removes the clicking, in both directions:
+ * - On the campaign side: a campaign only needs a saved ICP to be reachable.
+ *   findEligibleCampaigns auto-launches a draft or planning campaign that
+ *   already has one, since the ICP — not the status — is what actually
+ *   determines whether there is anything to go find.
+ * - On the lead side: leads left unresearched because a run hit its time
+ *   budget, or whose research failed, are picked up automatically instead of
+ *   waiting for someone to open each one and press two buttons.
  *
- * Order matters: unfinished leads are completed before any new ones are
- * discovered, so the backlog cannot grow faster than it is worked off.
+ * Order: finish the existing backlog before discovering anything new, so a
+ * campaign with a long backlog can't have that work crowded out by fresh
+ * discovery — then, budget permitting, finish again. Without that second
+ * pass, every lead a campaign's own discovery step just created would sit
+ * untouched until tomorrow's run, adding a full day of pure dead time
+ * between "found" and "qualified" by construction, every single day.
  */
 
 // This does real AI work per lead, so it needs the long end of the platform's
@@ -60,6 +70,7 @@ export async function GET(request: Request) {
   const summary: PipelineRunSummary = {
     startedAt: new Date().toISOString(),
     campaignsConsidered: 0,
+    autoLaunched: [],
     leadsFinished: 0,
     leadsFailed: 0,
     discoveryRuns: 0,
@@ -67,43 +78,48 @@ export async function GET(request: Request) {
     skipped: [],
   };
 
-  // Only active campaigns. Pausing a campaign is what stops its automation,
-  // which is what pausing already means everywhere else in the app.
-  const { data: campaigns, error } = await supabase
-    .from("campaigns")
-    .select("id, organization_id, ideal_customer_profile_id")
-    .eq("status", "active")
-    .not("ideal_customer_profile_id", "is", null);
+  const campaigns = await findEligibleCampaigns(supabase);
+  summary.campaignsConsidered = campaigns.length;
+  summary.autoLaunched = campaigns.filter((c) => c.wasAutoLaunched).map((c) => c.id);
 
-  if (error) {
-    return NextResponse.json({ ok: false, error: "query_failed", detail: error.message }, { status: 500 });
-  }
+  const outOfTime = () => Date.now() - startedAtMs > TOTAL_BUDGET_MS;
 
-  summary.campaignsConsidered = campaigns?.length ?? 0;
-
-  // Finish what is already on the books before looking for more.
-  for (const campaign of campaigns ?? []) {
-    if (Date.now() - startedAtMs > TOTAL_BUDGET_MS) {
+  // Pass 1: finish whatever backlog already existed before this run, so a
+  // campaign with a lot of it can't have that work crowded out by fresh
+  // discovery on other campaigns.
+  for (const campaign of campaigns) {
+    if (outOfTime()) {
       summary.skipped.push({ campaignId: campaign.id, reason: "out_of_time" });
       continue;
     }
-    const finished = await finishPendingLeads(supabase, campaign.organization_id, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
+    const finished = await finishPendingLeads(supabase, campaign.organizationId, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
     summary.leadsFinished += finished.finished;
     summary.leadsFailed += finished.failed;
   }
 
-  for (const campaign of campaigns ?? []) {
-    if (Date.now() - startedAtMs > TOTAL_BUDGET_MS) {
+  // Pass 2: discovery.
+  for (const campaign of campaigns) {
+    if (outOfTime()) {
       summary.skipped.push({ campaignId: campaign.id, reason: "out_of_time" });
       continue;
     }
-    const discovered = await runDiscoveryForCampaign(supabase, campaign.organization_id, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
+    const discovered = await runDiscoveryForCampaign(supabase, campaign.organizationId, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
     if (discovered.ran) {
       summary.discoveryRuns += 1;
       summary.newLeads += discovered.newLeads;
     } else if (discovered.reason) {
       summary.skipped.push({ campaignId: campaign.id, reason: discovered.reason });
     }
+  }
+
+  // Pass 3: finish again, budget permitting. Whatever pass 2 just
+  // discovered is still sitting "pending" — without this, it would wait
+  // until tomorrow's run no matter how much time is left today.
+  for (const campaign of campaigns) {
+    if (outOfTime()) continue;
+    const finished = await finishPendingLeads(supabase, campaign.organizationId, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
+    summary.leadsFinished += finished.finished;
+    summary.leadsFailed += finished.failed;
   }
 
   return NextResponse.json({

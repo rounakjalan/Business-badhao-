@@ -11,6 +11,8 @@ type Client = SupabaseClient<Database>;
 export type PipelineRunSummary = {
   startedAt: string;
   campaignsConsidered: number;
+  /** Draft/planning campaigns that already had a real ICP, flipped to active so the pipeline could reach them without a manual Launch click. */
+  autoLaunched: string[];
   leadsFinished: number;
   leadsFailed: number;
   discoveryRuns: number;
@@ -28,6 +30,56 @@ const DISCOVERY_COOLDOWN_MS = 20 * 60 * 60 * 1000;
 
 /** Ceiling on how many stale leads one scheduled run will finish per campaign. */
 const MAX_LEADS_FINISHED_PER_CAMPAIGN = 12;
+
+export type EligibleCampaign = { id: string; organizationId: string; wasAutoLaunched: boolean };
+
+/**
+ * Finds every campaign the scheduled pipeline should touch this run, and
+ * launches the ones that are only sitting in "draft"/"planning" because
+ * nobody has clicked Launch yet.
+ *
+ * createCampaign saves the ICP the moment it is generated, regardless of
+ * whether the user chose "Save draft" or "Launch" — so a draft can already
+ * hold a complete, human-reviewed ICP with nothing left to decide. Leaving
+ * it there meant the pipeline could never reach it without a manual click,
+ * which is exactly the gap between the campaign and lead spaces this closes.
+ * A campaign is never auto-launched without a usable ICP: that would just
+ * flip its status and immediately do nothing, since ICP-less campaigns are
+ * still correctly skipped downstream.
+ *
+ * "active" campaigns are included unchanged — auto-launch only ever moves a
+ * campaign toward active, never away from it, so pausing one still switches
+ * its automation off exactly as it does everywhere else in the app.
+ */
+export async function findEligibleCampaigns(supabase: Client): Promise<EligibleCampaign[]> {
+  const { data: campaigns } = await supabase
+    .from("campaigns")
+    .select("id, organization_id, status, ideal_customer_profile_id")
+    .in("status", ["active", "draft", "planning"])
+    .not("ideal_customer_profile_id", "is", null);
+
+  if (!campaigns || campaigns.length === 0) return [];
+
+  const icpIds = [...new Set(campaigns.map((c) => c.ideal_customer_profile_id).filter((id): id is string => Boolean(id)))];
+  const { data: icps } = await supabase.from("ideal_customer_profiles").select("id, criteria").in("id", icpIds);
+  const criteriaById = new Map((icps ?? []).map((i) => [i.id, i.criteria as Record<string, unknown> | null]));
+
+  const eligible: EligibleCampaign[] = [];
+  for (const campaign of campaigns) {
+    const criteria = campaign.ideal_customer_profile_id ? criteriaById.get(campaign.ideal_customer_profile_id) : null;
+    if (!criteria || Object.keys(criteria).length === 0) continue;
+
+    if (campaign.status !== "active") {
+      const { error } = await supabase.from("campaigns").update({ status: "active" }).eq("id", campaign.id);
+      if (error) continue; // Leave it for next run rather than processing a campaign still shown as draft.
+      eligible.push({ id: campaign.id, organizationId: campaign.organization_id, wasAutoLaunched: true });
+    } else {
+      eligible.push({ id: campaign.id, organizationId: campaign.organization_id, wasAutoLaunched: false });
+    }
+  }
+
+  return eligible;
+}
 
 function outOfTime(startedAtMs: number, budgetMs: number, reserveMs = 55_000) {
   return Date.now() - startedAtMs > budgetMs - reserveMs;
