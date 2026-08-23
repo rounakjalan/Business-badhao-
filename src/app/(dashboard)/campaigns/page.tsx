@@ -45,13 +45,16 @@ export default async function CampaignsPage({
       ])
     : [{ data: [] }, { data: [] }, { data: [] }];
 
-  const statsByCampaign = new Map<string, { leads: number; qualified: number; conversations: number; deals: number; revenue: number }>();
-  for (const id of campaignIds) statsByCampaign.set(id, { leads: 0, qualified: 0, conversations: 0, deals: 0, revenue: 0 });
+  // "scored" rather than "qualified": leads legitimately rest at
+  // "qualifying" when the evidence is thin, so counting only final
+  // qualifieds shows 0 on a campaign whose pipeline ran perfectly.
+  const statsByCampaign = new Map<string, { leads: number; scored: number; conversations: number; deals: number; revenue: number }>();
+  for (const id of campaignIds) statsByCampaign.set(id, { leads: 0, scored: 0, conversations: 0, deals: 0, revenue: 0 });
   for (const l of leadRows.data ?? []) {
     const s = statsByCampaign.get(l.campaign_id!);
     if (!s) continue;
     s.leads += 1;
-    if (l.qualification_status === "qualified") s.qualified += 1;
+    if (l.qualification_status !== "pending") s.scored += 1;
   }
   for (const c of conversationRows.data ?? []) {
     const s = statsByCampaign.get(c.campaign_id!);
@@ -108,7 +111,7 @@ export default async function CampaignsPage({
       ) : (
         <div className="bb-stagger space-y-4">
           {campaigns.map((c) => {
-            const stats = statsByCampaign.get(c.id) ?? { leads: 0, qualified: 0, conversations: 0, deals: 0, revenue: 0 };
+            const stats = statsByCampaign.get(c.id) ?? { leads: 0, scored: 0, conversations: 0, deals: 0, revenue: 0 };
             return (
               <Link key={c.id} href={`/campaigns/${c.id}`} className="bb-stagger-item block">
                 <DarkCard className="bb-lift p-5">
@@ -127,7 +130,7 @@ export default async function CampaignsPage({
                   <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
                     {[
                       { label: "Leads", val: stats.leads },
-                      { label: "Qualified", val: stats.qualified },
+                      { label: "Scored", val: stats.scored },
                       { label: "Conversations", val: stats.conversations },
                       { label: "Deals", val: stats.deals },
                       { label: "Revenue", val: stats.revenue > 0 ? formatCurrency(stats.revenue, "INR") : "—" },

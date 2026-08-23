@@ -35,8 +35,20 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
     getLeadDiscoveryStateAction(id),
   ]);
 
-  const leadCount = leads.data?.length ?? 0;
-  const qualifiedCount = leads.data?.filter((l) => l.qualification_status === "qualified").length ?? 0;
+  const leadRows = leads.data ?? [];
+  const leadCount = leadRows.length;
+
+  // Counted per status rather than as a single "qualified" number. Leads
+  // legitimately rest at "qualifying" — the pipeline withholds a final
+  // verdict without strong evidence — so a lone qualified count reads 0 on
+  // a run where research and scoring both worked, which looks like failure.
+  const leadStatusCounts = {
+    pending: leadRows.filter((l) => l.qualification_status === "pending").length,
+    qualifying: leadRows.filter((l) => l.qualification_status === "qualifying").length,
+    qualified: leadRows.filter((l) => l.qualification_status === "qualified").length,
+    disqualified: leadRows.filter((l) => l.qualification_status === "disqualified").length,
+  };
+  const scoredCount = leadCount - leadStatusCounts.pending;
   const revenue = (deals.data ?? []).filter((d) => d.status === "won").reduce((sum, d) => sum + Number(d.value), 0);
 
   return (
@@ -44,7 +56,8 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
       campaign={campaign}
       icp={icp}
       leadCount={leadCount}
-      qualifiedCount={qualifiedCount}
+      scoredCount={scoredCount}
+      leadStatusCounts={leadStatusCounts}
       conversations={conversations.data ?? []}
       deals={deals.data ?? []}
       revenue={revenue}

@@ -40,11 +40,19 @@ type DiscoveryState = {
   discoveredLeads: DiscoveredLeadRow[];
 };
 
+export type LeadStatusCounts = {
+  pending: number;
+  qualifying: number;
+  qualified: number;
+  disqualified: number;
+};
+
 export function CampaignDetailTabs({
   campaign,
   icp,
   leadCount,
-  qualifiedCount,
+  scoredCount,
+  leadStatusCounts,
   conversations,
   deals,
   revenue,
@@ -54,7 +62,9 @@ export function CampaignDetailTabs({
   /** Raw jsonb from ideal_customer_profiles.criteria — validated below, since campaigns created before the ICP step shipped store the old plan-derived shape. */
   icp: unknown;
   leadCount: number;
-  qualifiedCount: number;
+  /** Leads that have been through qualification — anything not still "pending". */
+  scoredCount: number;
+  leadStatusCounts: LeadStatusCounts;
   conversations: ConversationRow[];
   deals: DealRow[];
   revenue: number;
@@ -113,7 +123,7 @@ export function CampaignDetailTabs({
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
             { label: "Leads", val: leadCount },
-            { label: "Qualified", val: qualifiedCount },
+            { label: "Scored", val: scoredCount },
             { label: "Conversations", val: conversations.length },
             { label: "Revenue", val: revenue > 0 ? formatCurrency(revenue, "INR") : "—" },
           ].map((m) => (
@@ -123,6 +133,24 @@ export function CampaignDetailTabs({
             </div>
           ))}
         </div>
+
+        {leadCount > 0 ? (
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
+            {(
+              [
+                { key: "qualified", label: "Qualified" },
+                { key: "qualifying", label: "Qualifying" },
+                { key: "disqualified", label: "Disqualified" },
+                { key: "pending", label: "Not yet scored" },
+              ] as const
+            ).map((s) => (
+              <span key={s.key} className="flex items-center gap-1.5">
+                <span className="font-jetbrains font-semibold text-bb-text-2">{leadStatusCounts[s.key]}</span>
+                {s.label}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div className="flex gap-1 overflow-x-auto border-b border-bb-border px-4 py-3 sm:px-6">
