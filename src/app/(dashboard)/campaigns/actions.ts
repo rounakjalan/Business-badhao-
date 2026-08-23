@@ -585,14 +585,21 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
 
   const supabase = await createClient();
 
-  const [runs, discoverySource] = await Promise.all([
+  const [lastRun, discoverySource] = await Promise.all([
+    // Matched on campaignId in the query rather than by fetching a page of
+    // the organization's runs and filtering here. The old version took the
+    // 20 most recent runs across every campaign and then looked for this
+    // one, so once other campaigns had pushed 20 runs in front of it, this
+    // campaign's last run silently disappeared from the page.
     supabase
       .from("agent_runs")
-      .select("status, started_at, completed_at, output, input")
+      .select("status, started_at, completed_at, output")
       .eq("organization_id", currentOrg.organizationId)
       .eq("agent_type", "lead_discovery")
+      .contains("input", { campaignId })
       .order("started_at", { ascending: false })
-      .limit(20),
+      .limit(1)
+      .maybeSingle(),
     supabase
       .from("lead_sources")
       .select("id")
@@ -601,7 +608,7 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
       .maybeSingle(),
   ]);
 
-  const lastRunForCampaign = (runs.data ?? []).find((r) => (r.input as { campaignId?: string } | null)?.campaignId === campaignId);
+  const lastRunForCampaign = lastRun.data;
 
   let discoveredLeads: DiscoveredLeadRow[] = [];
   if (discoverySource.data) {
