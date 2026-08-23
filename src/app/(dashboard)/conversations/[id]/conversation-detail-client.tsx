@@ -11,7 +11,15 @@ import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
 
 type Conversation = { id: string; lead_id: string; channel: string; status: string; intent: string | null; created_at: string };
-type Message = { id: string; direction: string; sender_type: string; body: string | null; created_at: string };
+type Message = {
+  id: string;
+  direction: string;
+  sender_type: string;
+  body: string | null;
+  subject?: string | null;
+  status?: string | null;
+  created_at: string;
+};
 
 export function ConversationDetailClient({
   conversation,
@@ -108,14 +116,18 @@ export function ConversationDetailClient({
                     <div className={`mb-1 flex items-center gap-2 text-xs text-bb-text-3 ${msg.direction === "outbound" ? "justify-end" : ""}`}>
                       <span className="capitalize">{msg.sender_type}</span>
                       <span>{formatDate(msg.created_at)}</span>
+                      {msg.status === "failed" ? <span className="font-medium text-bb-rose">Failed to send</span> : null}
                     </div>
                     <div
                       className={`rounded-2xl px-4 py-3 text-sm leading-relaxed text-bb-text ${
-                        msg.direction === "outbound"
-                          ? "rounded-br-sm border border-bb-indigo/30 bg-bb-indigo/15"
-                          : "rounded-bl-sm border border-bb-border bg-bb-navy-3"
+                        msg.status === "failed"
+                          ? "rounded-br-sm border border-bb-rose/40 bg-bb-rose/10"
+                          : msg.direction === "outbound"
+                            ? "rounded-br-sm border border-bb-indigo/30 bg-bb-indigo/15"
+                            : "rounded-bl-sm border border-bb-border bg-bb-navy-3"
                       }`}
                     >
+                      {msg.subject ? <div className="mb-1 font-medium text-bb-text-2">{msg.subject}</div> : null}
                       {msg.body}
                     </div>
                   </div>

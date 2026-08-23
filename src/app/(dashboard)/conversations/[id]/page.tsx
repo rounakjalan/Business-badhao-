@@ -24,7 +24,7 @@ export default async function ConversationDetailPage({ params }: { params: Promi
     supabase.from("leads").select("current_score").eq("id", conversation.lead_id).maybeSingle(),
     supabase
       .from("messages")
-      .select("id, direction, sender_type, body, created_at")
+      .select("id, direction, sender_type, body, subject, status, created_at")
       .eq("conversation_id", id)
       .order("created_at", { ascending: true }),
   ]);
