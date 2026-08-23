@@ -86,6 +86,68 @@ export function CampaignDetailTabs({
   const [statusError, setStatusError] = useState<string | null>(null);
   const router = useRouter();
 
+  // Discovery tracking lives here rather than in the Lead Discovery tab,
+  // because a run outlives the tab that started it and the user may well be
+  // looking at Overview when it finishes. Kept at page level, the tab strip
+  // can flag a run in flight from any tab, and polling is not torn down
+  // just because the user clicked away.
+  const [discoveryResult, setDiscoveryResult] = useState<LeadDiscoveryActionResult | null>(null);
+  const [progress, setProgress] = useState<DiscoveryProgress | null>(null);
+  const [justFinished, setJustFinished] = useState(false);
+
+  // Whether a run is in flight is a fact about the server, not this
+  // component — so it is read from the last run's status and refreshed by
+  // polling. Correct after a reload, in a second tab, or on another device.
+  const liveStatus = progress?.status ?? discovery.lastRun?.status ?? null;
+  const isDiscoveryRunning = liveStatus === "running";
+
+  const startDiscovery = () => {
+    if (isDiscoveryRunning) return;
+    setDiscoveryResult(null);
+    setJustFinished(false);
+    requestNotificationPermission();
+    // Deliberately not awaited: the run continues server-side regardless of
+    // this tab, so blocking the UI on it would make a closed tab look like
+    // a cancelled run. Only an immediate refusal is surfaced from here; the
+    // outcome comes from polling.
+    void startLeadDiscoveryAction(campaign.id).then((r) => {
+      if (!r.ok) setDiscoveryResult(r);
+    });
+    setProgress((p) => ({
+      status: "running",
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      leadsCreated: p?.leadsCreated ?? 0,
+      researched: p?.researched ?? 0,
+      scored: p?.scored ?? 0,
+      followUp: null,
+      message: null,
+    }));
+  };
+
+  useEffect(() => {
+    if (!isDiscoveryRunning) return;
+
+    let cancelled = false;
+    const tick = async () => {
+      const next = await getLeadDiscoveryProgressAction(campaign.id);
+      if (cancelled) return;
+      setProgress(next);
+      if (next.status && next.status !== "running") {
+        setJustFinished(true);
+        notifyDiscoveryFinished(next);
+        router.refresh();
+      }
+    };
+
+    void tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isDiscoveryRunning, campaign.id, router]);
+
   const setStatus = async (status: "active" | "paused" | "completed" | "archived") => {
     setPending(true);
     setStatusError(null);
@@ -220,6 +282,9 @@ export function CampaignDetailTabs({
             }`}
           >
             {t}
+            {t === "Lead Discovery" && isDiscoveryRunning ? (
+              <span className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-bb-indigo align-middle" />
+            ) : null}
           </button>
         ))}
       </div>
@@ -248,7 +313,17 @@ export function CampaignDetailTabs({
 
         {tab === "ICP" ? <IcpTab icp={parsedIcp?.success ? parsedIcp.data : null} targetAudience={campaign.target_audience} /> : null}
 
-        {tab === "Lead Discovery" ? <LeadDiscoveryTab campaignId={campaign.id} hasIcp={hasUsableIcp} discovery={discovery} /> : null}
+        {tab === "Lead Discovery" ? (
+          <LeadDiscoveryTab
+            hasIcp={hasUsableIcp}
+            discovery={discovery}
+            isRunning={isDiscoveryRunning}
+            progress={progress}
+            justFinished={justFinished}
+            result={discoveryResult}
+            onStart={startDiscovery}
+          />
+        ) : null}
 
         {tab === "Conversations" ? (
           conversations.length === 0 ? (
@@ -555,80 +630,23 @@ function FollowUpSummaryView({ followUp }: { followUp: FollowUpSummary }) {
 }
 
 function LeadDiscoveryTab({
-  campaignId,
   hasIcp,
   discovery,
+  isRunning,
+  progress,
+  justFinished,
+  result,
+  onStart,
 }: {
-  campaignId: string;
   hasIcp: boolean;
   discovery: DiscoveryState;
+  isRunning: boolean;
+  progress: DiscoveryProgress | null;
+  justFinished: boolean;
+  result: LeadDiscoveryActionResult | null;
+  onStart: () => void;
 }) {
-  const [result, setResult] = useState<LeadDiscoveryActionResult | null>(null);
-  const [progress, setProgress] = useState<DiscoveryProgress | null>(null);
-  const [justFinished, setJustFinished] = useState(false);
-  const router = useRouter();
 
-  // A run takes minutes and keeps going on the server whether or not this
-  // tab is open — closing the browser does not stop it. So "is a run in
-  // flight" is a fact about the server, not about this component: it comes
-  // from the last run's status, refreshed by polling, and survives a reload
-  // or a completely different device.
-  const liveStatus = progress?.status ?? discovery.lastRun?.status ?? null;
-  const isRunning = liveStatus === "running";
-
-  const start = () => {
-    if (isRunning) return;
-    setResult(null);
-    setJustFinished(false);
-    requestNotificationPermission();
-    // Deliberately not awaited. The run continues server-side regardless of
-    // this tab, so blocking the UI on it for several minutes would only
-    // make a closed tab look like a cancelled run. We flip straight into
-    // tracking mode and let polling report what happens.
-    void startLeadDiscoveryAction(campaignId).then((r) => {
-      // Only surface an immediate refusal (no ICP, already running). A
-      // completed run is reported by the poller, which works even if this
-      // promise never resolves here because the tab was closed.
-      if (!r.ok) setResult(r);
-    });
-    setProgress((p) => ({
-      status: "running",
-      startedAt: new Date().toISOString(),
-      completedAt: null,
-      leadsCreated: p?.leadsCreated ?? 0,
-      researched: p?.researched ?? 0,
-      scored: p?.scored ?? 0,
-      followUp: null,
-      message: null,
-    }));
-  };
-
-  // Poll only while something is actually running, and stop as soon as it
-  // is not — no timers left behind on a finished campaign.
-  useEffect(() => {
-    if (!isRunning) return;
-
-    let cancelled = false;
-    const tick = async () => {
-      const next = await getLeadDiscoveryProgressAction(campaignId);
-      if (cancelled) return;
-      setProgress(next);
-      if (next.status && next.status !== "running") {
-        setJustFinished(true);
-        notifyDiscoveryFinished(next);
-        // The run wrote new leads and statuses; pull the server components
-        // on this page back in sync with them.
-        router.refresh();
-      }
-    };
-
-    void tick();
-    const id = setInterval(tick, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [isRunning, campaignId, router]);
 
   if (!hasIcp) {
     return (
@@ -653,7 +671,7 @@ function LeadDiscoveryTab({
               here is invented.
             </p>
           </div>
-          <DashButton variant="gradient" onClick={start} disabled={isRunning}>
+          <DashButton variant="gradient" onClick={onStart} disabled={isRunning}>
             <SparklesIcon className="h-3.5 w-3.5" />
             {isRunning ? "Discovery running..." : "Start Discovery"}
           </DashButton>
