@@ -15,14 +15,16 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
   const [creating, setCreating] = useState(false);
   const [, startTransition] = useTransition();
 
-  const todo = tasks.filter((t) => t.status !== "completed");
-  const done = tasks.filter((t) => t.status === "completed");
+  // A cancelled or failed task is finished with, not outstanding work — it
+  // belongs out of the to-do list and out of the open count.
+  const todo = tasks.filter((t) => t.status === "pending" || t.status === "in_progress");
+  const done = tasks.filter((t) => t.status !== "pending" && t.status !== "in_progress");
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col gap-5 p-4 sm:p-6">
       <PageHeader
         title="Tasks"
-        description={`${todo.length} open · ${done.length} completed`}
+        description={`${todo.length} open · ${done.length} closed`}
         action={
           <DashButton variant="gradient" onClick={() => setCreating((v) => !v)}>
             + Create Task
@@ -86,15 +88,19 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
 
           {done.length > 0 ? (
             <>
-              <div className="pt-2 text-xs font-medium text-bb-text-3">COMPLETED</div>
+              <div className="pt-2 text-xs font-medium text-bb-text-3">CLOSED</div>
               {done.map((task) => (
                 <div
                   key={task.id}
                   className="bb-animate-fade-in flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4 opacity-50"
                 >
-                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 border-bb-emerald bg-bb-emerald">
-                    <CheckIcon className="h-3 w-3 text-white" />
-                  </div>
+                  {task.status === "completed" ? (
+                    <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 border-bb-emerald bg-bb-emerald">
+                      <CheckIcon className="h-3 w-3 text-white" />
+                    </div>
+                  ) : (
+                    <div className="h-5 w-5 shrink-0 rounded-full border-2 border-bb-border" title={task.status} />
+                  )}
                   <div className="min-w-0 flex-1 truncate text-sm text-bb-text-3 line-through">{task.title}</div>
                 </div>
               ))}

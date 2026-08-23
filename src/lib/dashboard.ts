@@ -274,8 +274,18 @@ export async function getRecentActivity(organizationId: string, limit = 5): Prom
     supabase.from("campaigns").select("id, name, created_at").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(limit),
   ]);
 
+  const leadIdentities = await resolveLeadIdentities(
+    supabase,
+    (leads.data ?? []).map((l) => l.id)
+  );
+
   const items: ActivityItem[] = [
-    ...(leads.data ?? []).map((l) => ({ id: l.id, entity: "lead" as const, label: "New lead added", createdAt: l.created_at })),
+    ...(leads.data ?? []).map((l) => ({
+      id: l.id,
+      entity: "lead" as const,
+      label: `New lead: ${leadIdentities.get(l.id)?.name ?? "unnamed"}`,
+      createdAt: l.created_at,
+    })),
     ...(deals.data ?? []).map((d) => ({ id: d.id, entity: "deal" as const, label: `Deal created: ${d.title}`, createdAt: d.created_at })),
     ...(conversations.data ?? []).map((c) => ({
       id: c.id,
