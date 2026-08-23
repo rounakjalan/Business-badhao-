@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   updateCampaign,
   updateCampaignStatus,
@@ -75,6 +76,7 @@ export function CampaignDetailTabs({
   const [pending, setPending] = useState(false);
   const [editing, setEditing] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const router = useRouter();
 
   const setStatus = async (status: "active" | "paused" | "completed" | "archived") => {
     setPending(true);
@@ -253,6 +255,7 @@ export function CampaignDetailTabs({
               ]}
               rows={conversations}
               getRowKey={(c) => c.id}
+              onRowClick={(c) => router.push(`/conversations/${c.id}`)}
             />
           )
         ) : null}
@@ -270,6 +273,7 @@ export function CampaignDetailTabs({
               ]}
               rows={deals}
               getRowKey={(d) => d.id}
+              onRowClick={(d) => router.push(`/deals/${d.id}`)}
             />
           )
         ) : null}
