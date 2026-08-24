@@ -3,7 +3,15 @@ import { getGmailRedirectUri, getGoogleClientId, getGoogleClientSecret, GMAIL_SC
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo";
+// Deliberately the Gmail API's own profile endpoint, not the generic
+// https://www.googleapis.com/oauth2/v2/userinfo one: that endpoint requires
+// its own userinfo.email/openid scope, which this app never requests (see
+// GMAIL_SCOPES in config.ts) — calling it with only gmail.send/gmail.readonly
+// tokens fails with an insufficient-scope error from Google every time.
+// users.getProfile is documented to accept gmail.readonly and returns
+// emailAddress, so it works with the scope this app already has, and is the
+// same endpoint replies.ts already calls to establish its history baseline.
+const GOOGLE_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
 
 export function buildGoogleConsentUrl(state: string): string {
   const params = new URLSearchParams({
@@ -99,7 +107,7 @@ export type GoogleUserInfoResult = { ok: true; email: string } | { ok: false; me
 export async function fetchConnectedEmailAddress(accessToken: string): Promise<GoogleUserInfoResult> {
   let response: Response;
   try {
-    response = await fetch(GOOGLE_USERINFO_URL, {
+    response = await fetch(GOOGLE_PROFILE_URL, {
       headers: { Authorization: `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(15_000),
     });
@@ -108,16 +116,16 @@ export async function fetchConnectedEmailAddress(accessToken: string): Promise<G
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Google userinfo endpoint returned HTTP ${response.status}.` };
+    return { ok: false, message: `Gmail profile endpoint returned HTTP ${response.status}.` };
   }
 
-  let data: { email?: string };
+  let data: { emailAddress?: string };
   try {
     data = await response.json();
   } catch {
-    return { ok: false, message: "Google's userinfo response could not be parsed." };
+    return { ok: false, message: "Gmail's profile response could not be parsed." };
   }
 
-  if (!data.email) return { ok: false, message: "Google's userinfo response had no email address." };
-  return { ok: true, email: data.email };
+  if (!data.emailAddress) return { ok: false, message: "Gmail's profile response had no email address." };
+  return { ok: true, email: data.emailAddress };
 }

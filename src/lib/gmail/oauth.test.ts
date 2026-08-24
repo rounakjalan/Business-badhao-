@@ -72,13 +72,16 @@ describe("gmail oauth", () => {
     expect(sentBody.get("refresh_token")).toBe("stored-refresh-token");
   });
 
-  it("fetches the connected account's email address", async () => {
-    mockFetchOnce(200, { email: "studio@example.com" });
+  it("fetches the connected account's email address from Gmail's own profile endpoint", async () => {
+    mockFetchOnce(200, { emailAddress: "studio@example.com", historyId: "12345" });
     const result = await fetchConnectedEmailAddress("access-token");
     expect(result).toEqual({ ok: true, email: "studio@example.com" });
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0][0];
+    expect(calledUrl).toBe("https://gmail.googleapis.com/gmail/v1/users/me/profile");
   });
 
-  it("reports failure when the userinfo response has no email", async () => {
+  it("reports failure when the profile response has no email", async () => {
     mockFetchOnce(200, {});
     const result = await fetchConnectedEmailAddress("access-token");
     expect(result.ok).toBe(false);
