@@ -205,11 +205,18 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Objective</label>
-            <select value={objective} onChange={(e) => setObjective(e.target.value)} className={inputClass()}>
+            <input
+              list="objective-suggestions"
+              value={objective}
+              onChange={(e) => setObjective(e.target.value)}
+              placeholder="e.g. Get more customers, or type your own"
+              className={inputClass()}
+            />
+            <datalist id="objective-suggestions">
               {OBJECTIVES.map((o) => (
-                <option key={o}>{o}</option>
+                <option key={o} value={o} />
               ))}
-            </select>
+            </datalist>
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Description (optional)</label>
