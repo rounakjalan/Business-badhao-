@@ -39,7 +39,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   // the outreach panel display, or the UI could show "no email" while a
   // send would actually find one, or the reverse.
   const [identity, gmailStatus] = await Promise.all([resolveLeadIdentity(supabase, id), getConnectionStatus(currentOrg.organizationId)]);
-  const recipientEmail = primaryContact?.email ?? identity.email;
+  const recipientEmail = identity.email;
 
   return (
     <LeadDetailTabs

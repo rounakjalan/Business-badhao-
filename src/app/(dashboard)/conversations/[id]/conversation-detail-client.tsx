@@ -37,6 +37,7 @@ export function ConversationDetailClient({
   const [reply, setReply] = useState("");
   const [isPending, startTransition] = useTransition();
   const [aiPending, startAiTransition] = useTransition();
+  const [sendPending, startSendTransition] = useTransition();
   const [intentResult, setIntentResult] = useState<IntentAnalysis | { error: string } | null>(null);
   const [followUpResult, setFollowUpResult] = useState<FollowUpPlan | { error: string } | null>(null);
 
@@ -137,10 +138,6 @@ export function ConversationDetailClient({
           </div>
 
           <form
-            action={(formData) => {
-              sendMessage(conversation.id, formData);
-              setReply("");
-            }}
             className="shrink-0 border-t border-bb-border p-4"
           >
             <textarea
@@ -156,8 +153,19 @@ export function ConversationDetailClient({
               connected yet.
             </p>
             <div className="mt-2 flex justify-end">
-              <DashButton type="submit" variant="gradient" disabled={!reply.trim()}>
-                Send →
+              <DashButton
+                variant="gradient"
+                disabled={sendPending || !reply.trim()}
+                onClick={() => {
+                  startSendTransition(async () => {
+                    const formData = new FormData();
+                    formData.set("body", reply);
+                    await sendMessage(conversation.id, formData);
+                    setReply("");
+                  });
+                }}
+              >
+                {sendPending ? "Sending…" : "Send →"}
               </DashButton>
             </div>
           </form>
