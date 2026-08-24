@@ -11,14 +11,6 @@ import { DashButton } from "@/components/dashboard-ui/button";
 import { SparklesIcon } from "@/components/ui/icons";
 
 const STEPS = ["Campaign Basics", "AI Planner", "Target Customer (ICP)", "Review & Launch"];
-const OBJECTIVES = [
-  "Get more customers",
-  "Generate qualified leads",
-  "Fill appointments",
-  "Increase admissions",
-  "Promote a product",
-  "Enter a new market",
-];
 
 function planSections(plan: CampaignPlan) {
   return [
@@ -62,7 +54,7 @@ function inputClass() {
 export function CampaignCreateWizard({ error }: { error?: string }) {
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
-  const [objective, setObjective] = useState(OBJECTIVES[0]);
+  const [objective, setObjective] = useState("");
   const [description, setDescription] = useState("");
   const [customerType, setCustomerType] = useState("");
   const [location, setLocation] = useState("");
@@ -206,17 +198,11 @@ export function CampaignCreateWizard({ error }: { error?: string }) {
           <div>
             <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Objective</label>
             <input
-              list="objective-suggestions"
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
-              placeholder="e.g. Get more customers, or type your own"
+              placeholder="e.g. Get more customers, generate qualified leads, fill appointments..."
               className={inputClass()}
             />
-            <datalist id="objective-suggestions">
-              {OBJECTIVES.map((o) => (
-                <option key={o} value={o} />
-              ))}
-            </datalist>
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Description (optional)</label>
