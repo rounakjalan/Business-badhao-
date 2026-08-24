@@ -14,11 +14,13 @@ import {
 } from "@/app/(dashboard)/leads/actions";
 import type { LeadQualification } from "@/lib/ai/agents/qualification";
 import type { OutreachDraft } from "@/lib/ai/agents/outreach";
+import { ProspectResearchSchema } from "@/lib/ai/agents/prospect-research-schema";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkCard } from "@/components/dashboard-ui/card";
 import { LeadStatusBadge, QualificationBadge, ScorePill, TaskStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
+import type { ProspectRawData } from "@/lib/prospects";
 
 const SEND_ERROR_LABELS: Record<string, string> = {
   not_connected: "Gmail isn't connected for this organization yet.",
@@ -41,7 +43,7 @@ type Lead = {
   created_at: string;
 };
 type Contact = { id: string; full_name: string | null; email: string | null; phone: string | null; role_title: string | null; is_primary: boolean };
-type Research = { id: string; summary: string | null; source: string; created_at: string };
+type Research = { id: string; summary: string | null; findings: unknown; source: string; created_at: string };
 type ConversationRow = { id: string; channel: string; status: string; created_at: string };
 type TaskRow = { id: string; title: string; status: string; due_at: string | null };
 type DealRow = { id: string; title: string; status: string; value: number; currency: string };
@@ -52,10 +54,13 @@ export function LeadDetailTabs({
   primaryContact,
   recipientEmail,
   gmailStatus,
+  hasBusinessKnowledge,
   contacts,
   companyName,
   website,
+  discovery,
   campaignName,
+  latestQualificationReason,
   research,
   conversations,
   tasks,
@@ -66,10 +71,13 @@ export function LeadDetailTabs({
   primaryContact: Contact | null;
   recipientEmail: string | null;
   gmailStatus: { connected: boolean; emailAddress: string | null };
+  hasBusinessKnowledge: boolean;
   contacts: Contact[];
   companyName: string | null;
   website: string | null;
+  discovery: ProspectRawData;
   campaignName: string | null;
+  latestQualificationReason: string | null;
   research: Research[];
   conversations: ConversationRow[];
   tasks: TaskRow[];
@@ -207,6 +215,8 @@ export function LeadDetailTabs({
                 <Row label="Email" val={recipientEmail ?? "—"} />
                 <Row label="Phone" val={primaryContact?.phone ?? "—"} />
                 <Row label="Company" val={companyName ?? "—"} />
+                <Row label="Location" val={discovery.location ?? "—"} />
+                <Row label="Industry" val={discovery.industry ?? "—"} />
                 <Row label="Campaign" val={campaignName ?? "—"} />
               </DarkCard>
               <DarkCard className="p-5">
@@ -234,6 +244,11 @@ export function LeadDetailTabs({
                       ) : null}
                     </div>
                   )
+                ) : latestQualificationReason ? (
+                  <div className="mt-3 border-t border-bb-border pt-3 text-xs">
+                    <p className="mb-1 text-bb-text-3">From the last qualification run:</p>
+                    <p className="text-bb-text-2">{latestQualificationReason}</p>
+                  </div>
                 ) : null}
               </DarkCard>
 
@@ -250,10 +265,23 @@ export function LeadDetailTabs({
                 </div>
 
                 {!outreachDraft ? (
-                  <p className="text-sm text-bb-text-3">
-                    Drafts a personalized email from real research and qualification on file, for you to review, edit and send
-                    through Gmail. Never sent automatically.
-                  </p>
+                  <div className="space-y-2">
+                    <p className="text-sm text-bb-text-3">
+                      Drafts a personalized email from real research and qualification on file, for you to review, edit and send
+                      through Gmail. Never sent automatically.
+                    </p>
+                    {hasBusinessKnowledge ? (
+                      <p className="text-xs text-bb-text-3">Business Knowledge is on file and will ground this draft.</p>
+                    ) : (
+                      <p className="text-xs text-bb-amber">
+                        No Business Knowledge is on file yet — drafts will be generic until you fill in{" "}
+                        <Link href="/knowledge" className="underline">
+                          the Knowledge tab
+                        </Link>
+                        .
+                      </p>
+                    )}
+                  </div>
                 ) : "error" in outreachDraft ? (
                   <div className="space-y-2">
                     <p className="text-sm text-bb-rose">{outreachDraft.error}</p>
@@ -346,7 +374,39 @@ export function LeadDetailTabs({
             <DarkCard className="p-5">
               <Row label="Company" val={companyName ?? "—"} />
               <Row label="Website" val={website ?? "—"} />
+              <Row label="Location" val={discovery.location ?? "—"} />
+              <Row label="Industry" val={discovery.industry ?? "—"} />
+              <Row label="Business type" val={discovery.businessType ?? "—"} />
             </DarkCard>
+            {discovery.evidenceSnippet || discovery.matchedIcpCriteria.length > 0 ? (
+              <DarkCard className="p-5">
+                <h4 className="mb-3 text-sm font-semibold text-bb-text">Discovery Evidence</h4>
+                {discovery.evidenceSnippet ? (
+                  <p className="mb-2 text-sm text-bb-text-2">&ldquo;{discovery.evidenceSnippet}&rdquo;</p>
+                ) : null}
+                {discovery.sourceUrl ? (
+                  <a href={discovery.sourceUrl} target="_blank" rel="noreferrer" className="mb-3 inline-block text-xs text-bb-indigo-2 hover:underline">
+                    View source →
+                  </a>
+                ) : null}
+                {discovery.matchedIcpCriteria.length > 0 ? (
+                  <div className="mt-2 border-t border-bb-border pt-3">
+                    <p className="mb-1.5 text-xs font-medium text-bb-text-2">Matched ICP criteria</p>
+                    <ul className="list-inside list-disc space-y-0.5 text-xs text-bb-text-3">
+                      {discovery.matchedIcpCriteria.map((c) => (
+                        <li key={c}>{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {discovery.discoveredAt ? (
+                  <p className="mt-3 text-xs text-bb-text-3">
+                    Discovered {formatDate(discovery.discoveredAt)}
+                    {discovery.discoverySource ? ` via ${discovery.discoverySource}` : ""}
+                  </p>
+                ) : null}
+              </DarkCard>
+            ) : null}
             <DarkCard className="p-5">
               <h4 className="mb-3 text-sm font-semibold text-bb-text">Contacts</h4>
               {contacts.length === 0 ? (
@@ -384,15 +444,7 @@ export function LeadDetailTabs({
             {research.length === 0 ? (
               <p className="py-16 text-center text-sm text-bb-text-3">No research recorded for this lead yet.</p>
             ) : (
-              research.map((r) => (
-                <DarkCard key={r.id} className="p-4">
-                  <div className="mb-1 flex items-center justify-between text-xs text-bb-text-3">
-                    <span className="capitalize">{r.source}</span>
-                    <span>{formatDate(r.created_at)}</span>
-                  </div>
-                  <p className="text-sm text-bb-text-2">{r.summary ?? "No summary."}</p>
-                </DarkCard>
-              ))
+              research.map((r) => <ResearchCard key={r.id} research={r} />)
             )}
           </div>
         ) : null}
@@ -481,5 +533,44 @@ function Row({ label, val }: { label: string; val: string }) {
       <span className="text-xs text-bb-text-3">{label}</span>
       <span className="text-sm text-bb-text-2">{val}</span>
     </div>
+  );
+}
+
+const CONFIDENCE_COLOR: Record<string, string> = { low: "text-bb-rose", medium: "text-bb-amber", high: "text-bb-emerald" };
+
+function ResearchCard({ research: r }: { research: { id: string; summary: string | null; findings: unknown; source: string; created_at: string } }) {
+  const parsed = ProspectResearchSchema.safeParse(r.findings);
+  const findings = parsed.success ? parsed.data : null;
+
+  return (
+    <DarkCard className="p-4">
+      <div className="mb-1 flex items-center justify-between text-xs text-bb-text-3">
+        <span className="capitalize">{r.source}</span>
+        <div className="flex items-center gap-2">
+          {findings ? <span className={`font-medium capitalize ${CONFIDENCE_COLOR[findings.confidence] ?? "text-bb-text-3"}`}>{findings.confidence} confidence</span> : null}
+          <span>{formatDate(r.created_at)}</span>
+        </div>
+      </div>
+      <p className="text-sm text-bb-text-2">{r.summary ?? "No summary."}</p>
+
+      {findings ? (
+        <div className="mt-3 space-y-2 border-t border-bb-border pt-3 text-xs">
+          {findings.likelyNeeds.length > 0 ? <p className="text-bb-text-2">Likely needs: {findings.likelyNeeds.join("; ")}</p> : null}
+          {findings.possiblePainPoints.length > 0 ? <p className="text-bb-text-2">Possible pain points: {findings.possiblePainPoints.join("; ")}</p> : null}
+          {findings.buyingSignals.length > 0 ? <p className="text-bb-text-2">Buying signals: {findings.buyingSignals.join("; ")}</p> : null}
+          {(findings.verifiedInformation.length > 0 || findings.businessFactsReferenced.length > 0) ? (
+            <p className="text-bb-emerald">
+              Verified: {[...findings.verifiedInformation, ...findings.businessFactsReferenced].join("; ")}
+            </p>
+          ) : null}
+          {findings.inferredInformation.length > 0 ? (
+            <p className="text-bb-text-3">Inferred (not verified): {findings.inferredInformation.join("; ")}</p>
+          ) : null}
+          {findings.unavailableInformation.length > 0 ? (
+            <p className="text-bb-amber">Not available: {findings.unavailableInformation.join("; ")}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </DarkCard>
   );
 }

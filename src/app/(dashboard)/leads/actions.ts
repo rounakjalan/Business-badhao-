@@ -71,6 +71,7 @@ export async function generateLeadOutreachAction(leadId: string, channel: string
     channel,
     campaignName: context.campaignName,
     campaignObjective: context.campaignObjective,
+    icpCriteria: context.icpCriteria,
     researchSummary: context.latestResearchSummary,
     qualificationReasons: latestScore?.reason ? [latestScore.reason] : [],
     businessContext: selectOutreachContext(businessContext),

@@ -22,6 +22,8 @@ export type OutreachGeneratorInput = {
   campaignObjective: string | null;
   researchSummary: string | null;
   qualificationReasons: string[];
+  /** The campaign's saved ICP (ideal_customer_profiles.criteria) — null when the campaign has none. */
+  icpCriteria: Record<string, unknown> | null;
   /** This organization's relevant Business Knowledge (see selectOutreachContext in src/lib/business-context.ts) — null when none is on file. */
   businessContext: BusinessContext | null;
 };
@@ -30,7 +32,7 @@ export type OutreachGeneratorResult =
   | { ok: true; draft: OutreachDraft }
   | { ok: false; message: string };
 
-const SYSTEM_PROMPT = `You are the AI outreach writer inside Business Badhao, a customer-acquisition CRM. Draft ONE personalized outreach message for a specific lead and channel, grounded only in the information given: this business's real Business Knowledge (profile, products/services, value proposition, FAQs as approved claims, brand voice/communication rules, relevant assets) and the lead/campaign details below it.
+const SYSTEM_PROMPT = `You are the AI outreach writer inside Business Badhao, a customer-acquisition CRM. Draft ONE personalized outreach message for a specific lead and channel, grounded only in the information given: this business's real Business Knowledge (profile, products/services, value proposition, FAQs as approved claims, brand voice/communication rules, relevant assets) and the lead/campaign details below it, including the campaign's target customer profile (ICP) when one is given — use it to inform tone and emphasis, never as a fact about this specific lead.
 
 Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly these keys:
 {
@@ -61,6 +63,7 @@ export async function generateOutreach(input: OutreachGeneratorInput): Promise<O
     `Channel: ${input.channel}`,
     `Campaign: ${input.campaignName ?? "none"}`,
     `Campaign objective: ${input.campaignObjective ?? "unknown"}`,
+    `Target customer profile (ICP) for this campaign: ${input.icpCriteria ? JSON.stringify(input.icpCriteria) : "none on file"}`,
     `Research on file: ${input.researchSummary ?? "none"}`,
     `Qualification notes: ${input.qualificationReasons.length > 0 ? input.qualificationReasons.join("; ") : "none"}`,
   ].join("\n");

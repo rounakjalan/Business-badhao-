@@ -19,6 +19,7 @@ const baseInput = {
   channel: "whatsapp",
   campaignName: "Q1 Push",
   campaignObjective: "Book demo calls",
+  icpCriteria: null,
   researchSummary: null,
   qualificationReasons: [],
   businessContext: null,
@@ -83,5 +84,21 @@ describe("generateOutreach", () => {
     expect(prompt).toContain("Storefront Ads Package");
     expect(prompt).toContain("Only local agency with same-week turnaround");
     expect(prompt).toContain("Guaranteed sales increase");
+  });
+
+  it("includes the campaign's ICP criteria in the actual Hermes request when given", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_DRAFT), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await generateOutreach({ ...baseInput, icpCriteria: { industry: "Retail electronics", location: "Delhi NCR" } });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("Retail electronics");
+    expect(prompt).toContain("Delhi NCR");
+  });
+
+  it("does not fail when there is no ICP on file", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_DRAFT), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+    const result = await generateOutreach({ ...baseInput, icpCriteria: null });
+    expect(result.ok).toBe(true);
   });
 });

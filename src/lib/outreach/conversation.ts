@@ -13,6 +13,12 @@ export type EnsureConversationResult = { ok: true; conversationId: string } | { 
  * thread) and the reply-poll path (a reply from a lead with no prior
  * outbound message still needs somewhere to land) so both agree on what
  * "the conversation" for a lead+channel means.
+ *
+ * A unique index on (organization_id, lead_id, channel) backs this
+ * invariant at the database level (see the conversation_dedupe_index
+ * migration) — two concurrent first-sends on a brand-new lead can't both
+ * miss the "existing" check above and insert a duplicate; the loser's
+ * insert fails with 23505 and falls back to the winner's row instead.
  */
 export async function ensureConversation(supabase: Client, organizationId: string, leadId: string, channel: Channel): Promise<EnsureConversationResult> {
   const { data: existing } = await supabase
@@ -35,6 +41,18 @@ export async function ensureConversation(supabase: Client, organizationId: strin
     .select("id")
     .single();
 
-  if (error || !created) return { ok: false, message: error?.message ?? "Could not create a conversation for this lead." };
-  return { ok: true, conversationId: created.id };
+  if (created) return { ok: true, conversationId: created.id };
+
+  if (error?.code === "23505") {
+    const { data: winner } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .eq("lead_id", leadId)
+      .eq("channel", channel)
+      .maybeSingle();
+    if (winner) return { ok: true, conversationId: winner.id };
+  }
+
+  return { ok: false, message: error?.message ?? "Could not create a conversation for this lead." };
 }
