@@ -74,7 +74,15 @@ export async function generateOutreach(input: OutreachGeneratorInput): Promise<O
     taskType: "OUTREACH_GENERATION",
     systemPrompt: SYSTEM_PROMPT,
     userPrompt,
-    maxTokens: 500,
+    // 500 was too small: unlike qualification/follow-up/intent, this
+    // schema's "message" field is a full free-text email body, not a short
+    // structured field, plus reasoning-model overhead on top. Real
+    // production failures (agent_runs, task 2026-08-26) showed Groq
+    // rejecting the request outright with json_validate_failed / "max
+    // completion tokens reached before generating a valid document" —
+    // the same failure class prospect-research.ts and qualification.ts
+    // already hit and fixed by matching this same 1600 ceiling.
+    maxTokens: 1600,
     temperature: 0.7,
     responseFormat: "json",
   });
