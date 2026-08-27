@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { disconnectAccount } from "@/lib/gmail/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
+import { disconnectWhatsAppAccount, saveWhatsAppAccount } from "@/lib/whatsapp/tokens";
 
 export async function updateProfile(formData: FormData) {
   const fullName = String(formData.get("fullName") ?? "").trim();
@@ -66,4 +67,55 @@ export async function disconnectGmailAction() {
   revalidatePath("/settings");
   revalidatePath("/leads");
   redirect("/settings?tab=Integrations&gmail=disconnected");
+}
+
+/**
+ * WhatsApp Cloud API has no OAuth consent screen the way Gmail does — the
+ * org admin enters the phone_number_id and access_token they already
+ * obtained directly from Meta Business Manager (see the doc comment on
+ * src/lib/whatsapp/config.ts for why). This just validates and stores them.
+ */
+export async function connectWhatsAppAction(formData: FormData) {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  const phoneNumberId = String(formData.get("phoneNumberId") ?? "").trim();
+  const accessToken = String(formData.get("accessToken") ?? "").trim();
+  const displayPhoneNumber = String(formData.get("displayPhoneNumber") ?? "").trim();
+
+  if (!phoneNumberId || !accessToken) {
+    redirect(`/settings?tab=Integrations&whatsapp=error&whatsappMessage=${encodeURIComponent("Phone Number ID and Access Token are both required.")}`);
+  }
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const saved = await saveWhatsAppAccount({
+    organizationId: currentOrg.organizationId,
+    connectedBy: user.id,
+    phoneNumberId,
+    businessAccountId: null,
+    displayPhoneNumber: displayPhoneNumber || null,
+    accessToken,
+  });
+
+  if (!saved.ok) {
+    redirect(`/settings?tab=Integrations&whatsapp=error&whatsappMessage=${encodeURIComponent(saved.message ?? "Could not save this WhatsApp connection.")}`);
+  }
+
+  revalidatePath("/settings");
+  redirect("/settings?tab=Integrations&whatsapp=connected");
+}
+
+export async function disconnectWhatsAppAction() {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  await disconnectWhatsAppAccount(currentOrg.organizationId);
+
+  revalidatePath("/settings");
+  redirect("/settings?tab=Integrations&whatsapp=disconnected");
 }

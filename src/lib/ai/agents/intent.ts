@@ -19,6 +19,25 @@ export type IntentCategory = (typeof INTENT_CATEGORIES)[number];
 
 export const HIGH_INTENT_CATEGORIES: ReadonlySet<IntentCategory> = new Set(["HIGH_INTENT", "READY_TO_BUY"]);
 
+export type BuyingIntent = "low" | "medium" | "high";
+
+const MEDIUM_INTENT_CATEGORIES: ReadonlySet<IntentCategory> = new Set(["CURIOUS", "INFORMATION_REQUEST", "PRICE_REQUEST", "OBJECTION", "QUALIFYING"]);
+
+/**
+ * Collapses the 10-category classification above into the simple
+ * low/medium/high scale conversations.buying_intent / leads.buying_intent
+ * persist — a separate, coarser signal meant for a quick glance (pipeline
+ * views, a takeover decision), not a replacement for the richer category
+ * shown alongside it. LOW_INTENT, NOT_INTERESTED, and UNCLEAR (including a
+ * failed/no-data classification) are all "low" — an AI response should not
+ * read as more promising than the evidence actually shows.
+ */
+export function mapIntentToBuyingIntent(category: IntentCategory): BuyingIntent {
+  if (HIGH_INTENT_CATEGORIES.has(category)) return "high";
+  if (MEDIUM_INTENT_CATEGORIES.has(category)) return "medium";
+  return "low";
+}
+
 export const IntentAnalysisSchema = z.object({
   intent: z.enum(INTENT_CATEGORIES),
   confidence: z.enum(["low", "medium", "high"]),

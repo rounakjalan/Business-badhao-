@@ -1,4 +1,5 @@
 import "server-only";
+import { respondToConversation } from "@/lib/conversation-agent/respond";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getLastHistoryId, getValidAccessToken, setLastHistoryId } from "@/lib/gmail/tokens";
 import { ensureConversation } from "@/lib/outreach/conversation";
@@ -191,6 +192,12 @@ export async function checkForReplies(organizationId: string): Promise<CheckRepl
     });
 
     await admin.from("conversations").update({ last_message_at: new Date().toISOString(), status: "open" }).eq("id", conversation.conversationId);
+
+    // Only actually replies while the conversation is still AI-owned — see
+    // respondToConversation's own doc comment. A failure here (AI provider
+    // down, send failure) is intentionally swallowed: the inbound message
+    // is already safely stored above regardless of whether a reply goes out.
+    await respondToConversation(admin, { organizationId, conversationId: conversation.conversationId, leadId });
 
     matchedLeadIds.push(leadId);
   }

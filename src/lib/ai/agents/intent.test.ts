@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
-import { detectIntent, HIGH_INTENT_CATEGORIES } from "@/lib/ai/agents/intent";
+import { detectIntent, HIGH_INTENT_CATEGORIES, INTENT_CATEGORIES, mapIntentToBuyingIntent } from "@/lib/ai/agents/intent";
 
 const VALID_ANALYSIS = {
   intent: "HIGH_INTENT",
@@ -78,5 +78,32 @@ describe("detectIntent", () => {
     expect(call.userPrompt).toContain("Annual Maintenance Plan");
     // No BUSINESS KNOWLEDGE block (FAQs/policies/brand-voice) — this agent only ever gets a plain name list.
     expect(call.userPrompt).not.toContain("=== BUSINESS KNOWLEDGE");
+  });
+});
+
+describe("mapIntentToBuyingIntent", () => {
+  it("maps HIGH_INTENT and READY_TO_BUY to high", () => {
+    expect(mapIntentToBuyingIntent("HIGH_INTENT")).toBe("high");
+    expect(mapIntentToBuyingIntent("READY_TO_BUY")).toBe("high");
+  });
+
+  it("maps engaged-but-undecided categories to medium", () => {
+    expect(mapIntentToBuyingIntent("CURIOUS")).toBe("medium");
+    expect(mapIntentToBuyingIntent("INFORMATION_REQUEST")).toBe("medium");
+    expect(mapIntentToBuyingIntent("PRICE_REQUEST")).toBe("medium");
+    expect(mapIntentToBuyingIntent("OBJECTION")).toBe("medium");
+    expect(mapIntentToBuyingIntent("QUALIFYING")).toBe("medium");
+  });
+
+  it("maps disengaged/unclear categories to low, never fabricating higher confidence than the evidence shows", () => {
+    expect(mapIntentToBuyingIntent("LOW_INTENT")).toBe("low");
+    expect(mapIntentToBuyingIntent("NOT_INTERESTED")).toBe("low");
+    expect(mapIntentToBuyingIntent("UNCLEAR")).toBe("low");
+  });
+
+  it("covers every declared intent category with no gaps", () => {
+    for (const category of INTENT_CATEGORIES) {
+      expect(["low", "medium", "high"]).toContain(mapIntentToBuyingIntent(category));
+    }
   });
 });

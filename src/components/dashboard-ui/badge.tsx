@@ -82,6 +82,22 @@ const CHANNEL_COLOR: Record<string, BadgeColor> = {
   other: "slate",
 };
 
+const OWNER_COLOR: Record<string, BadgeColor> = {
+  ai: "violet",
+  human: "amber",
+};
+
+const OWNER_LABEL: Record<string, string> = {
+  ai: "AI-controlled",
+  human: "Human-controlled",
+};
+
+const BUYING_INTENT_COLOR: Record<string, BadgeColor> = {
+  low: "slate",
+  medium: "amber",
+  high: "emerald",
+};
+
 function StatusBadge({ status, colorMap }: { status: string; colorMap: Record<string, BadgeColor> }) {
   return <Badge color={colorMap[status] ?? "slate"}>{formatLabel(status)}</Badge>;
 }
@@ -93,6 +109,8 @@ export const ConversationStatusBadge = ({ status }: { status: string }) => <Stat
 export const DealStatusBadge = ({ status }: { status: string }) => <StatusBadge status={status} colorMap={DEAL_STATUS_COLOR} />;
 export const TaskStatusBadge = ({ status }: { status: string }) => <StatusBadge status={status} colorMap={TASK_STATUS_COLOR} />;
 export const ChannelBadge = ({ channel }: { channel: string }) => <StatusBadge status={channel} colorMap={CHANNEL_COLOR} />;
+export const OwnerBadge = ({ owner }: { owner: string }) => <Badge color={OWNER_COLOR[owner] ?? "slate"}>{OWNER_LABEL[owner] ?? formatLabel(owner)}</Badge>;
+export const BuyingIntentBadge = ({ intent }: { intent: string }) => <Badge color={BUYING_INTENT_COLOR[intent] ?? "slate"}>{formatLabel(intent)} intent</Badge>;
 
 export function ScorePill({ score }: { score: number | null }) {
   if (score === null) return <span className="text-bb-text-3 text-xs font-mono">—</span>;

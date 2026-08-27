@@ -2,15 +2,32 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { detectIntentAction, runFollowUpAction, sendMessage, updateConversationStatus } from "@/app/(dashboard)/conversations/actions";
+import {
+  detectIntentAction,
+  handBackToAi,
+  runFollowUpAction,
+  sendMessage,
+  takeOverConversation,
+  updateConversationStatus,
+  type SendMessageResult,
+} from "@/app/(dashboard)/conversations/actions";
 import type { IntentAnalysis } from "@/lib/ai/agents/intent";
 import type { FollowUpPlan } from "@/lib/ai/agents/follow-up";
 import { DashButton } from "@/components/dashboard-ui/button";
-import { ChannelBadge, ConversationStatusBadge } from "@/components/dashboard-ui/badge";
+import { BuyingIntentBadge, ChannelBadge, ConversationStatusBadge, OwnerBadge } from "@/components/dashboard-ui/badge";
 import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
 
-type Conversation = { id: string; lead_id: string; channel: string; status: string; intent: string | null; created_at: string };
+type Conversation = {
+  id: string;
+  lead_id: string;
+  channel: string;
+  status: string;
+  intent: string | null;
+  owner: "ai" | "human";
+  buying_intent: "low" | "medium" | "high" | null;
+  created_at: string;
+};
 type Message = {
   id: string;
   direction: string;
@@ -19,6 +36,18 @@ type Message = {
   subject?: string | null;
   status?: string | null;
   created_at: string;
+};
+
+const SENDER_LABEL: Record<string, string> = { lead: "Lead", agent: "AI", human: "You", system: "System" };
+
+const SEND_ERROR_LABELS: Record<string, string> = {
+  missing_recipient: "No email or phone number on file for this lead.",
+  not_connected: "This channel isn't connected for this organization yet.",
+  reauth_required: "Authorization expired — reconnect this channel in Settings.",
+  invalid_recipient: "The recipient address was rejected.",
+  rate_limited: "This channel is rate-limiting sends right now — try again shortly.",
+  outside_window: "WhatsApp only allows a reply within 24 hours of the lead's last message.",
+  not_configured: "Sending over this channel isn't configured yet.",
 };
 
 export function ConversationDetailClient({
@@ -38,8 +67,10 @@ export function ConversationDetailClient({
   const [isPending, startTransition] = useTransition();
   const [aiPending, startAiTransition] = useTransition();
   const [sendPending, startSendTransition] = useTransition();
+  const [ownerPending, startOwnerTransition] = useTransition();
   const [intentResult, setIntentResult] = useState<IntentAnalysis | { error: string } | null>(null);
   const [followUpResult, setFollowUpResult] = useState<FollowUpPlan | { error: string } | null>(null);
+  const [sendResult, setSendResult] = useState<SendMessageResult | null>(null);
 
   function runDetectIntent() {
     setFollowUpResult(null);
@@ -77,6 +108,8 @@ export function ConversationDetailClient({
               <div className="flex items-center gap-2 text-xs text-bb-text-3">
                 {contactEmail ? <span>{contactEmail}</span> : null}
                 <ChannelBadge channel={conversation.channel} />
+                <OwnerBadge owner={conversation.owner} />
+                {conversation.buying_intent ? <BuyingIntentBadge intent={conversation.buying_intent} /> : null}
               </div>
             </div>
           </div>
@@ -84,6 +117,23 @@ export function ConversationDetailClient({
             <Link href={`/leads/${conversation.lead_id}`}>
               <DashButton variant="ghost">View Lead</DashButton>
             </Link>
+            {conversation.owner === "ai" ? (
+              <DashButton
+                variant="ghost"
+                disabled={ownerPending}
+                onClick={() => startOwnerTransition(() => takeOverConversation(conversation.id))}
+              >
+                Take Over
+              </DashButton>
+            ) : (
+              <DashButton
+                variant="ghost"
+                disabled={ownerPending}
+                onClick={() => startOwnerTransition(() => handBackToAi(conversation.id))}
+              >
+                Hand Back to AI
+              </DashButton>
+            )}
             {conversation.status !== "closed" ? (
               <DashButton
                 variant="ghost"
@@ -115,7 +165,7 @@ export function ConversationDetailClient({
                 <div key={msg.id} className={`flex ${msg.direction === "outbound" ? "justify-end" : "justify-start"}`}>
                   <div className="max-w-lg">
                     <div className={`mb-1 flex items-center gap-2 text-xs text-bb-text-3 ${msg.direction === "outbound" ? "justify-end" : ""}`}>
-                      <span className="capitalize">{msg.sender_type}</span>
+                      <span className="capitalize">{SENDER_LABEL[msg.sender_type] ?? msg.sender_type}</span>
                       <span>{formatDate(msg.created_at)}</span>
                       {msg.status === "failed" ? <span className="font-medium text-bb-rose">Failed to send</span> : null}
                     </div>
@@ -149,9 +199,11 @@ export function ConversationDetailClient({
               className="w-full resize-none rounded-xl border border-bb-border bg-bb-navy-3 px-4 py-3 text-sm text-bb-text outline-none placeholder:text-bb-text-3 focus:border-bb-indigo"
             />
             <p className="mt-1.5 text-xs text-bb-text-3">
-              This records the message on this conversation. It is not sent over {conversation.channel} — no outreach provider is
-              connected yet.
+              Sends for real over {conversation.channel} and takes over this conversation from the AI.
             </p>
+            {sendResult && !sendResult.ok ? (
+              <p className="mt-1 text-xs text-bb-rose">{SEND_ERROR_LABELS[sendResult.code] ?? sendResult.message}</p>
+            ) : null}
             <div className="mt-2 flex justify-end">
               <DashButton
                 variant="gradient"
@@ -160,8 +212,9 @@ export function ConversationDetailClient({
                   startSendTransition(async () => {
                     const formData = new FormData();
                     formData.set("body", reply);
-                    await sendMessage(conversation.id, formData);
-                    setReply("");
+                    const result = await sendMessage(conversation.id, formData);
+                    setSendResult(result);
+                    if (result.ok) setReply("");
                   });
                 }}
               >

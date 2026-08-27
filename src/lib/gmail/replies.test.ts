@@ -7,10 +7,12 @@ vi.mock("@/lib/gmail/tokens", () => ({
   setLastHistoryId: vi.fn(),
 }));
 vi.mock("@/lib/outreach/conversation", () => ({ ensureConversation: vi.fn() }));
+vi.mock("@/lib/conversation-agent/respond", () => ({ respondToConversation: vi.fn() }));
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getLastHistoryId, getValidAccessToken, setLastHistoryId } from "@/lib/gmail/tokens";
 import { ensureConversation } from "@/lib/outreach/conversation";
+import { respondToConversation } from "@/lib/conversation-agent/respond";
 import { checkForReplies, extractEmailAddress, extractPlainTextBody } from "@/lib/gmail/replies";
 
 describe("extractEmailAddress", () => {
@@ -181,6 +183,57 @@ describe("checkForReplies", () => {
     expect(result).toEqual({ ok: true, newReplies: 1, matchedLeadIds: ["lead-1"], unmatchedSenders: [] });
     expect(admin.__inserted).toHaveLength(1);
     expect(admin.__inserted[0]).toMatchObject({ direction: "inbound", sender_type: "lead", lead_id: "lead-1", conversation_id: "conv-1" });
+  });
+
+  it("triggers the AI conversation agent for the matched lead's conversation after storing the inbound message", async () => {
+    vi.mocked(getValidAccessToken).mockResolvedValue({ ok: true, accessToken: "at", emailAddress: "studio@example.com" });
+    vi.mocked(getLastHistoryId).mockResolvedValue("900");
+    vi.mocked(ensureConversation).mockResolvedValue({ ok: true, conversationId: "conv-1" });
+    vi.mocked(respondToConversation).mockResolvedValue({ ok: true, replied: true, messageId: "wamid-or-gmail-id" });
+    vi.mocked(createAdminClient).mockReturnValue(makeAdminClient({ contactMatch: { lead_id: "lead-1" } }));
+
+    mockGmailFetch({
+      "/profile": { status: 200, body: { emailAddress: "studio@example.com", historyId: "1000" } },
+      "/history": { status: 200, body: { history: [{ messagesAdded: [{ message: { id: "gm-1", labelIds: ["INBOX"] } }] }], historyId: "1000" } },
+      "/messages/gm-1": {
+        status: 200,
+        body: {
+          id: "gm-1",
+          threadId: "thread-1",
+          payload: { headers: [{ name: "From", value: "priya@example.com" }], mimeType: "text/plain", body: { data: Buffer.from("Tell me more").toString("base64") } },
+        },
+      },
+    });
+
+    await checkForReplies("org-1");
+
+    expect(respondToConversation).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", conversationId: "conv-1", leadId: "lead-1" });
+  });
+
+  it("still records the inbound message even when the AI conversation agent does not reply (e.g. the conversation is human-owned)", async () => {
+    vi.mocked(getValidAccessToken).mockResolvedValue({ ok: true, accessToken: "at", emailAddress: "studio@example.com" });
+    vi.mocked(getLastHistoryId).mockResolvedValue("900");
+    vi.mocked(ensureConversation).mockResolvedValue({ ok: true, conversationId: "conv-1" });
+    vi.mocked(respondToConversation).mockResolvedValue({ ok: true, replied: false, reason: "human_owned" });
+    const admin = makeAdminClient({ contactMatch: { lead_id: "lead-1" } });
+    vi.mocked(createAdminClient).mockReturnValue(admin);
+
+    mockGmailFetch({
+      "/profile": { status: 200, body: { emailAddress: "studio@example.com", historyId: "1000" } },
+      "/history": { status: 200, body: { history: [{ messagesAdded: [{ message: { id: "gm-1", labelIds: ["INBOX"] } }] }], historyId: "1000" } },
+      "/messages/gm-1": {
+        status: 200,
+        body: {
+          id: "gm-1",
+          threadId: "thread-1",
+          payload: { headers: [{ name: "From", value: "priya@example.com" }], mimeType: "text/plain", body: { data: Buffer.from("Tell me more").toString("base64") } },
+        },
+      },
+    });
+
+    const result = await checkForReplies("org-1");
+    expect(result).toEqual({ ok: true, newReplies: 1, matchedLeadIds: ["lead-1"], unmatchedSenders: [] });
+    expect(admin.__inserted).toHaveLength(1);
   });
 
   it("skips a sender that matches no known contact or prospect, without fabricating a lead association", async () => {

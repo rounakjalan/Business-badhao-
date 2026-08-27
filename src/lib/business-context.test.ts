@@ -31,6 +31,7 @@ vi.mock("@/lib/supabase/server", () => ({ createClient: mockCreateClient }));
 import {
   getBusinessContext,
   isBusinessContextEmpty,
+  selectConversationContext,
   selectDealContext,
   selectFollowUpContext,
   selectIntentProductNames,
@@ -259,6 +260,17 @@ describe("agent-specific context selectors", () => {
     expect(selected.policies).toHaveLength(1);
     expect(selected.aiCommunicationRules).not.toBeNull();
     expect(selected.mediaReferences).toEqual([]);
+  });
+
+  it("selectConversationContext includes profile/products/value-proposition/FAQs/policies/AI-rules/media — the broadest of any selector", () => {
+    const selected = selectConversationContext(FULL);
+    expect(selected.businessProfile).not.toBeNull();
+    expect(selected.productsServices).toHaveLength(1);
+    expect(selected.valueProposition.keySellingPoints).toEqual(["Fastest install in town"]);
+    expect(selected.faqs).toHaveLength(1);
+    expect(selected.policies).toHaveLength(1);
+    expect(selected.aiCommunicationRules).not.toBeNull();
+    expect(selected.mediaReferences).toHaveLength(1);
   });
 
   it("selectDealContext includes products/policies/AI-rules only, not profile/FAQs/media", () => {

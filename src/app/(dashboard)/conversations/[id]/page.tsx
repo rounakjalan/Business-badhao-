@@ -12,7 +12,7 @@ export default async function ConversationDetailPage({ params }: { params: Promi
   const supabase = await createClient();
   const { data: conversation } = await supabase
     .from("conversations")
-    .select("id, lead_id, channel, status, intent, created_at")
+    .select("id, lead_id, channel, status, intent, owner, buying_intent, created_at")
     .eq("id", id)
     .eq("organization_id", currentOrg.organizationId)
     .maybeSingle();

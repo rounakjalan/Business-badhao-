@@ -159,6 +159,26 @@ export function selectFollowUpContext(context: BusinessContext): BusinessContext
   };
 }
 
+/**
+ * Conversation Agent: the broadest grounding of any agent, since it must
+ * answer whatever a real customer actually asks mid-conversation, not just
+ * draft one message (outreach) or handle known objections in a nurture
+ * plan (follow-up) — profile, products, value proposition, FAQs as
+ * approved answers, policies, communication rules, and asset references.
+ */
+export function selectConversationContext(context: BusinessContext): BusinessContext {
+  return {
+    ...EMPTY_BUSINESS_CONTEXT,
+    businessProfile: context.businessProfile,
+    productsServices: context.productsServices,
+    valueProposition: context.valueProposition,
+    faqs: context.faqs,
+    policies: context.policies,
+    aiCommunicationRules: context.aiCommunicationRules,
+    mediaReferences: context.mediaReferences,
+  };
+}
+
 /** Deal Agent: product, pricing/availability (both on products_services), policies (incl. payment), and communication rules — never the full profile/FAQs, this agent is transactional, not introductory. */
 export function selectDealContext(context: BusinessContext): BusinessContext {
   return { ...EMPTY_BUSINESS_CONTEXT, productsServices: context.productsServices, policies: context.policies, aiCommunicationRules: context.aiCommunicationRules };

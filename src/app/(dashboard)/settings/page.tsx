@@ -1,20 +1,24 @@
-import { disconnectGmailAction, updateOrganization, updateProfile } from "@/app/(dashboard)/settings/actions";
+import { connectWhatsAppAction, disconnectGmailAction, disconnectWhatsAppAction, updateOrganization, updateProfile } from "@/app/(dashboard)/settings/actions";
 import { SettingsSections } from "@/app/(dashboard)/settings/settings-sections";
 import { getConnectionStatus } from "@/lib/gmail/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
+import { getWhatsAppConnectionStatus } from "@/lib/whatsapp/tokens";
 
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; message?: string; tab?: string; gmail?: string; gmailMessage?: string }>;
+  searchParams: Promise<{ error?: string; message?: string; tab?: string; gmail?: string; gmailMessage?: string; whatsapp?: string; whatsappMessage?: string }>;
 }) {
-  const { error, message, tab, gmail, gmailMessage } = await searchParams;
+  const { error, message, tab, gmail, gmailMessage, whatsapp, whatsappMessage } = await searchParams;
 
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return null;
 
-  const gmailStatus = await getConnectionStatus(currentOrg.organizationId);
+  const [gmailStatus, whatsappStatus] = await Promise.all([
+    getConnectionStatus(currentOrg.organizationId),
+    getWhatsAppConnectionStatus(currentOrg.organizationId),
+  ]);
 
   const supabase = await createClient();
   const {
@@ -57,6 +61,10 @@ export default async function SettingsPage({
       gmailStatus={gmailStatus}
       gmailNotice={gmail ? { status: gmail, detail: gmailMessage } : null}
       disconnectGmailAction={disconnectGmailAction}
+      whatsappStatus={whatsappStatus}
+      whatsappNotice={whatsapp ? { status: whatsapp, detail: whatsappMessage } : null}
+      connectWhatsAppAction={connectWhatsAppAction}
+      disconnectWhatsAppAction={disconnectWhatsAppAction}
     />
   );
 }

@@ -291,6 +291,7 @@ export interface Database {
           qualification_status: "pending" | "qualifying" | "qualified" | "disqualified";
           current_score: number | null;
           intent: string | null;
+          buying_intent: "low" | "medium" | "high" | null;
           next_action: string | null;
           notes: string | null;
           created_at: string;
@@ -306,6 +307,7 @@ export interface Database {
           qualification_status?: "pending" | "qualifying" | "qualified" | "disqualified";
           current_score?: number | null;
           intent?: string | null;
+          buying_intent?: "low" | "medium" | "high" | null;
           next_action?: string | null;
           notes?: string | null;
           created_at?: string;
@@ -321,6 +323,7 @@ export interface Database {
           qualification_status?: "pending" | "qualifying" | "qualified" | "disqualified";
           current_score?: number | null;
           intent?: string | null;
+          buying_intent?: "low" | "medium" | "high" | null;
           next_action?: string | null;
           notes?: string | null;
           created_at?: string;
@@ -472,6 +475,8 @@ export interface Database {
           channel: "email" | "sms" | "whatsapp" | "instagram" | "linkedin" | "phone" | "web_chat" | "other";
           status: "open" | "pending" | "resolved" | "closed";
           intent: string | null;
+          owner: "ai" | "human";
+          buying_intent: "low" | "medium" | "high" | null;
           last_message_at: string | null;
           created_at: string;
           updated_at: string;
@@ -484,6 +489,8 @@ export interface Database {
           channel?: "email" | "sms" | "whatsapp" | "instagram" | "linkedin" | "phone" | "web_chat" | "other";
           status?: "open" | "pending" | "resolved" | "closed";
           intent?: string | null;
+          owner?: "ai" | "human";
+          buying_intent?: "low" | "medium" | "high" | null;
           last_message_at?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -496,6 +503,8 @@ export interface Database {
           channel?: "email" | "sms" | "whatsapp" | "instagram" | "linkedin" | "phone" | "web_chat" | "other";
           status?: "open" | "pending" | "resolved" | "closed";
           intent?: string | null;
+          owner?: "ai" | "human";
+          buying_intent?: "low" | "medium" | "high" | null;
           last_message_at?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -599,6 +608,42 @@ export interface Database {
           token_expires_at?: string;
           scope?: string | null;
           last_history_id?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      whatsapp_accounts: {
+        Row: {
+          id: string;
+          organization_id: string;
+          connected_by: string | null;
+          phone_number_id: string;
+          business_account_id: string | null;
+          display_phone_number: string | null;
+          access_token: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          connected_by?: string | null;
+          phone_number_id: string;
+          business_account_id?: string | null;
+          display_phone_number?: string | null;
+          access_token: string;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          connected_by?: string | null;
+          phone_number_id?: string;
+          business_account_id?: string | null;
+          display_phone_number?: string | null;
+          access_token?: string;
           created_at?: string;
           updated_at?: string;
         };

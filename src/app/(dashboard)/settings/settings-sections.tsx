@@ -40,6 +40,8 @@ const NOTIFICATION_TOGGLES = [
 type TeamMember = { userId: string; role: OrgRole; name: string; email: string };
 type GmailStatus = { connected: boolean; emailAddress: string | null };
 type GmailNotice = { status: string; detail?: string } | null;
+type WhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null };
+type WhatsAppNotice = { status: string; detail?: string } | null;
 
 function isSection(value: string | undefined): value is (typeof SECTIONS)[number] {
   return Boolean(value) && (SECTIONS as readonly string[]).includes(value as string);
@@ -57,6 +59,10 @@ export function SettingsSections({
   gmailStatus,
   gmailNotice,
   disconnectGmailAction,
+  whatsappStatus,
+  whatsappNotice,
+  connectWhatsAppAction,
+  disconnectWhatsAppAction,
 }: {
   error?: string;
   message?: string;
@@ -69,8 +75,13 @@ export function SettingsSections({
   gmailStatus: GmailStatus;
   gmailNotice: GmailNotice;
   disconnectGmailAction: () => void;
+  whatsappStatus: WhatsAppStatus;
+  whatsappNotice: WhatsAppNotice;
+  connectWhatsAppAction: (formData: FormData) => void;
+  disconnectWhatsAppAction: () => void;
 }) {
   const [section, setSection] = useState<(typeof SECTIONS)[number]>(isSection(initialTab) ? initialTab : "Account");
+  const [showWhatsAppForm, setShowWhatsAppForm] = useState(false);
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col md:flex-row">
@@ -188,9 +199,84 @@ export function SettingsSections({
                 </DarkAlert>
               </div>
             ) : null}
+            {whatsappNotice ? (
+              <div className="mb-1">
+                <DarkAlert variant={whatsappNotice.status === "error" ? "error" : "success"}>
+                  {whatsappNotice.status === "connected"
+                    ? "WhatsApp connected."
+                    : whatsappNotice.status === "disconnected"
+                      ? "WhatsApp disconnected."
+                      : (whatsappNotice.detail ?? "Something went wrong connecting WhatsApp.")}
+                </DarkAlert>
+              </div>
+            ) : null}
             <div className="bb-stagger space-y-3">
               {INTEGRATIONS.map((int) =>
-                int.name === "Gmail / Google Workspace" ? (
+                int.name === "WhatsApp Business" ? (
+                  <div key={int.name} className="bb-stagger-item rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-bb-text">{int.name}</div>
+                        <div className="text-xs text-bb-text-3">
+                          {whatsappStatus.connected ? `Connected — ${whatsappStatus.displayPhoneNumber}` : int.desc}
+                        </div>
+                      </div>
+                      {whatsappStatus.connected ? (
+                        <>
+                          <span className="rounded-full border border-bb-emerald/25 bg-bb-emerald/10 px-2 py-0.5 text-xs text-bb-emerald">Connected</span>
+                          <form action={disconnectWhatsAppAction}>
+                            <DashButton type="submit" variant="outline">
+                              Disconnect
+                            </DashButton>
+                          </form>
+                        </>
+                      ) : (
+                        <>
+                          <span className="rounded-full border border-bb-text-3/25 bg-bb-text-3/10 px-2 py-0.5 text-xs text-bb-text-3">Not Connected</span>
+                          <DashButton type="button" variant="gradient" onClick={() => setShowWhatsAppForm((v) => !v)}>
+                            Connect
+                          </DashButton>
+                        </>
+                      )}
+                    </div>
+                    {!whatsappStatus.connected && showWhatsAppForm ? (
+                      <form action={connectWhatsAppAction} className="mt-4 space-y-3 border-t border-bb-border pt-4">
+                        <p className="text-xs text-bb-text-3">
+                          Get these from your Meta Business Manager WhatsApp Business API setup — this is a permanent System User
+                          access token, not an OAuth login, so there is nothing to redirect to.
+                        </p>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Phone Number ID</label>
+                          <input
+                            name="phoneNumberId"
+                            required
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Access Token</label>
+                          <input
+                            name="accessToken"
+                            type="password"
+                            required
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Display Phone Number (optional)</label>
+                          <input
+                            name="displayPhoneNumber"
+                            placeholder="e.g. +91 98765 43210"
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
+                        <DashButton type="submit" variant="gradient">
+                          Save Connection
+                        </DashButton>
+                      </form>
+                    ) : null}
+                  </div>
+                ) : int.name === "Gmail / Google Workspace" ? (
                   <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
                     <div className="flex-1">
                       <div className="text-sm font-medium text-bb-text">{int.name}</div>

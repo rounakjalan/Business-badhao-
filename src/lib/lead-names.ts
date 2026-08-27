@@ -4,9 +4,9 @@ import type { Database } from "@/types/database.types";
 
 type Client = SupabaseClient<Database>;
 
-export type LeadIdentity = { name: string; email: string | null };
+export type LeadIdentity = { name: string; email: string | null; phone: string | null };
 
-const UNKNOWN: LeadIdentity = { name: "Unnamed lead", email: null };
+const UNKNOWN: LeadIdentity = { name: "Unnamed lead", email: null, phone: null };
 
 /**
  * Resolves what a lead should be called on screen.
@@ -23,13 +23,13 @@ export async function resolveLeadIdentities(supabase: Client, leadIds: string[])
   if (ids.length === 0) return identities;
 
   const [contacts, leads] = await Promise.all([
-    supabase.from("contacts").select("lead_id, full_name, email").in("lead_id", ids).eq("is_primary", true),
+    supabase.from("contacts").select("lead_id, full_name, email, phone").in("lead_id", ids).eq("is_primary", true),
     supabase.from("leads").select("id, prospect_id").in("id", ids),
   ]);
 
   const prospectIds = (leads.data ?? []).map((l) => l.prospect_id).filter((id): id is string => Boolean(id));
   const { data: prospects } = prospectIds.length
-    ? await supabase.from("prospects").select("id, company_name, contact_name, email").in("id", prospectIds)
+    ? await supabase.from("prospects").select("id, company_name, contact_name, email, phone").in("id", prospectIds)
     : { data: [] };
 
   const contactByLead = new Map((contacts.data ?? []).map((c) => [c.lead_id, c]));
@@ -41,6 +41,7 @@ export async function resolveLeadIdentities(supabase: Client, leadIds: string[])
     identities.set(lead.id, {
       name: contact?.full_name ?? prospect?.contact_name ?? prospect?.company_name ?? UNKNOWN.name,
       email: contact?.email ?? prospect?.email ?? null,
+      phone: contact?.phone ?? prospect?.phone ?? null,
     });
   }
 
