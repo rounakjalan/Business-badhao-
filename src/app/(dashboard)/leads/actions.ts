@@ -85,6 +85,45 @@ export async function updateLeadNotes(leadId: string, formData: FormData) {
   revalidatePath(`/leads/${leadId}`);
 }
 
+/**
+ * Adds a real contact to a lead — the app has no other way to attach an
+ * email address to a lead that didn't come with one from discovery, which
+ * blocks outreach entirely (sendLeadOutreachAction refuses with
+ * missing_email). The first contact added to a lead becomes primary,
+ * matching how resolveLeadIdentity/primaryContact already pick a contact
+ * everywhere else in the app.
+ */
+export async function addContactForLead(leadId: string, formData: FormData) {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return;
+
+  const fullName = String(formData.get("fullName") ?? "").trim();
+  const email = String(formData.get("email") ?? "").trim();
+  const phone = String(formData.get("phone") ?? "").trim();
+  const roleTitle = String(formData.get("roleTitle") ?? "").trim();
+
+  if (!fullName && !email) return;
+
+  const supabase = await createClient();
+  const { count } = await supabase
+    .from("contacts")
+    .select("id", { count: "exact", head: true })
+    .eq("lead_id", leadId)
+    .eq("organization_id", currentOrg.organizationId);
+
+  await supabase.from("contacts").insert({
+    organization_id: currentOrg.organizationId,
+    lead_id: leadId,
+    full_name: fullName || null,
+    email: email || null,
+    phone: phone || null,
+    role_title: roleTitle || null,
+    is_primary: (count ?? 0) === 0,
+  });
+
+  revalidatePath(`/leads/${leadId}`);
+}
+
 export async function quickCreateDealForLead(leadId: string, leadName: string) {
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) redirect("/onboarding");

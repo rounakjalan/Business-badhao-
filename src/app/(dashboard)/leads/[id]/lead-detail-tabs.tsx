@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import {
+  addContactForLead,
   generateLeadOutreachAction,
   quickCreateDealForLead,
   quickCreateTaskForLead,
@@ -94,6 +95,15 @@ export function LeadDetailTabs({
   const [editedBody, setEditedBody] = useState("");
   const [sendPending, startSendTransition] = useTransition();
   const [sendResult, setSendResult] = useState<SendOutreachResult | null>(null);
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [addContactPending, startAddContactTransition] = useTransition();
+
+  function submitAddContact(formData: FormData) {
+    startAddContactTransition(async () => {
+      await addContactForLead(lead.id, formData);
+      setShowAddContact(false);
+    });
+  }
 
   function runResearch() {
     setResearchError(null);
@@ -408,11 +418,18 @@ export function LeadDetailTabs({
               </DarkCard>
             ) : null}
             <DarkCard className="p-5">
-              <h4 className="mb-3 text-sm font-semibold text-bb-text">Contacts</h4>
+              <div className="mb-3 flex items-center justify-between">
+                <h4 className="text-sm font-semibold text-bb-text">Contacts</h4>
+                {!showAddContact ? (
+                  <DashButton variant="outline" onClick={() => setShowAddContact(true)}>
+                    + Add Contact
+                  </DashButton>
+                ) : null}
+              </div>
               {contacts.length === 0 ? (
-                <p className="text-sm text-bb-text-3">No contacts recorded yet.</p>
+                <p className="mb-3 text-sm text-bb-text-3">No contacts recorded yet.</p>
               ) : (
-                <div className="space-y-3">
+                <div className="mb-3 space-y-3">
                   {contacts.map((c) => (
                     <div key={c.id} className="flex items-center justify-between border-b border-bb-border/50 pb-2 last:border-0">
                       <div>
@@ -426,6 +443,41 @@ export function LeadDetailTabs({
                   ))}
                 </div>
               )}
+              {showAddContact ? (
+                <form action={submitAddContact} className="space-y-2 border-t border-bb-border pt-3">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <input
+                      name="fullName"
+                      placeholder="Full name"
+                      className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                    />
+                    <input
+                      name="email"
+                      type="email"
+                      placeholder="Email"
+                      className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                    />
+                    <input
+                      name="phone"
+                      placeholder="Phone (optional)"
+                      className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                    />
+                    <input
+                      name="roleTitle"
+                      placeholder="Role / title (optional)"
+                      className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                    />
+                  </div>
+                  <div className="flex gap-2 pt-1">
+                    <DashButton type="submit" variant="gradient" disabled={addContactPending}>
+                      {addContactPending ? "Saving…" : "Save Contact"}
+                    </DashButton>
+                    <DashButton variant="ghost" disabled={addContactPending} onClick={() => setShowAddContact(false)}>
+                      Cancel
+                    </DashButton>
+                  </div>
+                </form>
+              ) : null}
             </DarkCard>
           </div>
         ) : null}
