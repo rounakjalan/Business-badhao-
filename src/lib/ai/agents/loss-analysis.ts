@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
+import type { BuyingIntentSnapshot } from "@/lib/ai/agents/intent";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
@@ -46,8 +47,6 @@ export const LossAnalysisSchema = z.object({
 });
 
 export type LossAnalysis = z.infer<typeof LossAnalysisSchema>;
-
-export type BuyingIntentSnapshot = { at: string; buyingIntent: "low" | "medium" | "high" };
 
 export type LossAnalysisInput = {
   organizationId: string;

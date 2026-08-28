@@ -21,6 +21,9 @@ export const HIGH_INTENT_CATEGORIES: ReadonlySet<IntentCategory> = new Set(["HIG
 
 export type BuyingIntent = "low" | "medium" | "high";
 
+/** A single point in a conversation's real buying-intent history — see src/lib/intent-history.ts. */
+export type BuyingIntentSnapshot = { at: string; buyingIntent: BuyingIntent };
+
 const MEDIUM_INTENT_CATEGORIES: ReadonlySet<IntentCategory> = new Set(["CURIOUS", "INFORMATION_REQUEST", "PRICE_REQUEST", "OBJECTION", "QUALIFYING"]);
 
 /**

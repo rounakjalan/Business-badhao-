@@ -2,42 +2,17 @@
 
 import { revalidatePath } from "next/cache";
 import { runDealAgent, type DealAgentResult } from "@/lib/ai/agents/deal-agent";
-import { mapIntentToBuyingIntent, type IntentCategory } from "@/lib/ai/agents/intent";
-import { runLossAnalysis, type BuyingIntentSnapshot, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
+import type { BuyingIntentSnapshot } from "@/lib/ai/agents/intent";
+import { runLossAnalysis, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
 import { getBusinessContext, selectDealContext, selectLossAnalysisContext } from "@/lib/business-context";
 import { isClosedDealStage, isOpenDealStage } from "@/lib/deals";
+import { loadBuyingIntentHistory } from "@/lib/intent-history";
 import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
 
 export type DealActionResult = { ok: true } | { ok: false; message: string };
-
-/**
- * The deal's actual recorded buying-intent history, read from the same
- * conversation_events rows the conversation detail page's "Detect Intent"
- * action already writes (conversations/actions.ts detectIntentAction) —
- * never re-inferred here, just replayed in order.
- */
-async function loadBuyingIntentHistory(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  conversationId: string,
-  organizationId: string
-): Promise<BuyingIntentSnapshot[]> {
-  const { data } = await supabase
-    .from("conversation_events")
-    .select("payload, created_at")
-    .eq("conversation_id", conversationId)
-    .eq("organization_id", organizationId)
-    .eq("event_type", "intent_detected")
-    .order("created_at", { ascending: true });
-
-  return (data ?? []).flatMap((row) => {
-    const category = (row.payload as { intent?: string } | null)?.intent as IntentCategory | undefined;
-    if (!category) return [];
-    return [{ at: row.created_at, buyingIntent: mapIntentToBuyingIntent(category) }];
-  });
-}
 
 async function loadDealContext(dealId: string, organizationId: string) {
   const supabase = await createClient();

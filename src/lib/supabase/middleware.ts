@@ -9,6 +9,7 @@ const PROTECTED_PREFIXES = [
   "/leads",
   "/prospects",
   "/conversations",
+  "/buying-intent",
   "/deals",
   "/analytics",
   "/knowledge",

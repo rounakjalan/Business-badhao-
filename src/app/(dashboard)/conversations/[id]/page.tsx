@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { ConversationDetailClient } from "@/app/(dashboard)/conversations/[id]/conversation-detail-client";
+import { loadBuyingIntentHistory } from "@/lib/intent-history";
 import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
@@ -19,7 +20,7 @@ export default async function ConversationDetailPage({ params }: { params: Promi
 
   if (!conversation) notFound();
 
-  const [identity, lead, messages] = await Promise.all([
+  const [identity, lead, messages, buyingIntentHistory] = await Promise.all([
     resolveLeadIdentity(supabase, conversation.lead_id),
     supabase.from("leads").select("current_score").eq("id", conversation.lead_id).maybeSingle(),
     supabase
@@ -27,6 +28,7 @@ export default async function ConversationDetailPage({ params }: { params: Promi
       .select("id, direction, sender_type, body, subject, status, created_at")
       .eq("conversation_id", id)
       .order("created_at", { ascending: true }),
+    loadBuyingIntentHistory(supabase, id, currentOrg.organizationId),
   ]);
 
   return (
@@ -36,6 +38,7 @@ export default async function ConversationDetailPage({ params }: { params: Promi
       contactEmail={identity.email}
       leadScore={lead.data?.current_score ?? null}
       messages={messages.data ?? []}
+      buyingIntentHistory={buyingIntentHistory}
     />
   );
 }

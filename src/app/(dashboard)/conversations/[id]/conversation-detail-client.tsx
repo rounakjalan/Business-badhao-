@@ -38,6 +38,7 @@ type Message = {
   status?: string | null;
   created_at: string;
 };
+type BuyingIntentSnapshot = { at: string; buyingIntent: "low" | "medium" | "high" };
 
 const SENDER_LABEL: Record<string, string> = { lead: "Lead", agent: "AI", human: "You", system: "System" };
 
@@ -57,12 +58,14 @@ export function ConversationDetailClient({
   contactEmail,
   leadScore,
   messages,
+  buyingIntentHistory,
 }: {
   conversation: Conversation;
   contactName: string;
   contactEmail: string | null;
   leadScore: number | null;
   messages: Message[];
+  buyingIntentHistory: BuyingIntentSnapshot[];
 }) {
   const [reply, setReply] = useState("");
   const [isPending, startTransition] = useTransition();
@@ -239,6 +242,21 @@ export function ConversationDetailClient({
             <Row label="Status" val={<ConversationStatusBadge status={conversation.status} />} />
             <Row label="Intent" val={conversation.intent ?? "—"} />
             <Row label="Started" val={formatDate(conversation.created_at)} />
+          </div>
+          <div className="rounded-xl border border-bb-border bg-bb-navy-2 p-4">
+            <div className="mb-3 text-xs font-medium text-bb-text-3">BUYING INTENT HISTORY</div>
+            {buyingIntentHistory.length === 0 ? (
+              <p className="text-xs text-bb-text-3">Not detected yet — run Detect Intent below.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {buyingIntentHistory.map((snap, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2">
+                    <BuyingIntentBadge intent={snap.buyingIntent} />
+                    <span className="text-xs text-bb-text-3">{formatDate(snap.at)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <div className="rounded-xl border border-bb-border bg-bb-navy-2 p-4">
             <div className="mb-3 text-xs font-medium text-bb-text-3">LEAD</div>

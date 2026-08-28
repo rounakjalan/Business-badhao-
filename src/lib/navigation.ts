@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import {
   AnalyticsIcon,
+  BuyingIntentIcon,
   CampaignsIcon,
   ConversationsIcon,
   DashboardIcon,
@@ -26,6 +27,7 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Leads", href: "/leads", description: "Qualified prospects ready for outreach", icon: LeadsIcon },
   { label: "Prospects", href: "/prospects", description: "Discovered contacts being researched", icon: ProspectsIcon },
   { label: "Conversations", href: "/conversations", description: "Messages with leads", icon: ConversationsIcon },
+  { label: "Buying Intent", href: "/buying-intent", description: "Leads by AI-detected buying intent", icon: BuyingIntentIcon },
   { label: "Deals", href: "/deals", description: "Pipeline and deal tracking", icon: DealsIcon },
   { label: "Analytics", href: "/analytics", description: "Performance insights", icon: AnalyticsIcon },
   { label: "Knowledge", href: "/knowledge", description: "Knowledge base", icon: KnowledgeIcon },

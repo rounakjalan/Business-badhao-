@@ -61,6 +61,14 @@ export function DealsIcon(props: IconProps) {
   );
 }
 
+export function BuyingIntentIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 3c2.5 2.5 4 5 4 7.5a4 4 0 0 1-8 0c0-.9.3-1.8.8-2.7-.6.4-1.1 1-1.5 1.7A6 6 0 0 0 12 21a6 6 0 0 0 4.5-10 12 12 0 0 0-4.5-8Z" />
+    </svg>
+  );
+}
+
 export function AnalyticsIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

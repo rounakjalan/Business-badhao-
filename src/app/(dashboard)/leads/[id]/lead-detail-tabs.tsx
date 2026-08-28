@@ -18,7 +18,7 @@ import type { OutreachDraft } from "@/lib/ai/agents/outreach";
 import { ProspectResearchSchema } from "@/lib/ai/agents/prospect-research-schema";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkCard } from "@/components/dashboard-ui/card";
-import { LeadStatusBadge, QualificationBadge, ScorePill, TaskStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
+import { BuyingIntentBadge, LeadStatusBadge, QualificationBadge, ScorePill, TaskStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
 import type { ProspectRawData } from "@/lib/prospects";
@@ -39,6 +39,7 @@ type Lead = {
   qualification_status: string;
   current_score: number | null;
   intent: string | null;
+  buying_intent: "low" | "medium" | "high" | null;
   next_action: string | null;
   notes: string | null;
   created_at: string;
@@ -180,6 +181,7 @@ export function LeadDetailTabs({
                 <ScorePill score={lead.current_score} />
                 <LeadStatusBadge status={lead.status} />
                 <QualificationBadge status={lead.qualification_status} />
+                {lead.buying_intent ? <BuyingIntentBadge intent={lead.buying_intent} /> : null}
               </div>
             </div>
           </div>
