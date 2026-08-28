@@ -48,8 +48,22 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
       : Promise.resolve({ data: null }),
     supabase.from("tasks").select("id, title, status, due_at").eq("related_entity_type", "deal").eq("related_entity_id", id).order("created_at", { ascending: false }),
     supabase.from("deal_events").select("id, event_type, created_at").eq("deal_id", id).order("created_at", { ascending: false }),
-    supabase.from("loss_analysis").select("id, reason_category, summary, created_at").eq("deal_id", id).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    supabase
+      .from("loss_analysis")
+      .select("id, reason_category, summary, details, created_at")
+      .eq("organization_id", currentOrg.organizationId)
+      .eq("deal_id", id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ]);
+
+  const { data: recoveryAttempts } = await supabase
+    .from("recovery_attempts")
+    .select("id, status, notes, attempted_at, created_at")
+    .eq("organization_id", currentOrg.organizationId)
+    .eq("deal_id", id)
+    .order("created_at", { ascending: false });
 
   return (
     <DealDetailTabs
@@ -63,6 +77,7 @@ export default async function DealDetailPage({ params }: { params: Promise<{ id:
       tasks={tasks.data ?? []}
       events={events.data ?? []}
       lossAnalysis={lossAnalysis.data}
+      recoveryAttempts={recoveryAttempts ?? []}
     />
   );
 }

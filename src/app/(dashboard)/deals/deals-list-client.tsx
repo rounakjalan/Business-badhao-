@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/layout/page-header";
+import { DashButton } from "@/components/dashboard-ui/button";
 import { DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { DataTable } from "@/components/dashboard-ui/table";
 import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
@@ -49,6 +51,9 @@ export function DealsListClient({ deals }: { deals: Deal[] }) {
         }
         action={
           <div className="flex items-center gap-3">
+            <Link href="/deals/lost-intelligence">
+              <DashButton variant="ghost">Lost Deal Intelligence</DashButton>
+            </Link>
             <div className="flex overflow-hidden rounded-lg border border-bb-border">
               {(["pipeline", "list"] as const).map((v) => (
                 <button

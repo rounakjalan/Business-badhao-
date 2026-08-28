@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import {
+  createRecoveryAttempt,
   markDealLost,
   markDealWon,
   runDealAgentAction,
@@ -10,13 +11,14 @@ import {
   updateDeal,
   updateDealNotes,
   updateDealStage,
+  updateRecoveryAttemptStatus,
 } from "@/app/(dashboard)/deals/actions";
 import type { DealRecommendation } from "@/lib/ai/agents/deal-agent";
 import type { LossAnalysis } from "@/lib/ai/agents/loss-analysis";
 import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkAlert } from "@/components/dashboard-ui/alert";
 import { DarkCard } from "@/components/dashboard-ui/card";
-import { DealStatusBadge, ConversationStatusBadge, TaskStatusBadge } from "@/components/dashboard-ui/badge";
+import { BuyingIntentBadge, DealStatusBadge, ConversationStatusBadge, TaskStatusBadge } from "@/components/dashboard-ui/badge";
 import { SparklesIcon } from "@/components/ui/icons";
 import { DEAL_STAGE_LABELS, OPEN_DEAL_STAGES, isClosedDealStage } from "@/lib/deals";
 import { formatCurrency, formatDate } from "@/lib/format";
@@ -44,7 +46,15 @@ type ConversationRow = { id: string; channel: string; status: string } | null;
 type ContactRow = { full_name: string | null; email: string | null; phone: string | null; role_title: string | null } | null | undefined;
 type TaskRow = { id: string; title: string; status: string; due_at: string | null };
 type EventRow = { id: string; event_type: string; created_at: string };
-type LossAnalysisRow = { id: string; reason_category: string | null; summary: string | null; created_at: string } | null | undefined;
+/** What's actually stored in loss_analysis.details — see runLossAnalysisAction (deals/actions.ts). Partial because a deal marked Lost without AI analysis ever having run has an empty {} here. */
+type PersistedLossDetails = Partial<LossAnalysis> & {
+  buyingIntentHistory?: { at: string; buyingIntent: string }[];
+  currentBuyingIntent?: string | null;
+};
+type LossAnalysisRow = { id: string; reason_category: string | null; summary: string | null; details: unknown; created_at: string } | null | undefined;
+type RecoveryAttemptRow = { id: string; status: string; notes: string | null; attempted_at: string | null; created_at: string };
+
+const RECOVERY_STATUS_LABEL: Record<string, string> = { planned: "Planned", in_progress: "In Progress", succeeded: "Succeeded", failed: "Failed" };
 
 export function DealDetailTabs({
   deal,
@@ -57,6 +67,7 @@ export function DealDetailTabs({
   tasks,
   events,
   lossAnalysis,
+  recoveryAttempts,
 }: {
   deal: Deal;
   customerName: string;
@@ -68,6 +79,7 @@ export function DealDetailTabs({
   tasks: TaskRow[];
   events: EventRow[];
   lossAnalysis: LossAnalysisRow;
+  recoveryAttempts: RecoveryAttemptRow[];
 }) {
   const [tab, setTab] = useState<(typeof TABS)[number]>("Overview");
   const [isPending, startTransition] = useTransition();
@@ -80,7 +92,32 @@ export function DealDetailTabs({
   const [stageError, setStageError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [notes, setNotes] = useState(deal.notes ?? "");
+  const [recoveryNotes, setRecoveryNotes] = useState("");
+  const [recoveryPending, startRecoveryTransition] = useTransition();
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const isClosed = isClosedDealStage(deal.status);
+  const persistedDetails = (lossAnalysis?.details ?? null) as PersistedLossDetails | null;
+  // Prefer a freshly-run analysis in this session (immediately current) over
+  // what was last persisted; both come from the same shape.
+  const displayedAnalysis: PersistedLossDetails | null =
+    lossAnalysisResult && !("error" in lossAnalysisResult) ? lossAnalysisResult : persistedDetails;
+
+  function logRecoveryAttempt() {
+    setRecoveryError(null);
+    startRecoveryTransition(async () => {
+      const result = await createRecoveryAttempt(deal.id, recoveryNotes);
+      if (result.ok) setRecoveryNotes("");
+      else setRecoveryError(result.message);
+    });
+  }
+
+  function moveRecoveryAttempt(attemptId: string, status: string) {
+    setRecoveryError(null);
+    startRecoveryTransition(async () => {
+      const result = await updateRecoveryAttemptStatus(attemptId, deal.id, status);
+      if (!result.ok) setRecoveryError(result.message);
+    });
+  }
 
   function moveStage(stage: string) {
     setStageError(null);
@@ -372,33 +409,78 @@ export function DealDetailTabs({
               <DarkCard className="p-5">
                 <div className="mb-4 flex items-center justify-between border-b border-bb-border pb-3">
                   <h4 className="flex items-center gap-1.5 text-sm font-semibold text-bb-text">
-                    <SparklesIcon className="h-4 w-4 text-bb-indigo" /> AI Loss Analysis
+                    <SparklesIcon className="h-4 w-4 text-bb-indigo" /> Lost Deal Intelligence
                   </h4>
                   <DashButton variant="outline" disabled={aiPending} onClick={runAiLossAnalysis}>
-                    {aiPending ? "Analyzing…" : "Run AI Analysis"}
+                    {aiPending ? "Analyzing…" : displayedAnalysis ? "Re-run Analysis" : "Run AI Analysis"}
                   </DashButton>
                 </div>
-                {!lossAnalysisResult ? (
+                {lossAnalysisResult && "error" in lossAnalysisResult ? <p className="text-sm text-bb-rose">{lossAnalysisResult.error}</p> : null}
+                {!displayedAnalysis ? (
                   <p className="text-sm text-bb-text-3">
-                    Analyzes this deal&apos;s record and conversation to explain why it was lost and suggest changes.
+                    Analyzes this deal&apos;s real conversation, buying-intent history, and Business Knowledge to explain why it
+                    was lost — objections, pricing, product fit, timing, competitors — grounded only in what was actually
+                    said, never invented.
                   </p>
-                ) : "error" in lossAnalysisResult ? (
-                  <p className="text-sm text-bb-rose">{lossAnalysisResult.error}</p>
                 ) : (
-                  <div className="space-y-3 text-sm">
-                    <Row label="Primary reason" val={lossAnalysisResult.primaryReason.replaceAll("_", " ")} />
-                    <p className="text-bb-text-2">{lossAnalysisResult.summary}</p>
-                    <p className="text-xs text-bb-text-3">Root cause: {lossAnalysisResult.rootCause}</p>
-                    {lossAnalysisResult.lessons.length > 0 ? (
-                      <p className="text-xs text-bb-text-3">Lessons: {lossAnalysisResult.lessons.join("; ")}</p>
-                    ) : null}
-                    {lossAnalysisResult.recommendedCampaignChanges.length > 0 ? (
-                      <p className="text-xs text-bb-indigo-2">
-                        Campaign changes: {lossAnalysisResult.recommendedCampaignChanges.join("; ")}
-                      </p>
-                    ) : null}
-                  </div>
+                  <LossIntelligenceView analysis={displayedAnalysis} />
                 )}
+              </DarkCard>
+            ) : null}
+
+            {deal.status === "lost" ? (
+              <DarkCard className="p-5">
+                <h4 className="mb-1 text-sm font-semibold text-bb-text">Recovery Attempts</h4>
+                <p className="mb-4 text-xs text-bb-text-3">
+                  A record of what you&apos;ve tried, kept here for you to track — nothing is ever sent automatically. AI never
+                  contacts a lost customer.
+                </p>
+                {recoveryError ? <p className="mb-3 text-xs text-bb-rose">{recoveryError}</p> : null}
+                {recoveryAttempts.length > 0 ? (
+                  <div className="mb-4 space-y-2">
+                    {recoveryAttempts.map((r) => (
+                      <div key={r.id} className="rounded-lg border border-bb-border bg-bb-navy p-3 text-sm">
+                        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-medium text-bb-text-2">{RECOVERY_STATUS_LABEL[r.status] ?? r.status}</span>
+                          <span className="text-xs text-bb-text-3">{formatDate(r.attempted_at ?? r.created_at)}</span>
+                        </div>
+                        {r.notes ? <p className="text-xs text-bb-text-3">{r.notes}</p> : null}
+                        {r.status === "planned" || r.status === "in_progress" ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {r.status === "planned" ? (
+                              <DashButton variant="ghost" disabled={recoveryPending} onClick={() => moveRecoveryAttempt(r.id, "in_progress")}>
+                                Mark In Progress
+                              </DashButton>
+                            ) : null}
+                            <DashButton
+                              variant="ghost"
+                              className="border-bb-emerald/30 text-bb-emerald hover:bg-bb-emerald/10"
+                              disabled={recoveryPending}
+                              onClick={() => moveRecoveryAttempt(r.id, "succeeded")}
+                            >
+                              Mark Succeeded
+                            </DashButton>
+                            <DashButton variant="ghost" disabled={recoveryPending} onClick={() => moveRecoveryAttempt(r.id, "failed")}>
+                              Mark Failed
+                            </DashButton>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <textarea
+                  rows={2}
+                  value={recoveryNotes}
+                  onChange={(e) => setRecoveryNotes(e.target.value)}
+                  placeholder="What are you planning to try? e.g. Call to address the pricing objection with the smaller package."
+                  className="w-full resize-none rounded-lg border border-bb-border bg-bb-navy px-3 py-2 text-sm text-bb-text outline-none placeholder:text-bb-text-3 focus:border-bb-indigo"
+                />
+                <div className="mt-2">
+                  <DashButton variant="gradient" disabled={recoveryPending || !recoveryNotes.trim()} onClick={logRecoveryAttempt}>
+                    Log Recovery Attempt
+                  </DashButton>
+                </div>
               </DarkCard>
             ) : null}
           </div>
@@ -524,6 +606,106 @@ function DealEditForm({ deal, onDone }: { deal: Deal; onDone: () => void }) {
 
 function editFieldClass() {
   return "w-full rounded-lg border border-bb-border bg-bb-navy px-4 py-2.5 text-sm text-bb-text outline-none placeholder:text-bb-text-3 focus:border-bb-indigo";
+}
+
+/**
+ * Renders a loss_analysis.details record — either freshly returned by
+ * runLossAnalysisAction or read back from the database, same shape either
+ * way. Every section is optional and only renders when the field actually
+ * has content, since a deal marked Lost without AI analysis ever having run
+ * has an empty {} here, and even a real analysis can legitimately have
+ * empty arrays for categories with no evidence in the conversation.
+ */
+function LossIntelligenceView({ analysis }: { analysis: PersistedLossDetails }) {
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="flex flex-wrap items-center gap-3">
+        {analysis.primaryReason ? <Row label="Primary reason" val={analysis.primaryReason.replaceAll("_", " ")} /> : null}
+        {analysis.confidence ? <Row label="Confidence" val={analysis.confidence} /> : null}
+      </div>
+      {analysis.summary ? <p className="text-bb-text-2">{analysis.summary}</p> : null}
+      {analysis.rootCause ? <p className="text-xs text-bb-text-3">Root cause: {analysis.rootCause}</p> : null}
+      {analysis.productOrServiceInvolved ? <Row label="Product / service" val={analysis.productOrServiceInvolved} /> : null}
+
+      {analysis.currentBuyingIntent || (analysis.buyingIntentHistory && analysis.buyingIntentHistory.length > 0) ? (
+        <div className="border-t border-bb-navy-3 pt-3">
+          <div className="mb-1.5 text-xs font-medium text-bb-text-3">BUYING INTENT HISTORY</div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(analysis.buyingIntentHistory ?? []).map((snap, i) => (
+              <BuyingIntentBadge key={i} intent={snap.buyingIntent} />
+            ))}
+            {analysis.currentBuyingIntent ? (
+              <>
+                <span className="text-bb-border">→</span>
+                <BuyingIntentBadge intent={analysis.currentBuyingIntent} />
+                <span className="text-xs text-bb-text-3">at loss</span>
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      <ListSection title="Objections" items={analysis.objections} />
+      <ListSection title="Pricing concerns" items={analysis.pricingConcerns} />
+      <ListSection title="Product / service fit concerns" items={analysis.productFitConcerns} />
+      <ListSection title="Timing concerns" items={analysis.timingConcerns} />
+      <ListSection title="Competitor mentions" items={analysis.competitorMentions} />
+      <ListSection title="Communication issues" items={analysis.communicationIssues} />
+
+      {analysis.supportingEvidence && analysis.supportingEvidence.length > 0 ? (
+        <div className="border-t border-bb-navy-3 pt-3">
+          <div className="mb-1.5 text-xs font-medium text-bb-text-3">SUPPORTING EVIDENCE</div>
+          <div className="space-y-1">
+            {analysis.supportingEvidence.map((quote, i) => (
+              <p key={i} className="rounded bg-bb-navy-3 px-2 py-1 text-xs italic text-bb-text-2">
+                &ldquo;{quote}&rdquo;
+              </p>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {analysis.recoveryOpportunity ? (
+        <div className="border-t border-bb-navy-3 pt-3">
+          <div className="mb-1.5 flex items-center gap-2">
+            <span className="text-xs font-medium text-bb-text-3">RECOVERY OPPORTUNITY</span>
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                analysis.recoveryOpportunity.justified ? "bg-bb-emerald/15 text-bb-emerald" : "bg-bb-navy-3 text-bb-text-3"
+              }`}
+            >
+              {analysis.recoveryOpportunity.justified ? "Justified" : "Not justified"}
+            </span>
+          </div>
+          <p className="text-xs text-bb-text-3">{analysis.recoveryOpportunity.reasoning}</p>
+          {analysis.recoveryOpportunity.suggestedApproach ? (
+            <p className="mt-1.5 rounded-lg bg-bb-navy-3 p-2 text-xs text-bb-indigo-2">
+              Suggested approach (AI advisory — nothing is sent automatically): {analysis.recoveryOpportunity.suggestedApproach}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <ListSection title="Lessons" items={analysis.lessons} />
+      <ListSection title="Recommended campaign changes" items={analysis.recommendedCampaignChanges} indigo />
+      <ListSection title="Recommended ICP changes" items={analysis.recommendedIcpChanges} indigo />
+      <ListSection title="Recommended outreach changes" items={analysis.recommendedOutreachChanges} indigo />
+    </div>
+  );
+}
+
+function ListSection({ title, items, indigo = false }: { title: string; items: string[] | undefined; indigo?: boolean }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div className="border-t border-bb-navy-3 pt-3">
+      <div className="mb-1.5 text-xs font-medium text-bb-text-3">{title.toUpperCase()}</div>
+      <ul className={`list-inside list-disc space-y-0.5 text-xs ${indigo ? "text-bb-indigo-2" : "text-bb-text-3"}`}>
+        {items.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function Row({ label, val }: { label: string; val: string }) {

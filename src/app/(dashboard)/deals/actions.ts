@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { runDealAgent, type DealAgentResult } from "@/lib/ai/agents/deal-agent";
-import { runLossAnalysis, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
+import { mapIntentToBuyingIntent, type IntentCategory } from "@/lib/ai/agents/intent";
+import { runLossAnalysis, type BuyingIntentSnapshot, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
 import { getBusinessContext, selectDealContext, selectLossAnalysisContext } from "@/lib/business-context";
 import { isClosedDealStage, isOpenDealStage } from "@/lib/deals";
 import { resolveLeadIdentity } from "@/lib/lead-names";
@@ -12,12 +13,38 @@ import type { Json } from "@/types/database.types";
 
 export type DealActionResult = { ok: true } | { ok: false; message: string };
 
+/**
+ * The deal's actual recorded buying-intent history, read from the same
+ * conversation_events rows the conversation detail page's "Detect Intent"
+ * action already writes (conversations/actions.ts detectIntentAction) —
+ * never re-inferred here, just replayed in order.
+ */
+async function loadBuyingIntentHistory(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  conversationId: string,
+  organizationId: string
+): Promise<BuyingIntentSnapshot[]> {
+  const { data } = await supabase
+    .from("conversation_events")
+    .select("payload, created_at")
+    .eq("conversation_id", conversationId)
+    .eq("organization_id", organizationId)
+    .eq("event_type", "intent_detected")
+    .order("created_at", { ascending: true });
+
+  return (data ?? []).flatMap((row) => {
+    const category = (row.payload as { intent?: string } | null)?.intent as IntentCategory | undefined;
+    if (!category) return [];
+    return [{ at: row.created_at, buyingIntent: mapIntentToBuyingIntent(category) }];
+  });
+}
+
 async function loadDealContext(dealId: string, organizationId: string) {
   const supabase = await createClient();
 
   const { data: deal } = await supabase
     .from("deals")
-    .select("id, title, status, value, currency, loss_reason, lead_id, campaign_id")
+    .select("id, title, status, value, currency, loss_reason, lead_id, campaign_id, conversation_id")
     .eq("id", dealId)
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -27,25 +54,35 @@ async function loadDealContext(dealId: string, organizationId: string) {
   const [identity, campaign, conversation] = await Promise.all([
     deal.lead_id ? resolveLeadIdentity(supabase, deal.lead_id) : Promise.resolve(null),
     deal.campaign_id ? supabase.from("campaigns").select("objective").eq("id", deal.campaign_id).maybeSingle() : Promise.resolve({ data: null }),
-    deal.lead_id
-      ? supabase
-          .from("conversations")
-          .select("id, channel")
-          .eq("lead_id", deal.lead_id)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle()
-      : Promise.resolve({ data: null }),
+    // Prefer the specific conversation this deal was created from; fall
+    // back to the lead's most recent one for deals created before that
+    // link existed.
+    deal.conversation_id
+      ? supabase.from("conversations").select("id, channel, buying_intent").eq("id", deal.conversation_id).maybeSingle()
+      : deal.lead_id
+        ? supabase
+            .from("conversations")
+            .select("id, channel, buying_intent")
+            .eq("lead_id", deal.lead_id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
   ]);
 
   let messages: { direction: string; senderType: string; body: string }[] = [];
+  let buyingIntentHistory: BuyingIntentSnapshot[] = [];
   if (conversation.data?.id) {
-    const { data } = await supabase
-      .from("messages")
-      .select("direction, sender_type, body")
-      .eq("conversation_id", conversation.data.id)
-      .order("created_at", { ascending: true });
-    messages = (data ?? []).map((m) => ({ direction: m.direction, senderType: m.sender_type, body: m.body ?? "" }));
+    const [messagesRes, history] = await Promise.all([
+      supabase
+        .from("messages")
+        .select("direction, sender_type, body")
+        .eq("conversation_id", conversation.data.id)
+        .order("created_at", { ascending: true }),
+      loadBuyingIntentHistory(supabase, conversation.data.id, organizationId),
+    ]);
+    messages = (messagesRes.data ?? []).map((m) => ({ direction: m.direction, senderType: m.sender_type, body: m.body ?? "" }));
+    buyingIntentHistory = history;
   }
 
   return {
@@ -54,6 +91,8 @@ async function loadDealContext(dealId: string, organizationId: string) {
     campaignObjective: campaign.data?.objective ?? null,
     channel: conversation.data?.channel ?? null,
     messages,
+    buyingIntentHistory,
+    currentBuyingIntent: conversation.data?.buying_intent ?? null,
   };
 }
 
@@ -110,25 +149,45 @@ export async function runLossAnalysisAction(dealId: string): Promise<LossAnalysi
     leadName: context.leadName,
     campaignObjective: context.campaignObjective,
     messages: context.messages,
+    buyingIntentHistory: context.buyingIntentHistory,
+    currentBuyingIntent: context.currentBuyingIntent,
     businessContext: selectLossAnalysisContext(businessContext),
   });
 
   if (result.ok) {
     const supabase = await createClient();
     const a = result.analysis;
+    // buyingIntentHistory/currentBuyingIntent are the real recorded data fed
+    // into the model above (see loadBuyingIntentHistory) — stored alongside
+    // its analysis so the deal page and the aggregate Lost Deal Intelligence
+    // view can show them without re-deriving them from conversation_events
+    // every render.
     const details: Json = {
       primaryReason: a.primaryReason,
       secondaryReasons: a.secondaryReasons,
+      confidence: a.confidence,
       rootCause: a.rootCause,
+      objections: a.objections,
+      pricingConcerns: a.pricingConcerns,
+      productFitConcerns: a.productFitConcerns,
+      timingConcerns: a.timingConcerns,
+      competitorMentions: a.competitorMentions,
+      communicationIssues: a.communicationIssues,
+      supportingEvidence: a.supportingEvidence,
+      productOrServiceInvolved: a.productOrServiceInvolved,
+      recoveryOpportunity: a.recoveryOpportunity,
       lessons: a.lessons,
       recommendedCampaignChanges: a.recommendedCampaignChanges,
       recommendedIcpChanges: a.recommendedIcpChanges,
       recommendedOutreachChanges: a.recommendedOutreachChanges,
-    };
+      buyingIntentHistory: context.buyingIntentHistory,
+      currentBuyingIntent: context.currentBuyingIntent,
+    } as unknown as Json;
 
     const { data: existing } = await supabase
       .from("loss_analysis")
       .select("id")
+      .eq("organization_id", currentOrg.organizationId)
       .eq("deal_id", dealId)
       .order("created_at", { ascending: false })
       .limit(1)
@@ -147,6 +206,7 @@ export async function runLossAnalysisAction(dealId: string): Promise<LossAnalysi
     }
 
     revalidatePath(`/deals/${dealId}`);
+    revalidatePath("/deals/lost-intelligence");
   }
 
   return result;
@@ -325,5 +385,82 @@ export async function updateDealNotes(dealId: string, formData: FormData): Promi
   if (!data) return { ok: false, message: "Deal not found." };
 
   revalidatePath(`/deals/${dealId}`);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Recovery attempts. A recovery_attempts row is a human's record of trying
+// (or planning to try) to re-engage a lost customer — a call they made, an
+// email they sent by hand, a follow-up they're planning. Nothing here ever
+// contacts anyone: there is no send path, no channel, no message body. The
+// AI's only involvement anywhere near this is loss-analysis's
+// recoveryOpportunity field, which is advisory text a human reads, not an
+// action it can trigger.
+// ---------------------------------------------------------------------------
+
+export type RecoveryAttemptStatus = "planned" | "in_progress" | "succeeded" | "failed";
+const RECOVERY_ATTEMPT_STATUSES: readonly RecoveryAttemptStatus[] = ["planned", "in_progress", "succeeded", "failed"];
+
+export async function createRecoveryAttempt(dealId: string, notes: string): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to log a recovery attempt." };
+
+  const supabase = await createClient();
+  const { data: deal } = await supabase
+    .from("deals")
+    .select("id, status")
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!deal) return { ok: false, message: "Deal not found." };
+  if (deal.status !== "lost") return { ok: false, message: "Recovery attempts can only be logged on a deal marked Lost." };
+
+  const { data: lossAnalysis } = await supabase
+    .from("loss_analysis")
+    .select("id")
+    .eq("organization_id", currentOrg.organizationId)
+    .eq("deal_id", dealId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const { error } = await supabase.from("recovery_attempts").insert({
+    organization_id: currentOrg.organizationId,
+    deal_id: dealId,
+    loss_analysis_id: lossAnalysis?.id ?? null,
+    status: "planned",
+    notes: notes.trim() || null,
+  });
+  if (error) return { ok: false, message: error.message };
+
+  revalidatePath(`/deals/${dealId}`);
+  revalidatePath("/deals/lost-intelligence");
+  return { ok: true };
+}
+
+export async function updateRecoveryAttemptStatus(attemptId: string, dealId: string, rawStatus: string): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to update this recovery attempt." };
+  if (!RECOVERY_ATTEMPT_STATUSES.includes(rawStatus as RecoveryAttemptStatus)) {
+    return { ok: false, message: "Not a valid recovery attempt status." };
+  }
+  const status = rawStatus as RecoveryAttemptStatus;
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("recovery_attempts")
+    .update(status === "planned" ? { status } : { status, attempted_at: new Date().toISOString() })
+    .eq("id", attemptId)
+    .eq("deal_id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) return { ok: false, message: error.message };
+  if (!data) return { ok: false, message: "Recovery attempt not found." };
+
+  revalidatePath(`/deals/${dealId}`);
+  revalidatePath("/deals/lost-intelligence");
   return { ok: true };
 }
