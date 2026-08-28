@@ -1,3 +1,4 @@
+import { OPEN_DEAL_STAGES } from "@/lib/deals";
 import { resolveLeadIdentities } from "@/lib/lead-names";
 import { createClient } from "@/lib/supabase/server";
 
@@ -66,8 +67,8 @@ export async function getDashboardStats(organizationId: string): Promise<Dashboa
       .from("deals")
       .select("*", { count: "exact", head: true })
       .eq("organization_id", organizationId)
-      .in("status", ["open", "negotiation"]),
-    supabase.from("deals").select("value, currency").eq("organization_id", organizationId).in("status", ["open", "negotiation"]),
+      .in("status", OPEN_DEAL_STAGES),
+    supabase.from("deals").select("value, currency").eq("organization_id", organizationId).in("status", OPEN_DEAL_STAGES),
     supabase
       .from("deals")
       .select("value, currency")
@@ -238,7 +239,7 @@ export async function getOpenDeals(organizationId: string, limit = 5): Promise<O
     .from("deals")
     .select("id, title, status, value, currency, probability, expected_close_date")
     .eq("organization_id", organizationId)
-    .in("status", ["open", "negotiation"])
+    .in("status", OPEN_DEAL_STAGES)
     .order("created_at", { ascending: false })
     .limit(limit);
 

@@ -4,10 +4,13 @@ import { revalidatePath } from "next/cache";
 import { runDealAgent, type DealAgentResult } from "@/lib/ai/agents/deal-agent";
 import { runLossAnalysis, type LossAnalysisResult } from "@/lib/ai/agents/loss-analysis";
 import { getBusinessContext, selectDealContext, selectLossAnalysisContext } from "@/lib/business-context";
+import { isClosedDealStage, isOpenDealStage } from "@/lib/deals";
 import { resolveLeadIdentity } from "@/lib/lead-names";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/types/database.types";
+
+export type DealActionResult = { ok: true } | { ok: false; message: string };
 
 async function loadDealContext(dealId: string, organizationId: string) {
   const supabase = await createClient();
@@ -149,48 +152,178 @@ export async function runLossAnalysisAction(dealId: string): Promise<LossAnalysi
   return result;
 }
 
-export async function markDealWon(dealId: string) {
-  const supabase = await createClient();
-  const { data: deal } = await supabase.from("deals").select("organization_id").eq("id", dealId).maybeSingle();
-  await supabase.from("deals").update({ status: "won", won_at: new Date().toISOString() }).eq("id", dealId);
+/**
+ * Closes a deal as Won. This — and markDealLost below — are the only two
+ * places deals.status is ever set to a closed value: the AI deal agent
+ * only recommends (runDealAgentAction, above), it never has write access to
+ * this table, and updateDealStage (below) explicitly refuses closed stages.
+ * Closing a deal is always this human-initiated action.
+ */
+export async function markDealWon(dealId: string): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to close this deal." };
 
-  if (deal) {
-    await supabase.from("deal_events").insert({ organization_id: deal.organization_id, deal_id: dealId, event_type: "won" });
-  }
+  const supabase = await createClient();
+  const { data: deal } = await supabase
+    .from("deals")
+    .select("id, status")
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!deal) return { ok: false, message: "Deal not found." };
+  if (deal.status === "lost") return { ok: false, message: "This deal was already marked Lost." };
+  if (deal.status === "won") return { ok: true };
+
+  const { error } = await supabase
+    .from("deals")
+    .update({ status: "won", won_at: new Date().toISOString() })
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId);
+  if (error) return { ok: false, message: error.message };
+
+  await supabase.from("deal_events").insert({ organization_id: currentOrg.organizationId, deal_id: dealId, event_type: "won" });
 
   revalidatePath(`/deals/${dealId}`);
   revalidatePath("/deals");
   revalidatePath("/dashboard");
+  return { ok: true };
 }
 
-export async function markDealLost(dealId: string, lossReason: string) {
+/**
+ * Closes a deal as Lost. The loss_analysis row this writes is the same
+ * record the (separate, not-yet-built) Lost Deal Intelligence phase will
+ * read from later — recording it here is preserving this existing
+ * behavior, not starting that phase.
+ */
+export async function markDealLost(dealId: string, lossReason: string): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to close this deal." };
+  if (!lossReason.trim()) return { ok: false, message: "Select a loss reason first." };
+
   const supabase = await createClient();
-  const { data: deal } = await supabase.from("deals").select("organization_id").eq("id", dealId).maybeSingle();
+  const { data: deal } = await supabase
+    .from("deals")
+    .select("id, status")
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!deal) return { ok: false, message: "Deal not found." };
+  if (deal.status === "won") return { ok: false, message: "This deal was already marked Won." };
+
+  const { error } = await supabase
+    .from("deals")
+    .update({ status: "lost", lost_at: new Date().toISOString(), loss_reason: lossReason })
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId);
+  if (error) return { ok: false, message: error.message };
+
+  await supabase.from("deal_events").insert({ organization_id: currentOrg.organizationId, deal_id: dealId, event_type: "lost" });
+  await supabase.from("loss_analysis").insert({ organization_id: currentOrg.organizationId, deal_id: dealId, reason_category: lossReason });
+
+  revalidatePath(`/deals/${dealId}`);
+  revalidatePath("/deals");
+  revalidatePath("/dashboard");
+  return { ok: true };
+}
+
+/**
+ * Moves a deal between the four open stages (New, Qualified, Proposal /
+ * Product Info, Payment Pending). Deliberately cannot reach Won or Lost —
+ * closing a deal always goes through markDealWon/markDealLost, which
+ * record the outcome timestamp a plain stage move wouldn't.
+ */
+export async function updateDealStage(dealId: string, stage: string): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to move this deal." };
+  if (!isOpenDealStage(stage)) {
+    return { ok: false, message: "Use Mark Won or Mark Lost to close a deal." };
+  }
+
+  const supabase = await createClient();
+  const { data: deal } = await supabase
+    .from("deals")
+    .select("id, status")
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!deal) return { ok: false, message: "Deal not found." };
+  if (isClosedDealStage(deal.status)) return { ok: false, message: "This deal is already closed." };
+
+  const { error } = await supabase
+    .from("deals")
+    .update({ status: stage })
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId);
+  if (error) return { ok: false, message: error.message };
 
   await supabase
-    .from("deals")
-    .update({ status: "lost", lost_at: new Date().toISOString(), loss_reason: lossReason || null })
-    .eq("id", dealId);
-
-  if (deal) {
-    await supabase.from("deal_events").insert({ organization_id: deal.organization_id, deal_id: dealId, event_type: "lost" });
-    if (lossReason) {
-      await supabase.from("loss_analysis").insert({
-        organization_id: deal.organization_id,
-        deal_id: dealId,
-        reason_category: lossReason,
-      });
-    }
-  }
+    .from("deal_events")
+    .insert({ organization_id: currentOrg.organizationId, deal_id: dealId, event_type: "stage_changed", payload: { to: stage } as unknown as Json });
 
   revalidatePath(`/deals/${dealId}`);
   revalidatePath("/deals");
-  revalidatePath("/dashboard");
+  return { ok: true };
 }
 
-export async function updateDealStage(dealId: string, status: "open" | "negotiation" | "won" | "lost") {
+/** Edits a deal's own core fields — does not touch stage, notes, or the acquisition-path links. */
+export async function updateDeal(
+  dealId: string,
+  input: { title: string; value: number; currency: string; expectedCloseDate: string | null; probability: number | null }
+): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to edit this deal." };
+
+  const title = input.title.trim();
+  if (!title) return { ok: false, message: "Deal title is required." };
+  if (!Number.isFinite(input.value) || input.value < 0) return { ok: false, message: "Value must be zero or greater." };
+  if (input.probability !== null && (input.probability < 0 || input.probability > 100)) {
+    return { ok: false, message: "Probability must be between 0 and 100." };
+  }
+
   const supabase = await createClient();
-  await supabase.from("deals").update({ status }).eq("id", dealId);
+  const { data, error } = await supabase
+    .from("deals")
+    .update({
+      title,
+      value: input.value,
+      currency: input.currency.trim() || "INR",
+      expected_close_date: input.expectedCloseDate || null,
+      probability: input.probability,
+    })
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) return { ok: false, message: error.message };
+  if (!data) return { ok: false, message: "Deal not found." };
+
   revalidatePath(`/deals/${dealId}`);
   revalidatePath("/deals");
+  return { ok: true };
+}
+
+export async function updateDealNotes(dealId: string, formData: FormData): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to save notes." };
+
+  const notes = String(formData.get("notes") ?? "");
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("deals")
+    .update({ notes: notes || null })
+    .eq("id", dealId)
+    .eq("organization_id", currentOrg.organizationId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) return { ok: false, message: error.message };
+  if (!data) return { ok: false, message: "Deal not found." };
+
+  revalidatePath(`/deals/${dealId}`);
+  return { ok: true };
 }

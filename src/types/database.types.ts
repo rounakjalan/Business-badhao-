@@ -682,8 +682,10 @@ export interface Database {
           organization_id: string;
           lead_id: string | null;
           campaign_id: string | null;
+          conversation_id: string | null;
+          contact_id: string | null;
           title: string;
-          status: "open" | "negotiation" | "won" | "lost";
+          status: "new" | "qualified" | "proposal" | "payment_pending" | "won" | "lost";
           value: number;
           currency: string;
           probability: number | null;
@@ -691,6 +693,7 @@ export interface Database {
           won_at: string | null;
           lost_at: string | null;
           loss_reason: string | null;
+          notes: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -699,8 +702,10 @@ export interface Database {
           organization_id: string;
           lead_id?: string | null;
           campaign_id?: string | null;
+          conversation_id?: string | null;
+          contact_id?: string | null;
           title: string;
-          status?: "open" | "negotiation" | "won" | "lost";
+          status?: "new" | "qualified" | "proposal" | "payment_pending" | "won" | "lost";
           value?: number;
           currency?: string;
           probability?: number | null;
@@ -708,6 +713,7 @@ export interface Database {
           won_at?: string | null;
           lost_at?: string | null;
           loss_reason?: string | null;
+          notes?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -716,8 +722,10 @@ export interface Database {
           organization_id?: string;
           lead_id?: string | null;
           campaign_id?: string | null;
+          conversation_id?: string | null;
+          contact_id?: string | null;
           title?: string;
-          status?: "open" | "negotiation" | "won" | "lost";
+          status?: "new" | "qualified" | "proposal" | "payment_pending" | "won" | "lost";
           value?: number;
           currency?: string;
           probability?: number | null;
@@ -725,6 +733,7 @@ export interface Database {
           won_at?: string | null;
           lost_at?: string | null;
           loss_reason?: string | null;
+          notes?: string | null;
           created_at?: string;
           updated_at?: string;
         };

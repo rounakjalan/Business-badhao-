@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import {
+  createDealFromConversation,
   detectIntentAction,
   handBackToAi,
   runFollowUpAction,
@@ -68,6 +69,7 @@ export function ConversationDetailClient({
   const [aiPending, startAiTransition] = useTransition();
   const [sendPending, startSendTransition] = useTransition();
   const [ownerPending, startOwnerTransition] = useTransition();
+  const [dealPending, startDealTransition] = useTransition();
   const [intentResult, setIntentResult] = useState<IntentAnalysis | { error: string } | null>(null);
   const [followUpResult, setFollowUpResult] = useState<FollowUpPlan | { error: string } | null>(null);
   const [sendResult, setSendResult] = useState<SendMessageResult | null>(null);
@@ -117,6 +119,13 @@ export function ConversationDetailClient({
             <Link href={`/leads/${conversation.lead_id}`}>
               <DashButton variant="ghost">View Lead</DashButton>
             </Link>
+            <DashButton
+              variant={conversation.buying_intent === "high" ? "gradient" : "ghost"}
+              disabled={dealPending}
+              onClick={() => startDealTransition(() => createDealFromConversation(conversation.id))}
+            >
+              {dealPending ? "Creating…" : "Create Deal"}
+            </DashButton>
             {conversation.owner === "ai" ? (
               <DashButton
                 variant="ghost"

@@ -7,6 +7,7 @@ import { DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { DataTable } from "@/components/dashboard-ui/table";
 import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
 import { DealsIcon } from "@/components/ui/icons";
+import { DEAL_STAGES, DEAL_STAGE_LABELS } from "@/lib/deals";
 import { formatCurrency, formatDate } from "@/lib/format";
 
 type Deal = {
@@ -20,10 +21,12 @@ type Deal = {
   created_at: string;
 };
 
-const STAGES = ["open", "negotiation", "won", "lost"] as const;
+const STAGES = DEAL_STAGES;
 const STAGE_COLOR: Record<string, string> = {
-  open: "bg-bb-indigo",
-  negotiation: "bg-bb-amber",
+  new: "bg-bb-indigo",
+  qualified: "bg-bb-sky",
+  proposal: "bg-bb-amber",
+  payment_pending: "bg-bb-violet",
   won: "bg-bb-emerald",
   lost: "bg-bb-rose",
 };
@@ -66,15 +69,15 @@ export function DealsListClient({ deals }: { deals: Deal[] }) {
       {deals.length === 0 ? (
         <DarkEmptyState icon={DealsIcon} title="No deals yet" description="Deals created from your conversations and leads will be tracked here." />
       ) : view === "pipeline" ? (
-        <div className="bb-stagger grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="bb-stagger grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           {STAGES.map((stage) => {
             const stageDeals = deals.filter((d) => d.status === stage);
             return (
               <div key={stage} className="bb-stagger-item">
                 <div className="mb-3 flex items-center justify-between px-1">
                   <div className="flex items-center gap-2">
-                    <span className={`h-2 w-2 rounded-full ${STAGE_COLOR[stage]}`} />
-                    <span className="text-xs font-semibold capitalize text-bb-text-2">{stage}</span>
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${STAGE_COLOR[stage]}`} />
+                    <span className="text-xs font-semibold text-bb-text-2">{DEAL_STAGE_LABELS[stage]}</span>
                   </div>
                   <span className="font-jetbrains text-xs text-bb-text-3">{stageDeals.length}</span>
                 </div>

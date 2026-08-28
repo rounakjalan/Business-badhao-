@@ -58,7 +58,10 @@ const CONVERSATION_STATUS_COLOR: Record<string, BadgeColor> = {
 };
 
 const DEAL_STATUS_COLOR: Record<string, BadgeColor> = {
-  open: "indigo",
+  new: "indigo",
+  qualified: "sky",
+  proposal: "amber",
+  payment_pending: "violet",
   won: "emerald",
   lost: "rose",
 };

@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { detectIntent, mapIntentToBuyingIntent, type IntentDetectionResult } from "@/lib/ai/agents/intent";
 import { runFollowUp, type FollowUpResult } from "@/lib/ai/agents/follow-up";
 import { getBusinessContext, selectFollowUpContext, selectIntentProductNames } from "@/lib/business-context";
@@ -289,6 +290,52 @@ export async function updateConversationStatus(conversationId: string, status: "
   await supabase.from("conversations").update({ status }).eq("id", conversationId);
   revalidatePath(`/conversations/${conversationId}`);
   revalidatePath("/conversations");
+}
+
+/**
+ * Creates a deal directly from a conversation — the entry point for turning
+ * a high-intent conversation into a Deal (mirrors quickCreateDealForLead in
+ * leads/actions.ts, but also records the specific conversation and contact
+ * it came from, which that lead-level entry point cannot know). Same
+ * silent-no-op-then-redirect shape as that function.
+ */
+export async function createDealFromConversation(conversationId: string) {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/onboarding");
+
+  const supabase = await createClient();
+  const { data: conversation } = await supabase
+    .from("conversations")
+    .select("id, lead_id")
+    .eq("id", conversationId)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!conversation) return;
+
+  const [identity, { data: lead }, { data: primaryContact }] = await Promise.all([
+    resolveLeadIdentity(supabase, conversation.lead_id),
+    supabase.from("leads").select("campaign_id").eq("id", conversation.lead_id).eq("organization_id", currentOrg.organizationId).maybeSingle(),
+    supabase.from("contacts").select("id").eq("lead_id", conversation.lead_id).eq("is_primary", true).maybeSingle(),
+  ]);
+
+  const { data: deal, error } = await supabase
+    .from("deals")
+    .insert({
+      organization_id: currentOrg.organizationId,
+      lead_id: conversation.lead_id,
+      campaign_id: lead?.campaign_id ?? null,
+      conversation_id: conversation.id,
+      contact_id: primaryContact?.id ?? null,
+      title: `Deal with ${identity.name}`,
+      status: "new",
+      value: 0,
+    })
+    .select("id")
+    .single();
+
+  if (error || !deal) return;
+  redirect(`/deals/${deal.id}`);
 }
 
 /**

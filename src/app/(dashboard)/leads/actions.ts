@@ -129,7 +129,10 @@ export async function quickCreateDealForLead(leadId: string, leadName: string) {
   if (!currentOrg) redirect("/onboarding");
 
   const supabase = await createClient();
-  const { data: lead } = await supabase.from("leads").select("campaign_id").eq("id", leadId).maybeSingle();
+  const [{ data: lead }, { data: primaryContact }] = await Promise.all([
+    supabase.from("leads").select("campaign_id").eq("id", leadId).eq("organization_id", currentOrg.organizationId).maybeSingle(),
+    supabase.from("contacts").select("id").eq("lead_id", leadId).eq("is_primary", true).maybeSingle(),
+  ]);
 
   const { data: deal, error } = await supabase
     .from("deals")
@@ -137,8 +140,9 @@ export async function quickCreateDealForLead(leadId: string, leadName: string) {
       organization_id: currentOrg.organizationId,
       lead_id: leadId,
       campaign_id: lead?.campaign_id ?? null,
+      contact_id: primaryContact?.id ?? null,
       title: `Deal with ${leadName}`,
-      status: "open",
+      status: "new",
       value: 0,
     })
     .select("id")
