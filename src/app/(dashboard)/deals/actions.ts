@@ -439,3 +439,34 @@ export async function updateRecoveryAttemptStatus(attemptId: string, dealId: str
   revalidatePath("/deals/lost-intelligence");
   return { ok: true };
 }
+
+/**
+ * One-click follow-up task for a deal — the same "quick add" pattern
+ * quickCreateTaskForLead (leads/actions.ts) already uses, extended to the
+ * one entity type that was missing it. The deal detail page's Tasks tab
+ * already reads tasks with related_entity_type "deal" (see deals/[id]/page.tsx)
+ * but had no writer, so it was always empty. Deliberately not automatic:
+ * this app has no precedent for a system event silently creating a task —
+ * even the AI-suggested follow-up on a conversation only becomes a task
+ * when a human clicks for it (runFollowUpAction, conversations/actions.ts).
+ */
+export async function quickCreateTaskForDeal(dealId: string, dealTitle: string): Promise<DealActionResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to add a task." };
+
+  const supabase = await createClient();
+  const { data: deal } = await supabase.from("deals").select("id").eq("id", dealId).eq("organization_id", currentOrg.organizationId).maybeSingle();
+  if (!deal) return { ok: false, message: "Deal not found." };
+
+  const { error } = await supabase.from("tasks").insert({
+    organization_id: currentOrg.organizationId,
+    title: `Follow up on ${dealTitle}`,
+    related_entity_type: "deal",
+    related_entity_id: dealId,
+  });
+  if (error) return { ok: false, message: error.message };
+
+  revalidatePath(`/deals/${dealId}`);
+  revalidatePath("/tasks");
+  return { ok: true };
+}

@@ -6,6 +6,7 @@ import {
   createRecoveryAttempt,
   markDealLost,
   markDealWon,
+  quickCreateTaskForDeal,
   runDealAgentAction,
   runLossAnalysisAction,
   updateDeal,
@@ -95,6 +96,16 @@ export function DealDetailTabs({
   const [recoveryNotes, setRecoveryNotes] = useState("");
   const [recoveryPending, startRecoveryTransition] = useTransition();
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [taskPending, startTaskTransition] = useTransition();
+  const [taskError, setTaskError] = useState<string | null>(null);
+
+  function addTask() {
+    setTaskError(null);
+    startTaskTransition(async () => {
+      const result = await quickCreateTaskForDeal(deal.id, deal.title);
+      if (!result.ok) setTaskError(result.message);
+    });
+  }
   const isClosed = isClosedDealStage(deal.status);
   const persistedDetails = (lossAnalysis?.details ?? null) as PersistedLossDetails | null;
   // Prefer a freshly-run analysis in this session (immediately current) over
@@ -331,19 +342,28 @@ export function DealDetailTabs({
         ) : null}
 
         {tab === "Tasks" ? (
-          tasks.length === 0 ? (
-            <p className="py-16 text-center text-sm text-bb-text-3">No tasks for this deal yet.</p>
-          ) : (
-            <div className="max-w-2xl space-y-2">
-              {tasks.map((t) => (
-                <div key={t.id} className="flex items-center justify-between rounded-xl border border-bb-border bg-bb-navy-2 p-4">
-                  <span className="text-sm text-bb-text">{t.title}</span>
-                  <TaskStatusBadge status={t.status} />
-                  <span className="text-xs text-bb-text-3">Due {formatDate(t.due_at)}</span>
-                </div>
-              ))}
+          <div className="max-w-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-bb-text-3">Tasks linked to this deal — also visible on the Tasks tab.</p>
+              <DashButton variant="outline" disabled={taskPending} onClick={addTask}>
+                {taskPending ? "Adding…" : "+ Add Task"}
+              </DashButton>
             </div>
-          )
+            {taskError ? <p className="text-xs text-bb-rose">{taskError}</p> : null}
+            {tasks.length === 0 ? (
+              <p className="py-16 text-center text-sm text-bb-text-3">No tasks for this deal yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {tasks.map((t) => (
+                  <div key={t.id} className="flex items-center justify-between rounded-xl border border-bb-border bg-bb-navy-2 p-4">
+                    <span className="text-sm text-bb-text">{t.title}</span>
+                    <TaskStatusBadge status={t.status} />
+                    <span className="text-xs text-bb-text-3">Due {formatDate(t.due_at)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         ) : null}
 
         {tab === "Timeline" ? (
