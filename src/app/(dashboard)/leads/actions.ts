@@ -6,6 +6,7 @@ import type { ProspectResearchResult } from "@/lib/ai/agents/prospect-research";
 import type { LeadQualificationResult } from "@/lib/ai/agents/qualification";
 import { generateOutreach, type OutreachGeneratorResult } from "@/lib/ai/agents/outreach";
 import { getBusinessContext, selectOutreachContext } from "@/lib/business-context";
+import { OPEN_DEAL_STAGES } from "@/lib/deals";
 import { sendGmailMessage } from "@/lib/gmail/send";
 import { getConnectionStatus, type ConnectedAccountStatus } from "@/lib/gmail/tokens";
 import { resolveLeadIdentity } from "@/lib/lead-names";
@@ -129,6 +130,23 @@ export async function quickCreateDealForLead(leadId: string, leadName: string) {
   if (!currentOrg) redirect("/onboarding");
 
   const supabase = await createClient();
+
+  // A lead can genuinely earn a second deal once an earlier one has
+  // closed (won or lost) — but while one is still open, "Create Deal"
+  // should never spawn a second, competing one for the same lead. Route
+  // back to the existing open deal instead.
+  const { data: existingOpenDeal } = await supabase
+    .from("deals")
+    .select("id")
+    .eq("lead_id", leadId)
+    .eq("organization_id", currentOrg.organizationId)
+    .in("status", OPEN_DEAL_STAGES)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingOpenDeal) redirect(`/deals/${existingOpenDeal.id}`);
+
   const [{ data: lead }, { data: primaryContact }] = await Promise.all([
     supabase.from("leads").select("campaign_id").eq("id", leadId).eq("organization_id", currentOrg.organizationId).maybeSingle(),
     supabase.from("contacts").select("id").eq("lead_id", leadId).eq("is_primary", true).maybeSingle(),

@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { detectIntent, mapIntentToBuyingIntent, type IntentDetectionResult } from "@/lib/ai/agents/intent";
 import { runFollowUp, type FollowUpResult } from "@/lib/ai/agents/follow-up";
 import { getBusinessContext, selectFollowUpContext, selectIntentProductNames } from "@/lib/business-context";
+import { OPEN_DEAL_STAGES } from "@/lib/deals";
 import { checkForReplies, type CheckRepliesResult } from "@/lib/gmail/replies";
 import { sendGmailMessage } from "@/lib/gmail/send";
 import { resolveLeadIdentity } from "@/lib/lead-names";
@@ -312,6 +313,21 @@ export async function createDealFromConversation(conversationId: string) {
     .maybeSingle();
 
   if (!conversation) return;
+
+  // Same guard as quickCreateDealForLead (leads/actions.ts): never create a
+  // second open deal for a lead that already has one, regardless of which
+  // page "Create Deal" was clicked from.
+  const { data: existingOpenDeal } = await supabase
+    .from("deals")
+    .select("id")
+    .eq("lead_id", conversation.lead_id)
+    .eq("organization_id", currentOrg.organizationId)
+    .in("status", OPEN_DEAL_STAGES)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingOpenDeal) redirect(`/deals/${existingOpenDeal.id}`);
 
   const [identity, { data: lead }, { data: primaryContact }] = await Promise.all([
     resolveLeadIdentity(supabase, conversation.lead_id),

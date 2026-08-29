@@ -8,6 +8,7 @@ import { DashButton } from "@/components/dashboard-ui/button";
 import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
 import { BuyingIntentBadge, ChannelBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { BuyingIntentIcon, SearchIcon } from "@/components/ui/icons";
+import { isOpenDealStage } from "@/lib/deals";
 import { formatRelativeTime } from "@/lib/format";
 
 export type BuyingIntentRow = {
@@ -196,7 +197,7 @@ export function BuyingIntentListClient({ rows }: { rows: BuyingIntentRow[] }) {
                     {row.dealId && row.dealStatus ? <DealStatusBadge status={row.dealStatus} /> : <span className="text-xs text-bb-text-3">No deal yet</span>}
                   </td>
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                    {row.dealId ? (
+                    {row.dealId && row.dealStatus && isOpenDealStage(row.dealStatus) ? (
                       <button
                         onClick={() => router.push(`/deals/${row.dealId}`)}
                         className="bb-press rounded-lg border border-bb-border px-3 py-1.5 text-xs text-bb-text-2 transition-colors hover:bg-bb-navy-3"
