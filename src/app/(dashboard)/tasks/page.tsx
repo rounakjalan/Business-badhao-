@@ -9,7 +9,7 @@ export default async function TasksPage() {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, title, status, due_at, created_at")
+    .select("id, title, status, due_at, related_entity_type, related_entity_id, created_at")
     .eq("organization_id", currentOrg.organizationId)
     .order("created_at", { ascending: false });
 

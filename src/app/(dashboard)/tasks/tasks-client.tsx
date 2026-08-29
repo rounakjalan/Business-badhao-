@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { completeTask, createTask } from "@/app/(dashboard)/tasks/actions";
 import { PageHeader } from "@/components/layout/page-header";
 import { DashButton } from "@/components/dashboard-ui/button";
@@ -9,7 +10,32 @@ import { DarkEmptyState } from "@/components/dashboard-ui/empty-state";
 import { CheckIcon, TasksIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
 
-type Task = { id: string; title: string; status: string; due_at: string | null; created_at: string };
+type Task = {
+  id: string;
+  title: string;
+  status: string;
+  due_at: string | null;
+  related_entity_type: string | null;
+  related_entity_id: string | null;
+  created_at: string;
+};
+
+const RELATED_ENTITY_ROUTE: Record<string, string> = { lead: "/leads", conversation: "/conversations", deal: "/deals" };
+const RELATED_ENTITY_LABEL: Record<string, string> = { lead: "Lead", conversation: "Conversation", deal: "Deal" };
+
+/** A task's own related_entity_type/id — set by quickCreateTaskForLead and runFollowUpAction — was never surfaced here before; this is the only place in the app that reads it back. */
+function RelatedEntityLink({ type, id }: { type: string | null; id: string | null }) {
+  if (!type || !id || !RELATED_ENTITY_ROUTE[type]) return null;
+  return (
+    <Link
+      href={`${RELATED_ENTITY_ROUTE[type]}/${id}`}
+      onClick={(e) => e.stopPropagation()}
+      className="text-xs text-bb-indigo-2 hover:underline"
+    >
+      {RELATED_ENTITY_LABEL[type]} →
+    </Link>
+  );
+}
 
 export function TasksClient({ tasks }: { tasks: Task[] }) {
   const [creating, setCreating] = useState(false);
@@ -81,7 +107,10 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
               />
               <div className="min-w-0 flex-1">
                 <div className="mb-0.5 truncate text-sm font-medium text-bb-text">{task.title}</div>
-                <div className="text-xs text-bb-text-3">Due {formatDate(task.due_at)}</div>
+                <div className="flex items-center gap-2 text-xs text-bb-text-3">
+                  <span>Due {formatDate(task.due_at)}</span>
+                  <RelatedEntityLink type={task.related_entity_type} id={task.related_entity_id} />
+                </div>
               </div>
             </div>
           ))}
@@ -102,6 +131,7 @@ export function TasksClient({ tasks }: { tasks: Task[] }) {
                     <div className="h-5 w-5 shrink-0 rounded-full border-2 border-bb-border" title={task.status} />
                   )}
                   <div className="min-w-0 flex-1 truncate text-sm text-bb-text-3 line-through">{task.title}</div>
+                  <RelatedEntityLink type={task.related_entity_type} id={task.related_entity_id} />
                 </div>
               ))}
             </>
