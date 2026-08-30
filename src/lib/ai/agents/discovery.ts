@@ -37,12 +37,19 @@ import type { BusinessContext } from "@/lib/business-context";
 //     -> Hermes -> Nemotron again (extractProspectsFromResults below),
 //        this time reasoning over the actual SearchHit[] text, not the
 //        original prompt, returning its raw candidates un-graded
-//     -> finalizeDiscoveryResult below is the final orchestration/
-//        validation stage: grounding/anti-fabrication/non-business/
-//        competitor filtering, dedup, the run cap, and assembling the
-//        DiscoveryResult — deterministic code, not a third AI call, since
-//        validating already-real, already-cited data doesn't need another
-//        model that could itself hallucinate over it
+//     -> Hermes -> Nemotron a THIRD time (runFinalHermesValidation below)
+//        — a genuinely separate runHermesCompletion call, its own system
+//        prompt, its own agent_runs row (agentType
+//        "lead_discovery_final_validation") — reviewing the second call's
+//        candidates against that same real evidence and returning only
+//        the ones it judges are actually supported
+//     -> finalizeDiscoveryResult below is the deterministic safety net
+//        that runs on whatever the final Hermes call accepted: grounding/
+//        anti-fabrication/non-business/competitor filtering (independent
+//        of, not replaced by, the AI call above it), dedup, the run cap,
+//        and assembling the DiscoveryResult — because this codebase never
+//        trusts a model's own claim that it stayed grounded, whichever
+//        call made that claim
 //     -> back to Business Badhao as this module's DiscoveryResult.
 // Proven end-to-end (not just asserted) by discovery.call-graph.test.ts,
 // which mocks only fetch and Supabase — never runHermesCompletion — so a
@@ -88,6 +95,10 @@ export type ProviderTelemetry = {
   /** Queries whose results came from Exa because Tavily failed for that query. */
   servedByExa: string[];
   extracted: number;
+  /** How many of Nemotron's extracted candidates the final Hermes validation call was asked to review. */
+  finalValidationInput: number;
+  /** How many it accepted — still subject to the deterministic grounding/anti-fabrication check that follows. */
+  finalValidationAccepted: number;
   rejectedNotGrounded: number;
   rejectedNotABusiness: number;
   rejectedCompetitor: number;
@@ -100,6 +111,8 @@ export function newTelemetry(): ProviderTelemetry {
     exa: { requests: 0, succeeded: 0, failed: 0, results: 0 },
     servedByExa: [],
     extracted: 0,
+    finalValidationInput: 0,
+    finalValidationAccepted: 0,
     rejectedNotGrounded: 0,
     rejectedNotABusiness: 0,
     rejectedCompetitor: 0,
@@ -742,6 +755,107 @@ async function extractProspectsFromResults(
 }
 
 // ---------------------------------------------------------------------------
+// Step 4 (AI, a second and DISTINCT Hermes/Nemotron call): final review of
+// the first Nemotron call's candidates against the same real evidence,
+// before anything reaches the deterministic checks below. This is not a
+// rename of finalizeDiscoveryResult and not the same request repeated — a
+// separate runHermesCompletion call, with its own system prompt, its own
+// agentType ("lead_discovery_final_validation") for agent_runs tracking,
+// and its own real HTTP request to whichever provider Hermes routes
+// LEAD_DISCOVERY to (see model-router.ts — currently OpenRouter/Nemotron,
+// same as the two calls above it).
+//
+// Its output is still not trusted blindly: finalizeDiscoveryResult runs
+// unchanged immediately afterward, re-checking every candidate this stage
+// accepts against realHitByCanonicalUrl exactly as it would Nemotron's raw
+// output. This stage can only narrow the candidate list, never widen it —
+// it has no access to anything beyond the candidates and evidence it was
+// given, so it cannot introduce a business, URL, or fact the search never
+// produced.
+// ---------------------------------------------------------------------------
+
+const FinalValidationSchema = z.object({ accepted: z.array(ExtractedProspectSchema) });
+
+const FINAL_VALIDATION_SYSTEM_PROMPT = `You are the final reviewer of candidate prospect businesses before they are saved. A previous step already extracted these candidates from real web search results; your job is to review each one against that same real evidence and decide whether it should actually be accepted.
+
+You are given: the campaign's Ideal Customer Profile, the REAL SEARCH EVIDENCE (numbered real results — title, URL, content excerpt — this is the only ground truth), and the CANDIDATE PROSPECTS a previous step proposed from that evidence.
+
+THE SEARCH EVIDENCE IS AUTHORITATIVE. You are not searching or inventing anything — you are auditing candidates that already exist against evidence that already exists.
+
+Reject a candidate if:
+- its sourceUrl is not one of the numbered real evidence URLs given to you (never accept a URL you don't see listed, and never construct or guess one)
+- its evidenceSnippet or claimed facts (location, industry, business type) are not actually supported by that URL's real content
+- it is not a real trading organisation — a course, job posting, product listing, page heading, or the directory/portal site itself, not a company
+- it is a competitor — a business that itself supplies what the seller in this campaign sells (an agency, studio, firm, consultancy or freelancer in the seller's own or an adjacent field) — unless the ICP's targetCustomer/industry/businessType explicitly asks for such providers
+- it plainly contradicts the ICP (wrong location, excluded industry, matches a stated disqualifier, or is far outside the ICP's stated company size)
+
+Accept a candidate only when the evidence genuinely supports it. When you accept one, keep its fields as given, except you may trim evidenceSnippet to only the part actually supported by the cited URL's content — never add a claim the content doesn't make.
+
+Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly this key:
+{ "accepted": [ { "companyName": string, "website": string | null, "location": string | null, "industry": string | null, "businessType": string | null, "email": string | null, "phone": string | null, "matchedIcpCriteria": string[], "evidenceSnippet": string, "sourceUrl": string, "searchQuery": string } ] }
+
+If none of the candidates hold up against the evidence, return { "accepted": [] } — never accept a candidate to avoid an empty result.`;
+
+/** Same excerpt/result-count budget as the extraction call above — this call sends the same evidence again and shares the same per-minute token allowance. */
+const FINAL_VALIDATION_MAX_TOKENS = EXTRACTION_MAX_TOKENS;
+
+/**
+ * The final Hermes stage: a genuinely separate runHermesCompletion call
+ * (not the extraction call's return value relabeled) that reviews
+ * Nemotron's own extracted candidates against the exact same real evidence
+ * it was extracted from. Skips the call entirely when there is nothing to
+ * review — an LLM call over zero candidates can only ever return zero
+ * candidates, so making it would just spend budget to learn nothing, the
+ * same reasoning already applied to skipping extraction when a search
+ * returns zero hits (see discover() below).
+ */
+export async function runFinalHermesValidation(
+  criteria: DiscoveryCriteria,
+  candidates: DiscoveredProspect[],
+  realHitByCanonicalUrl: Map<string, SearchHit>,
+  telemetry?: ProviderTelemetry
+): Promise<{ ok: true; candidates: DiscoveredProspect[] } | { ok: false; message: string }> {
+  if (candidates.length === 0) return { ok: true, candidates: [] };
+
+  if (telemetry) telemetry.finalValidationInput = candidates.length;
+
+  const evidenceText = [...realHitByCanonicalUrl.values()]
+    .map((hit, i) => `Result ${i + 1}: "${hit.title}"\nURL: ${hit.url}\nContent: ${truncate(hit.content, RESULT_EXCERPT_CHARS)}`)
+    .join("\n\n");
+
+  const userPrompt = [
+    "=== IDEAL CUSTOMER PROFILE ===",
+    JSON.stringify(criteria.icpCriteria),
+    "",
+    "=== REAL SEARCH EVIDENCE (the only ground truth — every accepted candidate must cite one of these URLs) ===",
+    evidenceText || "(no evidence)",
+    "",
+    "=== CANDIDATE PROSPECTS TO REVIEW ===",
+    JSON.stringify(candidates),
+  ].join("\n");
+
+  const result = await runHermesCompletion({
+    organizationId: criteria.organizationId,
+    agentType: "lead_discovery_final_validation",
+    taskType: "LEAD_DISCOVERY",
+    systemPrompt: FINAL_VALIDATION_SYSTEM_PROMPT,
+    userPrompt,
+    maxTokens: FINAL_VALIDATION_MAX_TOKENS,
+    temperature: 0.1,
+    responseFormat: "json",
+  });
+
+  if (!result.ok) return { ok: false, message: result.message };
+
+  const parsed = parseAiJson(result.text, FinalValidationSchema);
+  if (!parsed.ok) return { ok: false, message: "Could not complete final validation of discovered prospects — please try again." };
+
+  if (telemetry) telemetry.finalValidationAccepted = parsed.data.accepted.length;
+
+  return { ok: true, candidates: parsed.data.accepted };
+}
+
+// ---------------------------------------------------------------------------
 // Deduplication (within one discovery run) — canonical domain first,
 // normalized company name as a fallback for prospects with no website.
 // ---------------------------------------------------------------------------
@@ -774,19 +888,15 @@ export function dedupeProspects(prospects: DiscoveredProspect[]): DiscoveredPros
 }
 
 // ---------------------------------------------------------------------------
-// Final stage: orchestration/validation/normalization of the second
-// Nemotron call's raw output, run after it and before anything reaches
-// Business Badhao. Deliberately NOT another AI call — Nemotron already
-// reasoned over the real evidence; a second model pass over its own output
-// would only give fabrication a second chance to slip through, and this
-// codebase never trusts a model's own claim that it stayed grounded (see
-// the anti-fabrication guard below). This is where that guarantee is
-// actually enforced.
-//
-// Responsible for exactly what discover() used to do inline: reject
-// anything not grounded in a real search result, filter non-businesses and
-// competitors, deduplicate, cap the run size, and assemble the
+// Deterministic safety net: runs on whatever runFinalHermesValidation
+// accepted, not because that stage is trusted, but because it explicitly
+// isn't — this codebase never trusts a model's own claim that it stayed
+// grounded, whichever call made that claim. Reject anything not actually
+// grounded in a real search result, filter non-businesses and competitors
+// again independently, deduplicate, cap the run size, and assemble the
 // DiscoveryResult handed back to Business Badhao's persistence pipeline.
+// A candidate the final Hermes call accepted incorrectly (a citation to a
+// URL it misread, a competitor it missed) is still caught here.
 // ---------------------------------------------------------------------------
 
 export function finalizeDiscoveryResult(
@@ -924,9 +1034,14 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       return { ok: false, code: "provider_error", message: extraction.message, telemetry };
     }
 
+    const finalValidation = await runFinalHermesValidation(criteria, extraction.candidates, extraction.realHitByCanonicalUrl, telemetry);
+    if (!finalValidation.ok) {
+      return { ok: false, code: "provider_error", message: finalValidation.message, telemetry };
+    }
+
     return finalizeDiscoveryResult(
       criteria,
-      extraction.candidates,
+      finalValidation.candidates,
       extraction.realHitByCanonicalUrl,
       succeeded.map((o) => o.query),
       queriesFailed,

@@ -15,6 +15,7 @@ import {
   NullDiscoveryProvider,
   normalizeWebsite,
   prospectDedupeKey,
+  runFinalHermesValidation,
   TavilyDiscoveryProvider,
   type DiscoveredProspect,
   type DiscoveryCriteria,
@@ -100,9 +101,39 @@ function mockFetchRouter(handlers: { tavily?: () => Response | Promise<Response>
   });
 }
 
+/**
+ * Default behavior for the third runHermesCompletion call (final
+ * validation) once a test's own queued mockResolvedValueOnce responses run
+ * out. Every existing test below queues exactly the two calls it cares
+ * about (query generation, extraction) and was written before the final
+ * validation stage existed — mockResolvedValueOnce queues are always
+ * consumed before mockImplementation is reached, so this only ever runs
+ * for that third call, never for the two calls those tests are actually
+ * asserting on. It passes every candidate through unchanged, so the
+ * deterministic checks downstream (which is what those tests exercise)
+ * still see exactly the extraction output they always did. Tests that
+ * specifically exercise final validation (see the dedicated describe
+ * block below) override this with their own mockResolvedValueOnce.
+ */
+function passThroughFinalValidation(request: { userPrompt: string }) {
+  const marker = "=== CANDIDATE PROSPECTS TO REVIEW ===\n";
+  const idx = request.userPrompt.indexOf(marker);
+  const candidatesJson = idx === -1 ? "[]" : request.userPrompt.slice(idx + marker.length).trim();
+  return Promise.resolve({
+    ok: true as const,
+    text: JSON.stringify({ accepted: JSON.parse(candidatesJson) }),
+    provider: "openrouter" as const,
+    model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+  });
+}
+
 describe("lead discovery", () => {
   const originalTavilyKey = process.env.TAVILY_API_KEY;
   const originalExaKey = process.env.EXA_API_KEY;
+
+  beforeEach(() => {
+    vi.mocked(runHermesCompletion).mockImplementation(passThroughFinalValidation);
+  });
 
   afterEach(() => {
     // resetAllMocks (not clearAllMocks) — several tests below intentionally
@@ -670,6 +701,93 @@ describe("lead discovery", () => {
     // where data actually moves — every prospects/leads insert in
     // campaigns/actions.ts carries organization_id, unchanged by this
     // refactor and already covered by that module's existing behavior.
+  });
+
+  describe("runFinalHermesValidation — the real, distinct third model call", () => {
+    beforeEach(() => {
+      process.env.TAVILY_API_KEY = "test-key";
+    });
+
+    const realHit = { title: "Sharma Boutique — Jaipur", url: "https://sharmaboutique.example/about", content: "Sharma Boutique is a family-run clothing store in Jaipur." };
+    const groundingMap = () => new Map([["sharmaboutique.example/about", realHit]]);
+
+    function candidate(overrides: Partial<DiscoveredProspect> = {}): DiscoveredProspect {
+      return {
+        companyName: "Sharma Boutique",
+        website: "sharmaboutique.example",
+        location: "Jaipur",
+        industry: "Retail",
+        businessType: "Boutique",
+        email: null,
+        phone: null,
+        matchedIcpCriteria: ["location: Jaipur"],
+        evidenceSnippet: "Sharma Boutique is a family-run clothing store in Jaipur.",
+        sourceUrl: realHit.url,
+        searchQuery: "retail store owners in Jaipur",
+        ...overrides,
+      };
+    }
+
+    it("calls runHermesCompletion a genuinely separate time, sending the real evidence and the candidates to review", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({
+        ok: true,
+        text: JSON.stringify({ accepted: [candidate()] }),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      expect(result).toEqual({ ok: true, candidates: [candidate()] });
+      expect(runHermesCompletion).toHaveBeenCalledTimes(1);
+      const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
+      expect(call.agentType).toBe("lead_discovery_final_validation");
+      expect(call.userPrompt).toContain(realHit.url);
+      expect(call.userPrompt).toContain(realHit.content);
+      expect(call.userPrompt).toContain("Sharma Boutique");
+    });
+
+    it("skips the call entirely when there are no candidates to review — nothing to validate, no point spending a request", async () => {
+      const result = await runFinalHermesValidation(baseCriteria, [], groundingMap(), newTelemetry());
+
+      expect(result).toEqual({ ok: true, candidates: [] });
+      expect(runHermesCompletion).not.toHaveBeenCalled();
+    });
+
+    it("Hermes rejecting a candidate removes it — the accepted list can be a genuine subset, not just a passthrough", async () => {
+      const kept = candidate();
+      const dropped = candidate({ companyName: "Rao Fabrics", website: "raofabrics.example" });
+
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({
+        ok: true,
+        text: JSON.stringify({ accepted: [kept] }),
+        provider: "openrouter",
+        model: "nousresearch/hermes-4-70b",
+      });
+
+      const telemetry = newTelemetry();
+      const result = await runFinalHermesValidation(baseCriteria, [kept, dropped], groundingMap(), telemetry);
+
+      expect(result).toEqual({ ok: true, candidates: [kept] });
+      expect(telemetry.finalValidationInput).toBe(2);
+      expect(telemetry.finalValidationAccepted).toBe(1);
+    });
+
+    it("propagates a Hermes-level failure honestly, never fabricating an accepted list", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({ ok: false, code: "provider_unavailable", message: "The AI provider is temporarily unavailable." });
+
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      expect(result.ok).toBe(false);
+    });
+
+    it("returns an honest failure (not a fabricated accept) on a malformed model response", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({ ok: true, text: "not json", provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      expect(result.ok).toBe(false);
+    });
   });
 
   describe("buyer-focused query targeting (never competitors)", () => {
