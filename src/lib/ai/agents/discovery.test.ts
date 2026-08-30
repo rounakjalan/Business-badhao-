@@ -6,10 +6,12 @@ vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() 
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import {
   dedupeProspects,
+  finalizeDiscoveryResult,
   getDiscoveryProvider,
   isCompetitorSeekingQuery,
   isNonBusinessName,
   isSourceSiteName,
+  newTelemetry,
   NullDiscoveryProvider,
   normalizeWebsite,
   prospectDedupeKey,
@@ -588,6 +590,86 @@ describe("lead discovery", () => {
       expect(result.prospects).toHaveLength(20);
       expect(result.prospects.map((p) => p.companyName)).toEqual(manyProspects.slice(0, 20).map((p) => p.companyName));
     });
+  });
+
+  describe("finalizeDiscoveryResult — the final orchestration/validation stage, tested directly and in isolation", () => {
+    // No runHermesCompletion mock is needed anywhere in this block: this
+    // function is the deterministic stage that runs AFTER the second
+    // Nemotron call returns, so it never itself calls Hermes/Nemotron. That
+    // is the point being tested — it's real, callable, isolated code, not
+    // logic buried inside the extraction step.
+
+    const realHit = { title: "Sharma Boutique — Jaipur", url: "https://sharmaboutique.example/about", content: "Sharma Boutique is a family-run clothing store in Jaipur." };
+    const groundingMap = () => new Map([["sharmaboutique.example/about", realHit]]);
+
+    function candidate(overrides: Partial<DiscoveredProspect> = {}): DiscoveredProspect {
+      return {
+        companyName: "Sharma Boutique",
+        website: "sharmaboutique.example",
+        location: "Jaipur",
+        industry: "Retail",
+        businessType: "Boutique",
+        email: null,
+        phone: null,
+        matchedIcpCriteria: ["location: Jaipur"],
+        evidenceSnippet: "Sharma Boutique is a family-run clothing store in Jaipur.",
+        sourceUrl: realHit.url,
+        searchQuery: "retail store owners in Jaipur",
+        ...overrides,
+      };
+    }
+
+    it("receives the second Nemotron stage's raw candidates and returns a valid, structured DiscoveryResult", () => {
+      const result = finalizeDiscoveryResult(baseCriteria, [candidate()], groundingMap(), ["retail store owners in Jaipur"], [], newTelemetry());
+
+      expect(result).toEqual({
+        ok: true,
+        prospects: [candidate()],
+        queriesRun: ["retail store owners in Jaipur"],
+        queriesFailed: [],
+        telemetry: expect.objectContaining({ verified: 1 }),
+      });
+    });
+
+    it("rejects a candidate whose sourceUrl was never actually in the search results — the anti-fabrication guarantee holds at this stage", () => {
+      const fabricated = candidate({ companyName: "Invented Traders", sourceUrl: "https://never-searched.example/fake" });
+      const telemetry = newTelemetry();
+
+      const result = finalizeDiscoveryResult(baseCriteria, [fabricated], groundingMap(), [], [], telemetry);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.prospects).toEqual([]);
+      expect(telemetry.rejectedNotGrounded).toBe(1);
+    });
+
+    it("rejects duplicate candidates citing the same real business, keeping the first", () => {
+      const dup = candidate({ evidenceSnippet: "a different-worded citation of the same real excerpt" });
+      const result = finalizeDiscoveryResult(baseCriteria, [candidate(), dup], groundingMap(), [], [], newTelemetry());
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.prospects).toHaveLength(1);
+    });
+
+    it("rejects a non-business name (course/listing heading) even when it cites a real, grounded URL", () => {
+      const notABusiness = candidate({ companyName: "Advanced Excel Training Course" });
+      const telemetry = newTelemetry();
+
+      const result = finalizeDiscoveryResult(baseCriteria, [notABusiness], groundingMap(), [], [], telemetry);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.prospects).toEqual([]);
+      expect(telemetry.rejectedNotABusiness).toBe(1);
+    });
+
+    // No organization-isolation test here: finalizeDiscoveryResult is a
+    // pure function with no database access, so there is nothing at this
+    // layer that could leak between organizations. Org scoping is enforced
+    // where data actually moves — every prospects/leads insert in
+    // campaigns/actions.ts carries organization_id, unchanged by this
+    // refactor and already covered by that module's existing behavior.
   });
 
   describe("buyer-focused query targeting (never competitors)", () => {

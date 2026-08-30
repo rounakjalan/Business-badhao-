@@ -36,12 +36,13 @@ import type { BusinessContext } from "@/lib/business-context";
 //        search, never an AI call
 //     -> Hermes -> Nemotron again (extractProspectsFromResults below),
 //        this time reasoning over the actual SearchHit[] text, not the
-//        original prompt
-//     -> the "Hermes final layer" is the grounding/anti-fabrication/
-//        non-business/competitor filtering immediately below in
-//        extractProspectsFromResults — deterministic code, not a third AI
-//        call, since validating already-real, already-cited data doesn't
-//        need another model that could itself hallucinate over it
+//        original prompt, returning its raw candidates un-graded
+//     -> finalizeDiscoveryResult below is the final orchestration/
+//        validation stage: grounding/anti-fabrication/non-business/
+//        competitor filtering, dedup, the run cap, and assembling the
+//        DiscoveryResult — deterministic code, not a third AI call, since
+//        validating already-real, already-cited data doesn't need another
+//        model that could itself hallucinate over it
 //     -> back to Business Badhao as this module's DiscoveryResult.
 // Proven end-to-end (not just asserted) by discovery.call-graph.test.ts,
 // which mocks only fetch and Supabase — never runHermesCompletion — so a
@@ -648,11 +649,20 @@ function canonicalizeUrl(url: string): string | null {
   }
 }
 
+/**
+ * The second Nemotron stage only: turns real search results into candidate
+ * prospects. Returns them un-grounded, exactly as Nemotron produced them,
+ * plus the real-hit index that stage needed to reason over — grounding,
+ * anti-fabrication filtering, dedup, and assembling the final result is
+ * finalizeDiscoveryResult's job below, not this function's.
+ */
 async function extractProspectsFromResults(
   criteria: DiscoveryCriteria,
   searchesByQuery: { query: string; results: SearchHit[] }[],
   telemetry?: ProviderTelemetry
-): Promise<{ ok: true; prospects: DiscoveredProspect[] } | { ok: false; message: string }> {
+): Promise<
+  { ok: true; candidates: DiscoveredProspect[]; realHitByCanonicalUrl: Map<string, SearchHit> } | { ok: false; message: string }
+> {
   // Index the real search hits by a canonical form of their URL. The model
   // reliably cites the right *page* but often reformats the URL slightly
   // (adds/drops a trailing slash, drops "www.", changes scheme or case).
@@ -726,57 +736,9 @@ async function extractProspectsFromResults(
   const parsed = parseAiJson(result.text, ExtractionResponseSchema);
   if (!parsed.ok) return { ok: false, message: "Could not extract prospects from search results — please try again." };
 
-  // Anti-fabrication guard: drop anything citing a URL that wasn't
-  // actually in the search results — the model is not trusted to have
-  // cited real evidence just because it was instructed to. Anything that
-  // survives is rewritten to carry the provider's own URL and, when the
-  // model's quote can't be found in the real page text, the provider's own
-  // excerpt — so a stored prospect's source and evidence always come from
-  // the actual search result rather than from the model's rendering of it.
   if (telemetry) telemetry.extracted = parsed.data.prospects.length;
 
-  const sellerTokens = sellerOfferingTokens(criteria);
-  const grounded: DiscoveredProspect[] = [];
-  for (const prospect of parsed.data.prospects) {
-    const companyName = prospect.companyName.trim();
-
-    // Must actually be a business, not a course/job/heading, and not the
-    // directory that published the page.
-    if (isNonBusinessName(companyName) || isSourceSiteName(companyName, prospect.sourceUrl)) {
-      if (telemetry) telemetry.rejectedNotABusiness += 1;
-      continue;
-    }
-
-    // Backstop under the extraction prompt's competitor rule: a company
-    // whose own name advertises it as a supplier of what we sell ("… Web
-    // Design Studio") is a rival, not a buyer. Name only — evidence text
-    // mentions words like "agency" far too incidentally to judge on.
-    if (!icpTargetsProviders(criteria.icpCriteria) && isCompetitorSeekingQuery(companyName, sellerTokens)) {
-      if (telemetry) telemetry.rejectedCompetitor += 1;
-      continue;
-    }
-
-    const canonical = canonicalizeUrl(prospect.sourceUrl);
-    const realHit = canonical ? realHitByCanonicalUrl.get(canonical) : undefined;
-    if (!realHit) {
-      if (telemetry) telemetry.rejectedNotGrounded += 1;
-      continue;
-    }
-
-    const quote = prospect.evidenceSnippet.trim();
-    const quoteIsReal = quote.length > 0 && realHit.content.includes(quote);
-
-    grounded.push({
-      ...prospect,
-      companyName,
-      sourceUrl: realHit.url,
-      evidenceSnippet: quoteIsReal || !realHit.content ? quote : truncate(realHit.content, 300),
-    });
-  }
-
-  if (telemetry) telemetry.verified = grounded.length;
-
-  return { ok: true, prospects: grounded };
+  return { ok: true, candidates: parsed.data.prospects, realHitByCanonicalUrl };
 }
 
 // ---------------------------------------------------------------------------
@@ -809,6 +771,89 @@ export function dedupeProspects(prospects: DiscoveredProspect[]): DiscoveredPros
     deduped.push(prospect);
   }
   return deduped;
+}
+
+// ---------------------------------------------------------------------------
+// Final stage: orchestration/validation/normalization of the second
+// Nemotron call's raw output, run after it and before anything reaches
+// Business Badhao. Deliberately NOT another AI call — Nemotron already
+// reasoned over the real evidence; a second model pass over its own output
+// would only give fabrication a second chance to slip through, and this
+// codebase never trusts a model's own claim that it stayed grounded (see
+// the anti-fabrication guard below). This is where that guarantee is
+// actually enforced.
+//
+// Responsible for exactly what discover() used to do inline: reject
+// anything not grounded in a real search result, filter non-businesses and
+// competitors, deduplicate, cap the run size, and assemble the
+// DiscoveryResult handed back to Business Badhao's persistence pipeline.
+// ---------------------------------------------------------------------------
+
+export function finalizeDiscoveryResult(
+  criteria: DiscoveryCriteria,
+  candidates: DiscoveredProspect[],
+  realHitByCanonicalUrl: Map<string, SearchHit>,
+  queriesRun: string[],
+  queriesFailed: string[],
+  telemetry: ProviderTelemetry
+): DiscoveryResult {
+  const sellerTokens = sellerOfferingTokens(criteria);
+  const grounded: DiscoveredProspect[] = [];
+
+  for (const prospect of candidates) {
+    const companyName = prospect.companyName.trim();
+
+    // Must actually be a business, not a course/job/heading, and not the
+    // directory that published the page.
+    if (isNonBusinessName(companyName) || isSourceSiteName(companyName, prospect.sourceUrl)) {
+      telemetry.rejectedNotABusiness += 1;
+      continue;
+    }
+
+    // Backstop under the extraction prompt's competitor rule: a company
+    // whose own name advertises it as a supplier of what we sell ("… Web
+    // Design Studio") is a rival, not a buyer. Name only — evidence text
+    // mentions words like "agency" far too incidentally to judge on.
+    if (!icpTargetsProviders(criteria.icpCriteria) && isCompetitorSeekingQuery(companyName, sellerTokens)) {
+      telemetry.rejectedCompetitor += 1;
+      continue;
+    }
+
+    // Anti-fabrication guard: drop anything citing a URL that wasn't
+    // actually in the search results — Nemotron is not trusted to have
+    // cited real evidence just because it was instructed to. Anything that
+    // survives is rewritten to carry the provider's own URL and, when the
+    // model's quote can't be found in the real page text, the provider's
+    // own excerpt — so a stored prospect's source and evidence always come
+    // from the actual search result rather than from the model's
+    // rendering of it.
+    const canonical = canonicalizeUrl(prospect.sourceUrl);
+    const realHit = canonical ? realHitByCanonicalUrl.get(canonical) : undefined;
+    if (!realHit) {
+      telemetry.rejectedNotGrounded += 1;
+      continue;
+    }
+
+    const quote = prospect.evidenceSnippet.trim();
+    const quoteIsReal = quote.length > 0 && realHit.content.includes(quote);
+
+    grounded.push({
+      ...prospect,
+      companyName,
+      sourceUrl: realHit.url,
+      evidenceSnippet: quoteIsReal || !realHit.content ? quote : truncate(realHit.content, 300),
+    });
+  }
+
+  telemetry.verified = grounded.length;
+
+  return {
+    ok: true,
+    prospects: dedupeProspects(grounded).slice(0, MAX_PROSPECTS_PER_RUN),
+    queriesRun,
+    queriesFailed,
+    telemetry,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -879,13 +924,14 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       return { ok: false, code: "provider_error", message: extraction.message, telemetry };
     }
 
-    return {
-      ok: true,
-      prospects: dedupeProspects(extraction.prospects).slice(0, MAX_PROSPECTS_PER_RUN),
-      queriesRun: succeeded.map((o) => o.query),
+    return finalizeDiscoveryResult(
+      criteria,
+      extraction.candidates,
+      extraction.realHitByCanonicalUrl,
+      succeeded.map((o) => o.query),
       queriesFailed,
-      telemetry,
-    };
+      telemetry
+    );
   }
 }
 
