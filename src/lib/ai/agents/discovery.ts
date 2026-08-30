@@ -22,6 +22,30 @@ import type { BusinessContext } from "@/lib/business-context";
 // never scores ICP fit (qualification.ts's job) and never produces a
 // research summary (prospect-research.ts's job) — see the handoff at the
 // bottom of this file.
+//
+// Runtime call graph, named against the app's own terms for these layers:
+//   Business Badhao (campaigns/actions.ts / scheduled-pipeline.ts)
+//     -> Hermes (runHermesCompletion, the one AI entry point everything
+//        calls through — see hermes-service.ts)
+//     -> resolveRouting sends LEAD_DISCOVERY to the "openrouter" provider,
+//        whose configured model defaults to Nemotron 3 Ultra
+//        (DEFAULT_OPENROUTER_MODEL in providers/openrouter.ts) — this is
+//        generateDiscoveryQueries below, turning the campaign/ICP into
+//        real search queries
+//     -> Tavily, Exa on Tavily failure (searchWithFallback) — real HTTP
+//        search, never an AI call
+//     -> Hermes -> Nemotron again (extractProspectsFromResults below),
+//        this time reasoning over the actual SearchHit[] text, not the
+//        original prompt
+//     -> the "Hermes final layer" is the grounding/anti-fabrication/
+//        non-business/competitor filtering immediately below in
+//        extractProspectsFromResults — deterministic code, not a third AI
+//        call, since validating already-real, already-cited data doesn't
+//        need another model that could itself hallucinate over it
+//     -> back to Business Badhao as this module's DiscoveryResult.
+// Proven end-to-end (not just asserted) by discovery.call-graph.test.ts,
+// which mocks only fetch and Supabase — never runHermesCompletion — so a
+// change that broke the real routing would fail those tests.
 
 export type DiscoveredProspect = {
   companyName: string;
