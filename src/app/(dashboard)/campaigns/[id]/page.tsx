@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { CampaignDetailTabs } from "@/app/(dashboard)/campaigns/[id]/campaign-detail-tabs";
 import { getLeadDiscoveryStateAction } from "@/app/(dashboard)/campaigns/actions";
+import { getDiscoveryProvider } from "@/lib/ai/agents/discovery";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 
@@ -62,6 +63,7 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
       deals={deals.data ?? []}
       revenue={revenue}
       discovery={discovery}
+      discoveryConfigured={getDiscoveryProvider().isConfigured()}
     />
   );
 }

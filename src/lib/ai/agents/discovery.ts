@@ -551,6 +551,17 @@ If nothing in the results is a real matching prospect, return an empty array —
 // the 8k window.
 const MAX_RESULTS_SENT_TO_EXTRACTION = 10;
 const RESULT_EXCERPT_CHARS = 600;
+/**
+ * Hard ceiling on how many prospects one discover() call can return, applied
+ * after dedup. The query count (3-5, DiscoveryQueriesSchema), results-per-
+ * query (5, tavilySearch/exaSearch) and "at most 3 per result" extraction
+ * instruction already keep a run small in practice — every real run so far
+ * has returned well under this — but none of those are a code-enforced
+ * ceiling on the final list, so this is the actual backstop against a run
+ * that legitimately finds an unusually large number of distinct businesses
+ * turning into an unbounded batch of prospects/leads persisted downstream.
+ */
+const MAX_PROSPECTS_PER_RUN = 20;
 /** Seller-offering context is capped so adding it cannot push the request over the per-minute allowance. */
 const SELLER_CONTEXT_CHARS = 900;
 const EXTRACTION_MAX_TOKENS = 4000;
@@ -846,7 +857,7 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
 
     return {
       ok: true,
-      prospects: dedupeProspects(extraction.prospects),
+      prospects: dedupeProspects(extraction.prospects).slice(0, MAX_PROSPECTS_PER_RUN),
       queriesRun: succeeded.map((o) => o.query),
       queriesFailed,
       telemetry,

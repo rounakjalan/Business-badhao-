@@ -60,6 +60,7 @@ export function CampaignDetailTabs({
   deals,
   revenue,
   discovery,
+  discoveryConfigured,
 }: {
   campaign: Campaign;
   /** Raw jsonb from ideal_customer_profiles.criteria — validated below, since campaigns created before the ICP step shipped store the old plan-derived shape. */
@@ -72,6 +73,8 @@ export function CampaignDetailTabs({
   deals: DealRow[];
   revenue: number;
   discovery: DiscoveryState;
+  /** getDiscoveryProvider().isConfigured() — whether a real search provider (TAVILY_API_KEY) is actually connected. */
+  discoveryConfigured: boolean;
 }) {
   const parsedIcp = icp ? IcpSchema.safeParse(icp) : null;
 
@@ -316,6 +319,7 @@ export function CampaignDetailTabs({
         {tab === "Lead Discovery" ? (
           <LeadDiscoveryTab
             hasIcp={hasUsableIcp}
+            discoveryConfigured={discoveryConfigured}
             discovery={discovery}
             isRunning={isDiscoveryRunning}
             progress={progress}
@@ -631,6 +635,7 @@ function FollowUpSummaryView({ followUp }: { followUp: FollowUpSummary }) {
 
 function LeadDiscoveryTab({
   hasIcp,
+  discoveryConfigured,
   discovery,
   isRunning,
   progress,
@@ -639,6 +644,7 @@ function LeadDiscoveryTab({
   onStart,
 }: {
   hasIcp: boolean;
+  discoveryConfigured: boolean;
   discovery: DiscoveryState;
   isRunning: boolean;
   progress: DiscoveryProgress | null;
@@ -646,8 +652,6 @@ function LeadDiscoveryTab({
   result: LeadDiscoveryActionResult | null;
   onStart: () => void;
 }) {
-
-
   if (!hasIcp) {
     return (
       <DarkEmptyState
@@ -671,12 +675,19 @@ function LeadDiscoveryTab({
               here is invented.
             </p>
           </div>
-          <DashButton variant="gradient" onClick={onStart} disabled={isRunning}>
+          <DashButton variant="gradient" onClick={onStart} disabled={isRunning || !discoveryConfigured}>
             <SparklesIcon className="h-3.5 w-3.5" />
             {isRunning ? "Discovery running..." : "Start Discovery"}
           </DashButton>
         </div>
       </DarkCard>
+
+      {!discoveryConfigured ? (
+        <DarkAlert variant="error">
+          <span className="font-medium">Search provider not configured.</span> Lead Discovery needs TAVILY_API_KEY set in the
+          environment before it can search for real prospects.
+        </DarkAlert>
+      ) : null}
 
       {isRunning ? (
         <DarkCard className="border-bb-indigo/30 p-5 text-sm">

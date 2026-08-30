@@ -552,6 +552,42 @@ describe("lead discovery", () => {
       const b: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: "otherboutique.example", companyName: "Other Boutique" };
       expect(dedupeProspects([a, b])).toHaveLength(2);
     });
+
+    it("caps a single discover() run at 20 prospects even when extraction legitimately finds more distinct businesses", async () => {
+      process.env.TAVILY_API_KEY = "test-key";
+      const query = "retail store owners in Jaipur";
+      const hits = [{ title: "Jaipur Retail Directory", url: "https://directory.example/jaipur-retail", content: "A directory listing many retail stores in Jaipur." }];
+
+      const manyProspects = Array.from({ length: 25 }, (_, i) => ({
+        companyName: `Retailer ${i}`,
+        website: `retailer${i}.example`,
+        location: "Jaipur",
+        industry: "Retail",
+        businessType: "Shop",
+        email: null,
+        phone: null,
+        matchedIcpCriteria: ["location: Jaipur"],
+        evidenceSnippet: "A directory listing many retail stores in Jaipur.",
+        sourceUrl: hits[0].url,
+        searchQuery: query,
+      }));
+
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ queries: [query] }), provider: "openrouter", model: "nousresearch/hermes-4-70b" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ prospects: manyProspects }), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      vi.stubGlobal("fetch", mockFetchOk({ [query]: hits }));
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // All 25 were real, distinct, grounded businesses — dedupeProspects
+      // would have kept every one of them; the run-level cap is what trims
+      // it to 20, not deduplication.
+      expect(result.prospects).toHaveLength(20);
+      expect(result.prospects.map((p) => p.companyName)).toEqual(manyProspects.slice(0, 20).map((p) => p.companyName));
+    });
   });
 
   describe("buyer-focused query targeting (never competitors)", () => {

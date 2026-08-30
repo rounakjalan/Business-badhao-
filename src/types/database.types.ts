@@ -245,6 +245,8 @@ export interface Database {
           phone: string | null;
           website: string | null;
           raw_data: Json;
+          /** Generated column (see 20260830000000_prospects_dedupe_index.sql) — read-only, never set on insert/update. */
+          dedupe_key: string | null;
           created_at: string;
           updated_at: string;
         };
