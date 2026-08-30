@@ -116,14 +116,19 @@ function mockFetchRouter(handlers: { tavily?: () => Response | Promise<Response>
  * block below) override this with their own mockResolvedValueOnce.
  */
 function passThroughFinalValidation(request: { userPrompt: string }) {
-  const marker = "=== CANDIDATE PROSPECTS TO REVIEW ===\n";
-  const idx = request.userPrompt.indexOf(marker);
-  const candidatesJson = idx === -1 ? "[]" : request.userPrompt.slice(idx + marker.length).trim();
+  // Matched on the section's stable opening words rather than the whole
+  // heading line, so a wording tweak to that heading (it currently ends
+  // with parenthetical guidance to the model) doesn't silently break every
+  // test that relies on this default.
+  const markerStart = "=== CANDIDATE PROSPECTS";
+  const idx = request.userPrompt.indexOf(markerStart);
+  const afterHeadingLine = idx === -1 ? -1 : request.userPrompt.indexOf("\n", idx);
+  const candidatesJson = afterHeadingLine === -1 ? "[]" : request.userPrompt.slice(afterHeadingLine + 1).trim();
   return Promise.resolve({
     ok: true as const,
     text: JSON.stringify({ accepted: JSON.parse(candidatesJson) }),
     provider: "openrouter" as const,
-    model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    model: "nousresearch/hermes-4-70b",
   });
 }
 
@@ -741,7 +746,14 @@ describe("lead discovery", () => {
       expect(result).toEqual({ ok: true, candidates: [candidate()] });
       expect(runHermesCompletion).toHaveBeenCalledTimes(1);
       const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
-      expect(call.agentType).toBe("lead_discovery_final_validation");
+      // Independence proof (not just a naming convention): this call
+      // explicitly requests a model distinct from what LEAD_DISCOVERY's
+      // other two calls get by default — see the model-independence
+      // describe block below for the direct A/B comparison against the
+      // Nemotron model string.
+      expect(call.model).toBe("nousresearch/hermes-4-70b");
+      expect(call.model).not.toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+      expect(call.agentType).toBe("lead_discovery_hermes_review");
       expect(call.userPrompt).toContain(realHit.url);
       expect(call.userPrompt).toContain(realHit.content);
       expect(call.userPrompt).toContain("Sharma Boutique");
@@ -787,6 +799,34 @@ describe("lead discovery", () => {
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
       expect(result.ok).toBe(false);
+    });
+  });
+
+  describe("model independence: the Reviewer's own call is inspected directly, not inferred from its name", () => {
+    it("across one full discover() run, the third call requests a genuinely different model than the first two — not the agentType, the actual model field sent to the provider layer", async () => {
+      process.env.TAVILY_API_KEY = "test-key";
+
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(QUERIES_RESPONSE), provider: "openrouter", model: "nvidia/nemotron-3-ultra-550b-a55b:free" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "openrouter", model: "nvidia/nemotron-3-ultra-550b-a55b:free" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ accepted: EXTRACTION_RESPONSE.prospects }), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+      vi.stubGlobal("fetch", mockFetchOk({ [QUERIES_RESPONSE.queries[0]]: SEARCH_HITS }));
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria);
+
+      expect(result.ok).toBe(true);
+      expect(runHermesCompletion).toHaveBeenCalledTimes(3);
+
+      const calls = vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0]);
+      // Query generation and extraction: no explicit override — both ride
+      // LEAD_DISCOVERY's default routing (Nemotron), i.e. the SAME model.
+      expect(calls[0].model).toBeUndefined();
+      expect(calls[1].model).toBeUndefined();
+      // The Reviewer: an explicit, different model — not inferred from a
+      // function name or an agentType string, but the literal field this
+      // request will send to the provider layer as its actual model.
+      expect(calls[2].model).toBe("nousresearch/hermes-4-70b");
     });
   });
 

@@ -65,6 +65,17 @@ export type HermesRequest = {
   taskType: AiTaskType;
   systemPrompt: string;
   userPrompt: string;
+  /**
+   * Forces a specific model, overriding whatever taskType's routing/the
+   * provider's configured default would otherwise pick — passed straight
+   * through to AiCompletionRequest.model (see types.ts), which every
+   * provider adapter already honors ahead of its own default. Exists for
+   * callers that need a genuinely different model to actually run, not
+   * just a different prompt against the usual one — e.g. an independent
+   * second opinion where using the same model that produced the thing
+   * being reviewed would defeat the point.
+   */
+  model?: string;
   maxTokens?: number;
   temperature?: number;
   /** Set to "json" for agents that parse the result with src/lib/ai/schema.ts. */
@@ -145,6 +156,7 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
     try {
       const completionRequest: AiCompletionRequest = {
         messages,
+        model: request.model,
         maxTokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
         timeoutMs: config.timeoutMs,

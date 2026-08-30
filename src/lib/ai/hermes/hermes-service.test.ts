@@ -104,6 +104,25 @@ describe("runHermesCompletion", () => {
     expect(createProvider).toHaveBeenCalledWith("openrouter");
   });
 
+  it("passes an explicit model override straight through to the provider, distinct from its configured default", async () => {
+    const completeSpy = vi.fn().mockResolvedValue(fakeResponse({ model: "nousresearch/hermes-4-70b" }));
+    vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));
+
+    await runHermesCompletion({ ...baseRequest, model: "nousresearch/hermes-4-70b" });
+
+    expect(completeSpy).toHaveBeenCalledTimes(1);
+    expect(completeSpy.mock.calls[0][0].model).toBe("nousresearch/hermes-4-70b");
+  });
+
+  it("leaves the provider's own default model in place when no override is given", async () => {
+    const completeSpy = vi.fn().mockResolvedValue(fakeResponse());
+    vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));
+
+    await runHermesCompletion(baseRequest);
+
+    expect(completeSpy.mock.calls[0][0].model).toBeUndefined();
+  });
+
   it("returns a user-safe failure message without a fallback configured", async () => {
     const provider = fakeProvider({
       complete: vi.fn().mockRejectedValue(new AiError({ code: "invalid_api_key", provider: "openrouter", message: "bad key" })),

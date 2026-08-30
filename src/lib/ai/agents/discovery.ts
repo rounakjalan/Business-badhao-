@@ -23,37 +23,44 @@ import type { BusinessContext } from "@/lib/business-context";
 // research summary (prospect-research.ts's job) — see the handoff at the
 // bottom of this file.
 //
-// Runtime call graph, named against the app's own terms for these layers:
+// Runtime call graph, named against the app's own terms for these layers.
+// "Hermes" in this codebase means exactly one thing — runHermesCompletion,
+// the orchestration/routing function everything calls through — not a
+// model of its own. What model actually answers depends on what that call
+// is routed to and, now, on an explicit per-call override (see Step 4):
+//
 //   Business Badhao (campaigns/actions.ts / scheduled-pipeline.ts)
-//     -> Hermes (runHermesCompletion, the one AI entry point everything
-//        calls through — see hermes-service.ts)
-//     -> resolveRouting sends LEAD_DISCOVERY to the "openrouter" provider,
-//        whose configured model defaults to Nemotron 3 Ultra
-//        (DEFAULT_OPENROUTER_MODEL in providers/openrouter.ts) — this is
-//        generateDiscoveryQueries below, turning the campaign/ICP into
-//        real search queries
+//     -> Hermes Planner (runHermesCompletion, no model override) routes
+//        LEAD_DISCOVERY to the "openrouter" provider, whose configured
+//        model defaults to Nemotron 3 Ultra (DEFAULT_OPENROUTER_MODEL in
+//        providers/openrouter.ts)
+//     -> Nemotron Reasoner: that call is generateDiscoveryQueries below,
+//        turning the campaign/ICP into real search queries
 //     -> Tavily, Exa on Tavily failure (searchWithFallback) — real HTTP
 //        search, never an AI call
-//     -> Hermes -> Nemotron again (extractProspectsFromResults below),
-//        this time reasoning over the actual SearchHit[] text, not the
-//        original prompt, returning its raw candidates un-graded
-//     -> Hermes -> Nemotron a THIRD time (runFinalHermesValidation below)
-//        — a genuinely separate runHermesCompletion call, its own system
-//        prompt, its own agent_runs row (agentType
-//        "lead_discovery_final_validation") — reviewing the second call's
-//        candidates against that same real evidence and returning only
-//        the ones it judges are actually supported
-//     -> finalizeDiscoveryResult below is the deterministic safety net
-//        that runs on whatever the final Hermes call accepted: grounding/
-//        anti-fabrication/non-business/competitor filtering (independent
-//        of, not replaced by, the AI call above it), dedup, the run cap,
-//        and assembling the DiscoveryResult — because this codebase never
-//        trusts a model's own claim that it stayed grounded, whichever
-//        call made that claim
+//     -> Nemotron Analyst: a second Hermes-routed call, same default
+//        model (extractProspectsFromResults below), this time reasoning
+//        over the actual SearchHit[] text, not the original prompt,
+//        returning its raw candidates un-graded
+//     -> Independent Hermes Reviewer (runFinalHermesValidation below) —
+//        a THIRD Hermes-routed call, but this one passes an explicit
+//        model override (INDEPENDENT_REVIEWER_MODEL) that forces a
+//        genuinely different model — NousResearch's Hermes 4 70B, not
+//        Nvidia's Nemotron — reviewing the Analyst's own candidates
+//        against that same real evidence and returning only the ones its
+//        own independent reading judges are actually supported
+//     -> Deterministic Validator: finalizeDiscoveryResult below is the
+//        safety net that runs on whatever the Reviewer accepted:
+//        grounding/anti-fabrication/non-business/competitor filtering
+//        (independent of, not replaced by, either AI stage above it),
+//        dedup, the run cap, and assembling the DiscoveryResult — because
+//        this codebase never trusts a model's own claim that it stayed
+//        grounded, whichever model made that claim
 //     -> back to Business Badhao as this module's DiscoveryResult.
 // Proven end-to-end (not just asserted) by discovery.call-graph.test.ts,
 // which mocks only fetch and Supabase — never runHermesCompletion — so a
-// change that broke the real routing would fail those tests.
+// change that broke the real routing, or that quietly made the Reviewer
+// use the same model as the Analyst, would fail those tests.
 
 export type DiscoveredProspect = {
   companyName: string;
@@ -755,15 +762,20 @@ async function extractProspectsFromResults(
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 (AI, a second and DISTINCT Hermes/Nemotron call): final review of
-// the first Nemotron call's candidates against the same real evidence,
-// before anything reaches the deterministic checks below. This is not a
-// rename of finalizeDiscoveryResult and not the same request repeated — a
-// separate runHermesCompletion call, with its own system prompt, its own
-// agentType ("lead_discovery_final_validation") for agent_runs tracking,
-// and its own real HTTP request to whichever provider Hermes routes
-// LEAD_DISCOVERY to (see model-router.ts — currently OpenRouter/Nemotron,
-// same as the two calls above it).
+// Step 4 (AI, GENUINELY INDEPENDENT of the Nemotron calls above): the
+// Independent Hermes Reviewer. This is not "Hermes" as a label on another
+// Nemotron call — it is a real, different model. The two calls above this
+// one (generateDiscoveryQueries, extractProspectsFromResults) both go
+// through runHermesCompletion's default LEAD_DISCOVERY routing, which
+// resolves to OpenRouter's configured model — Nemotron 3 Ultra, unless
+// overridden. This call passes an explicit model override
+// (INDEPENDENT_REVIEWER_MODEL, below) all the way down to the real HTTP
+// request body, so it runs on NousResearch's Hermes 4 70B — a different
+// company's model, different weights, different training — reachable
+// through the same already-configured OpenRouter credentials (no new
+// service, no invented API, no new credential: OPENROUTER_API_KEY is what
+// authorizes this call too). Confirmed live on OpenRouter's own model
+// catalog at implementation time; see the accompanying report for how.
 //
 // Its output is still not trusted blindly: finalizeDiscoveryResult runs
 // unchanged immediately afterward, re-checking every candidate this stage
@@ -771,43 +783,61 @@ async function extractProspectsFromResults(
 // output. This stage can only narrow the candidate list, never widen it —
 // it has no access to anything beyond the candidates and evidence it was
 // given, so it cannot introduce a business, URL, or fact the search never
-// produced.
+// produced. And because it is a genuinely different model, a mistake
+// specific to Nemotron's own reasoning is not guaranteed to be repeated
+// here — the two calls do not share failure modes the way two calls to the
+// same model reviewing its own output would.
 // ---------------------------------------------------------------------------
+
+/**
+ * NousResearch's Hermes 4 70B on OpenRouter — a real, distinct, currently-
+ * listed model (openrouter.ai/models), unrelated to Nvidia's Nemotron.
+ * Deliberately hardcoded rather than left to OPENROUTER_MODEL/the routing
+ * table: this stage's entire purpose is model independence from whatever
+ * the rest of LEAD_DISCOVERY is configured to use, so it must not silently
+ * become the same model as the calls it's reviewing just because an env
+ * var changed.
+ */
+const INDEPENDENT_REVIEWER_MODEL = "nousresearch/hermes-4-70b";
 
 const FinalValidationSchema = z.object({ accepted: z.array(ExtractedProspectSchema) });
 
-const FINAL_VALIDATION_SYSTEM_PROMPT = `You are the final reviewer of candidate prospect businesses before they are saved. A previous step already extracted these candidates from real web search results; your job is to review each one against that same real evidence and decide whether it should actually be accepted.
+const FINAL_VALIDATION_SYSTEM_PROMPT = `You are an independent reviewer auditing candidate prospect businesses before they are saved. A separate AI system already extracted these candidates from real web search results — you did not produce them and you are not that system. Your job is to independently verify each candidate against the same real evidence, as a genuine second opinion, not a formality.
 
-You are given: the campaign's Ideal Customer Profile, the REAL SEARCH EVIDENCE (numbered real results — title, URL, content excerpt — this is the only ground truth), and the CANDIDATE PROSPECTS a previous step proposed from that evidence.
+Do not trust a candidate simply because the previous system produced it. It may have hallucinated a fact, mis-cited a URL, or accepted a business that does not actually belong. Independently verify every candidate against the supplied evidence as if you had never seen its conclusions before.
 
-THE SEARCH EVIDENCE IS AUTHORITATIVE. You are not searching or inventing anything — you are auditing candidates that already exist against evidence that already exists.
+You are given: the campaign's Ideal Customer Profile, the REAL SEARCH EVIDENCE (numbered real results — title, URL, content excerpt — this is the only ground truth), and the CANDIDATE PROSPECTS the previous system proposed from that evidence.
+
+THE SEARCH EVIDENCE IS AUTHORITATIVE. You are not searching or inventing anything — you are independently auditing candidates that already exist against evidence that already exists.
 
 Reject a candidate if:
 - its sourceUrl is not one of the numbered real evidence URLs given to you (never accept a URL you don't see listed, and never construct or guess one)
-- its evidenceSnippet or claimed facts (location, industry, business type) are not actually supported by that URL's real content
+- its evidenceSnippet or claimed facts (location, industry, business type) are not actually supported by that URL's real content — the previous system may have hallucinated or overstated this
 - it is not a real trading organisation — a course, job posting, product listing, page heading, or the directory/portal site itself, not a company
 - it is a competitor — a business that itself supplies what the seller in this campaign sells (an agency, studio, firm, consultancy or freelancer in the seller's own or an adjacent field) — unless the ICP's targetCustomer/industry/businessType explicitly asks for such providers
 - it plainly contradicts the ICP (wrong location, excluded industry, matches a stated disqualifier, or is far outside the ICP's stated company size)
+- it appears to be a duplicate of another candidate in the list (same business under a slightly different name or URL)
 
-Accept a candidate only when the evidence genuinely supports it. When you accept one, keep its fields as given, except you may trim evidenceSnippet to only the part actually supported by the cited URL's content — never add a claim the content doesn't make.
+Accept a candidate only when your own independent reading of the evidence supports it. When you accept one, keep its fields as given, except you may trim evidenceSnippet to only the part actually supported by the cited URL's content — never add a claim the content doesn't make.
 
 Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly this key:
 { "accepted": [ { "companyName": string, "website": string | null, "location": string | null, "industry": string | null, "businessType": string | null, "email": string | null, "phone": string | null, "matchedIcpCriteria": string[], "evidenceSnippet": string, "sourceUrl": string, "searchQuery": string } ] }
 
-If none of the candidates hold up against the evidence, return { "accepted": [] } — never accept a candidate to avoid an empty result.`;
+If none of the candidates hold up under your own independent review, return { "accepted": [] } — never accept a candidate to avoid an empty result.`;
 
-/** Same excerpt/result-count budget as the extraction call above — this call sends the same evidence again and shares the same per-minute token allowance. */
+/** Same excerpt/result-count budget as the extraction call above — this call sends the same evidence again. */
 const FINAL_VALIDATION_MAX_TOKENS = EXTRACTION_MAX_TOKENS;
 
 /**
- * The final Hermes stage: a genuinely separate runHermesCompletion call
- * (not the extraction call's return value relabeled) that reviews
- * Nemotron's own extracted candidates against the exact same real evidence
- * it was extracted from. Skips the call entirely when there is nothing to
- * review — an LLM call over zero candidates can only ever return zero
- * candidates, so making it would just spend budget to learn nothing, the
- * same reasoning already applied to skipping extraction when a search
- * returns zero hits (see discover() below).
+ * The Independent Hermes Reviewer: a real call to a genuinely different
+ * model (see INDEPENDENT_REVIEWER_MODEL above) than the Nemotron calls
+ * above it, reviewing those calls' own extracted candidates against the
+ * exact same real evidence they were extracted from. Skips the call
+ * entirely when there is nothing to review — an LLM call over zero
+ * candidates can only ever return zero candidates, so making it would just
+ * spend budget to learn nothing, the same reasoning already applied to
+ * skipping extraction when a search returns zero hits (see discover()
+ * below).
  */
 export async function runFinalHermesValidation(
   criteria: DiscoveryCriteria,
@@ -830,14 +860,15 @@ export async function runFinalHermesValidation(
     "=== REAL SEARCH EVIDENCE (the only ground truth — every accepted candidate must cite one of these URLs) ===",
     evidenceText || "(no evidence)",
     "",
-    "=== CANDIDATE PROSPECTS TO REVIEW ===",
+    "=== CANDIDATE PROSPECTS TO REVIEW (produced by a separate system — verify independently, do not just trust them) ===",
     JSON.stringify(candidates),
   ].join("\n");
 
   const result = await runHermesCompletion({
     organizationId: criteria.organizationId,
-    agentType: "lead_discovery_final_validation",
+    agentType: "lead_discovery_hermes_review",
     taskType: "LEAD_DISCOVERY",
+    model: INDEPENDENT_REVIEWER_MODEL,
     systemPrompt: FINAL_VALIDATION_SYSTEM_PROMPT,
     userPrompt,
     maxTokens: FINAL_VALIDATION_MAX_TOKENS,

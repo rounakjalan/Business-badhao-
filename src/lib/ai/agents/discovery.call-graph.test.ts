@@ -176,7 +176,10 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
             // Fabricated Traders (a mistake — testing the safety net below),
             // but excludes Rao Fabrics even though it's just as grounded —
             // that exclusion is this call's own judgment, tested at G/H.
-            return openRouterResponse({ accepted: [extractedCandidates[0], extractedCandidates[2]] });
+            // Responds as the real Nous Hermes model would — echoing back a
+            // model string genuinely different from Nemotron's, matching
+            // what the real request itself asks for (asserted below).
+            return openRouterResponse({ accepted: [extractedCandidates[0], extractedCandidates[2]] }, "nousresearch/hermes-4-70b");
           }
           if (userPrompt.includes("REAL SEARCH RESULTS")) {
             return openRouterResponse({ prospects: extractedCandidates });
@@ -217,10 +220,18 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     expect(extractionPrompt).toContain(realHit.url);
     expect(extractionPrompt).toContain("Sharma Boutique and Rao Fabrics are family-run clothing stores in Jaipur");
 
-    // E: the third call's own prompt is distinct from the second's — it
-    // carries the same real evidence AND the second call's own extracted
-    // candidates (not the original campaign prompt, not empty).
-    expect(openRouterCalls[2].body.model).toBe(DEFAULT_OPENROUTER_MODEL);
+    // E: this is the independence proof, at the strongest level this test
+    // file can offer — the real HTTP request body actually sent to
+    // OpenRouter for the third call names a genuinely different model than
+    // the first two calls did. Not a different agentType, not a different
+    // function name: the literal `model` field of a real network request.
+    expect(openRouterCalls[2].body.model).toBe("nousresearch/hermes-4-70b");
+    expect(openRouterCalls[2].body.model).not.toBe(DEFAULT_OPENROUTER_MODEL);
+    expect(openRouterCalls[2].body.model).not.toBe(openRouterCalls[0].body.model);
+    expect(openRouterCalls[2].body.model).not.toBe(openRouterCalls[1].body.model);
+    // Its prompt is also distinct from the second call's — it carries the
+    // same real evidence AND the second call's own extracted candidates
+    // (not the original campaign prompt, not empty).
     const finalValidationPrompt = String((openRouterCalls[2].body.messages as { content: string }[])[1].content);
     expect(finalValidationPrompt).toContain(realHit.url);
     expect(finalValidationPrompt).toContain("Sharma Boutique and Rao Fabrics are family-run clothing stores in Jaipur");
@@ -269,7 +280,7 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
         if (url === OPENROUTER_URL) {
           openRouterCalls.push({ url, body });
           const userPrompt = String(body.messages?.[1]?.content ?? "");
-          if (userPrompt.includes("CANDIDATE PROSPECTS TO REVIEW")) return openRouterResponse({ accepted: [candidate] });
+          if (userPrompt.includes("CANDIDATE PROSPECTS TO REVIEW")) return openRouterResponse({ accepted: [candidate] }, "nousresearch/hermes-4-70b");
           if (userPrompt.includes("REAL SEARCH RESULTS")) return openRouterResponse({ prospects: [candidate] });
           return openRouterResponse({ queries: ["retail store owners in Jaipur"] });
         }
@@ -287,10 +298,14 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     expect(result.prospects[0].sourceUrl).toBe(exaHit.url);
     expect(result.telemetry?.servedByExa).toEqual(["retail store owners in Jaipur"]);
 
-    // The third (final Hermes) call's own prompt genuinely carries Exa's
-    // real result, exactly as the second call's did — the fallback isn't
-    // special-cased away once it reaches later stages.
+    // The third (independent Hermes review) call's own prompt genuinely
+    // carries Exa's real result, exactly as the second call's did — the
+    // fallback isn't special-cased away once it reaches later stages —
+    // and it still requests a genuinely different model even when the
+    // evidence came from Exa rather than Tavily.
     expect(openRouterCalls).toHaveLength(3);
+    expect(openRouterCalls[2].body.model).toBe("nousresearch/hermes-4-70b");
+    expect(openRouterCalls[2].body.model).not.toBe(openRouterCalls[1].body.model);
     const finalValidationPrompt = String((openRouterCalls[2].body.messages as { content: string }[])[1].content);
     expect(finalValidationPrompt).toContain(exaHit.url);
     expect(finalValidationPrompt).toContain("Mehta Fashions is a boutique clothing retailer in Jaipur");
