@@ -7,8 +7,11 @@ import {
   updateCampaign,
   updateCampaignStatus,
   startLeadDiscoveryAction,
+  stopLeadDiscoveryAction,
+  resumeLeadDiscoveryAction,
   getLeadDiscoveryProgressAction,
   type DiscoveryProgress,
+  type DiscoveryScheduleView,
   type DiscoveredLeadRow,
   type DiscoveredProspectSummary,
   type LeadDiscoveryActionResult,
@@ -41,7 +44,23 @@ type DealRow = { id: string; title: string; status: string; value: number; curre
 type DiscoveryState = {
   lastRun: { status: string; startedAt: string | null; completedAt: string | null; output: Json } | null;
   discoveredLeads: DiscoveredLeadRow[];
+  schedule: DiscoveryScheduleView | null;
 };
+
+/**
+ * "Next discovery: approximately …" — deliberately approximate. The sweep
+ * ticks hourly, so a campaign due in 8 minutes is picked up on the next tick,
+ * not at the minute. Saying "approximately" is what the schedule actually
+ * guarantees; a live countdown to the second would be a promise the cron
+ * cannot keep.
+ */
+function describeNextRun(minutes: number | null): string {
+  if (minutes === null) return "not scheduled";
+  if (minutes <= 1) return "due now — on the next hourly check";
+  if (minutes < 60) return `approximately ${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  return hours === 1 ? "approximately 1 hour" : `approximately ${hours} hours`;
+}
 
 export type LeadStatusCounts = {
   pending: number;
@@ -98,11 +117,36 @@ export function CampaignDetailTabs({
   const [progress, setProgress] = useState<DiscoveryProgress | null>(null);
   const [justFinished, setJustFinished] = useState(false);
 
+  // The recurring cycle's state. Server-rendered first, then kept live by the
+  // same poll that tracks progress, so Stop/Resume pressed in another tab is
+  // reflected here too.
+  const [schedule, setSchedule] = useState<DiscoveryScheduleView | null>(discovery.schedule);
+  const [schedulePending, setSchedulePending] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+
   // Whether a run is in flight is a fact about the server, not this
   // component — so it is read from the last run's status and refreshed by
   // polling. Correct after a reload, in a second tab, or on another device.
   const liveStatus = progress?.status ?? discovery.lastRun?.status ?? null;
   const isDiscoveryRunning = liveStatus === "running";
+
+  const stopDiscovery = async () => {
+    setSchedulePending(true);
+    setScheduleError(null);
+    const result = await stopLeadDiscoveryAction(campaign.id);
+    setSchedulePending(false);
+    if (result.ok) setSchedule(result.schedule);
+    else setScheduleError(result.message);
+  };
+
+  const resumeDiscovery = async () => {
+    setSchedulePending(true);
+    setScheduleError(null);
+    const result = await resumeLeadDiscoveryAction(campaign.id);
+    setSchedulePending(false);
+    if (result.ok) setSchedule(result.schedule);
+    else setScheduleError(result.message);
+  };
 
   const startDiscovery = () => {
     if (isDiscoveryRunning) return;
@@ -125,6 +169,7 @@ export function CampaignDetailTabs({
       scored: p?.scored ?? 0,
       followUp: null,
       message: null,
+      schedule: p?.schedule ?? schedule,
     }));
   };
 
@@ -136,6 +181,10 @@ export function CampaignDetailTabs({
       const next = await getLeadDiscoveryProgressAction(campaign.id);
       if (cancelled) return;
       setProgress(next);
+      // The run that just finished is what books the next one, so the fresh
+      // schedule only exists after it ends — read it from the same poll
+      // rather than making the user reload to see when discovery returns.
+      if (next.schedule) setSchedule(next.schedule);
       if (next.status && next.status !== "running") {
         setJustFinished(true);
         notifyDiscoveryFinished(next);
@@ -326,6 +375,11 @@ export function CampaignDetailTabs({
             justFinished={justFinished}
             result={discoveryResult}
             onStart={startDiscovery}
+            schedule={schedule}
+            schedulePending={schedulePending}
+            scheduleError={scheduleError}
+            onStop={stopDiscovery}
+            onResume={resumeDiscovery}
           />
         ) : null}
 
@@ -642,6 +696,11 @@ function LeadDiscoveryTab({
   justFinished,
   result,
   onStart,
+  schedule,
+  schedulePending,
+  scheduleError,
+  onStop,
+  onResume,
 }: {
   hasIcp: boolean;
   discoveryConfigured: boolean;
@@ -651,6 +710,11 @@ function LeadDiscoveryTab({
   justFinished: boolean;
   result: LeadDiscoveryActionResult | null;
   onStart: () => void;
+  schedule: DiscoveryScheduleView | null;
+  schedulePending: boolean;
+  scheduleError: string | null;
+  onStop: () => void;
+  onResume: () => void;
 }) {
   if (!hasIcp) {
     return (
@@ -663,6 +727,7 @@ function LeadDiscoveryTab({
   }
 
   const lastRunOutput = (discovery.lastRun?.output ?? null) as LastRunOutput | null;
+  const isStopped = schedule?.state === "stopped";
 
   return (
     <div className="max-w-3xl space-y-5">
@@ -681,6 +746,51 @@ function LeadDiscoveryTab({
           </DashButton>
         </div>
       </DarkCard>
+
+      {/*
+        The recurring cycle. Each run stops at its own time budget and books
+        the next one about an hour later, so the campaign keeps finding new
+        prospects — already-discovered businesses are deduplicated away
+        against the database on every run, never saved twice.
+      */}
+      {schedule ? (
+        <DarkCard className={`p-5 ${isStopped ? "" : "border-bb-emerald/30"}`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm">
+              {isStopped ? (
+                <>
+                  <p className="font-medium text-bb-text-2">Discovery stopped</p>
+                  <p className="mt-1 text-xs text-bb-text-3">
+                    No further discovery runs are scheduled for this campaign. Leads already found are unaffected and still
+                    get researched and qualified.
+                  </p>
+                </>
+              ) : isRunning ? (
+                <>
+                  <p className="font-medium text-bb-emerald">Discovery running</p>
+                  <p className="mt-1 text-xs text-bb-text-3">
+                    The next run is scheduled automatically when this one finishes — about an hour later.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-medium text-bb-emerald">Discovery running on a schedule</p>
+                  <p className="mt-1 text-xs text-bb-text-3">
+                    Next discovery: {describeNextRun(schedule.minutesUntilNextRun)}. Each run searches for new prospects only.
+                  </p>
+                </>
+              )}
+              {schedule.state === "failed" && schedule.lastError ? (
+                <p className="mt-2 text-xs text-bb-amber">Last run failed: {schedule.lastError} It will be retried.</p>
+              ) : null}
+            </div>
+            <DashButton variant="outline" disabled={schedulePending} onClick={isStopped ? onResume : onStop}>
+              {schedulePending ? "Saving…" : isStopped ? "Resume Discovery" : "Stop Discovery"}
+            </DashButton>
+          </div>
+          {scheduleError ? <p className="mt-3 text-xs text-bb-rose">{scheduleError}</p> : null}
+        </DarkCard>
+      ) : null}
 
       {!discoveryConfigured ? (
         <DarkAlert variant="error">

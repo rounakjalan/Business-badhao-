@@ -7,6 +7,16 @@ import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discove
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
+import { enrichProspectContact, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import {
+  getCampaignDiscoverySchedule,
+  markDiscoveryFinished,
+  markDiscoveryRunning,
+  minutesUntilNextRun,
+  resumeCampaignDiscovery,
+  stopCampaignDiscovery,
+  type CampaignDiscoverySchedule,
+} from "@/lib/pipeline/discovery-schedule";
 import { runLeadResearchAction, runLeadQualificationAction } from "@/app/(dashboard)/leads/actions";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
@@ -441,6 +451,11 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   }
 
   const agentRun = await createAgentRun(currentOrg.organizationId, "lead_discovery", { campaignId } as unknown as Json);
+  // Pressing Start also starts the recurring cycle: this run marks the
+  // campaign as running, and whatever it finds (or fails on) books the next
+  // run about an hour out. A user who only ever presses the button once still
+  // gets exactly the run they asked for — the schedule is what happens after.
+  await markDiscoveryRunning(supabase, campaignId, currentOrg.organizationId);
 
   const businessContext = await getBusinessContext(currentOrg.organizationId);
 
@@ -459,6 +474,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
       message: result.message,
       telemetry: result.telemetry ?? null,
     } as unknown as Json);
+    await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: false, error: result.message });
     return { ok: false, code: result.code, message: result.message };
   }
 
@@ -502,6 +518,12 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   const newLeadIds: string[] = [];
 
   for (const prospect of newProspects) {
+    // A search result almost never states an email or phone, which is why
+    // prospects used to be saved with neither even when the business
+    // published both. Read the business's own site for what it actually
+    // lists — every field comes back with the page it was read from.
+    const contact = await enrichProspectContact(prospect.website);
+
     const { data: prospectRow } = await supabase
       .from("prospects")
       .insert({
@@ -509,20 +531,23 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
         campaign_id: campaignId,
         lead_source_id: leadSourceId,
         company_name: prospect.companyName,
-        email: prospect.email,
-        phone: prospect.phone,
+        email: prospect.email ?? contact?.email?.value ?? null,
+        phone: prospect.phone ?? contact?.phone?.value ?? null,
         website: prospect.website,
-        raw_data: {
-          location: prospect.location,
-          industry: prospect.industry,
-          businessType: prospect.businessType,
-          matchedIcpCriteria: prospect.matchedIcpCriteria,
-          evidenceSnippet: prospect.evidenceSnippet,
-          sourceUrl: prospect.sourceUrl,
-          searchQuery: prospect.searchQuery,
-          discoverySource: provider.name,
-          discoveredAt: new Date().toISOString(),
-        } as unknown as Json,
+        raw_data: mergeContactIntoRawData(
+          {
+            location: prospect.location,
+            industry: prospect.industry,
+            businessType: prospect.businessType,
+            matchedIcpCriteria: prospect.matchedIcpCriteria,
+            evidenceSnippet: prospect.evidenceSnippet,
+            sourceUrl: prospect.sourceUrl,
+            searchQuery: prospect.searchQuery,
+            discoverySource: provider.name,
+            discoveredAt: new Date().toISOString(),
+          },
+          contact
+        ) as unknown as Json,
       })
       .select("id")
       .single();
@@ -581,6 +606,11 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     telemetry: result.telemetry ?? null,
   } as unknown as Json);
 
+  // Books the next run in this campaign's single schedule slot — see
+  // discovery-schedule.ts. Two runs finishing at once overwrite one slot
+  // rather than queueing two jobs, so this cannot double-schedule.
+  await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: true });
+
   revalidatePath(`/campaigns/${campaignId}`);
 
   return {
@@ -596,6 +626,82 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   };
 }
 
+// ---------------------------------------------------------------------------
+// Recurring discovery controls. Discovery repeats about hourly while a
+// campaign is active (see discovery-schedule.ts and the cron sweep); these are
+// the two buttons that turn that cycle off and back on.
+// ---------------------------------------------------------------------------
+
+export type DiscoveryScheduleView = {
+  state: "running" | "scheduled" | "stopped" | "completed" | "failed";
+  nextRunAt: string | null;
+  /** Whole minutes until the next run — null when nothing is scheduled. */
+  minutesUntilNextRun: number | null;
+  lastRunAt: string | null;
+  lastError: string | null;
+};
+
+export type DiscoveryControlResult = { ok: true; schedule: DiscoveryScheduleView } | { ok: false; message: string };
+
+async function readSchedule(campaignId: string): Promise<DiscoveryScheduleView | null> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return null;
+
+  const supabase = await createClient();
+  const schedule = await getCampaignDiscoverySchedule(supabase, campaignId, currentOrg.organizationId);
+  return schedule ? toScheduleView(schedule) : null;
+}
+
+function toScheduleView(schedule: CampaignDiscoverySchedule): DiscoveryScheduleView {
+  return {
+    state: schedule.state,
+    nextRunAt: schedule.nextRunAt,
+    minutesUntilNextRun: minutesUntilNextRun(schedule.nextRunAt),
+    lastRunAt: schedule.lastRunAt,
+    lastError: schedule.lastError,
+  };
+}
+
+/**
+ * Stop Discovery. Clears the campaign's pending schedule slot, so the sweep
+ * skips it entirely — this prevents future runs rather than merely hiding
+ * them. A run already in flight finishes the work it started (its results are
+ * real and already partly saved) but will not book another one, because
+ * markDiscoveryFinished refuses to revive a stopped campaign.
+ */
+export async function stopLeadDiscoveryAction(campaignId: string): Promise<DiscoveryControlResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to change discovery." };
+
+  const supabase = await createClient();
+  const stopped = await stopCampaignDiscovery(supabase, campaignId, currentOrg.organizationId);
+  if (!stopped) return { ok: false, message: "Campaign not found." };
+
+  revalidatePath(`/campaigns/${campaignId}`);
+
+  const schedule = await readSchedule(campaignId);
+  return schedule ? { ok: true, schedule } : { ok: false, message: "Campaign not found." };
+}
+
+/** Resume Discovery. Books the campaign as due now, so the next sweep picks it up. */
+export async function resumeLeadDiscoveryAction(campaignId: string): Promise<DiscoveryControlResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to change discovery." };
+
+  const supabase = await createClient();
+  const resumed = await resumeCampaignDiscovery(supabase, campaignId, currentOrg.organizationId);
+  if (!resumed) return { ok: false, message: "Campaign not found." };
+
+  revalidatePath(`/campaigns/${campaignId}`);
+
+  const schedule = await readSchedule(campaignId);
+  return schedule ? { ok: true, schedule } : { ok: false, message: "Campaign not found." };
+}
+
+export async function getDiscoveryScheduleAction(campaignId: string): Promise<DiscoveryScheduleView | null> {
+  return readSchedule(campaignId);
+}
+
 export type DiscoveryProgress = {
   /** null when this campaign has never been run. */
   status: "running" | "completed" | "partially_completed" | "failed" | null;
@@ -606,6 +712,8 @@ export type DiscoveryProgress = {
   scored: number;
   followUp: DiscoveryFollowUpSummary | null;
   message: string | null;
+  /** The recurring cycle's current state, polled alongside progress so Stop/Resume and "next run" stay live in every open tab. */
+  schedule: DiscoveryScheduleView | null;
 };
 
 /**
@@ -631,12 +739,15 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
     scored: 0,
     followUp: null,
     message: null,
+    schedule: null,
   };
 
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return empty;
 
   const supabase = await createClient();
+  const scheduleRow = await getCampaignDiscoverySchedule(supabase, campaignId, currentOrg.organizationId);
+  const schedule = scheduleRow ? toScheduleView(scheduleRow) : null;
 
   const [run, leadRows] = await Promise.all([
     supabase
@@ -651,7 +762,9 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
     supabase.from("leads").select("id, qualification_status").eq("campaign_id", campaignId),
   ]);
 
-  if (!run.data) return empty;
+  // A campaign with no run yet still has a schedule to report — that is how
+  // the tab can offer Stop before the first manual run has ever happened.
+  if (!run.data) return { ...empty, schedule };
 
   const leads = leadRows.data ?? [];
   const leadIds = leads.map((l) => l.id);
@@ -671,6 +784,7 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
     scored: leads.filter((l) => l.qualification_status !== "pending").length,
     followUp: output?.followUp ?? null,
     message: output?.message ?? null,
+    schedule,
   };
 }
 
@@ -689,11 +803,13 @@ export type DiscoveredLeadRow = {
 export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
   lastRun: { status: string; startedAt: string | null; completedAt: string | null; output: Json } | null;
   discoveredLeads: DiscoveredLeadRow[];
+  schedule: DiscoveryScheduleView | null;
 }> {
   const currentOrg = await getCurrentOrg();
-  if (!currentOrg) return { lastRun: null, discoveredLeads: [] };
+  if (!currentOrg) return { lastRun: null, discoveredLeads: [], schedule: null };
 
   const supabase = await createClient();
+  const scheduleRow = await getCampaignDiscoverySchedule(supabase, campaignId, currentOrg.organizationId);
 
   const [lastRun, discoverySource] = await Promise.all([
     // Matched on campaignId in the query rather than by fetching a page of
@@ -764,5 +880,6 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
         }
       : null,
     discoveredLeads,
+    schedule: scheduleRow ? toScheduleView(scheduleRow) : null,
   };
 }

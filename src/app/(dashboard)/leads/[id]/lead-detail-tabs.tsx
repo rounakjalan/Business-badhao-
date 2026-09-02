@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import {
   addContactForLead,
+  findLeadContactAction,
   generateLeadOutreachAction,
   quickCreateDealForLead,
   quickCreateTaskForLead,
@@ -21,7 +22,7 @@ import { DarkCard } from "@/components/dashboard-ui/card";
 import { BuyingIntentBadge, LeadStatusBadge, QualificationBadge, ScorePill, TaskStatusBadge, ConversationStatusBadge, DealStatusBadge } from "@/components/dashboard-ui/badge";
 import { SparklesIcon } from "@/components/ui/icons";
 import { formatDate } from "@/lib/format";
-import type { ProspectRawData } from "@/lib/prospects";
+import type { ProspectContact, ProspectContactField, ProspectRawData } from "@/lib/prospects";
 
 const SEND_ERROR_LABELS: Record<string, string> = {
   not_connected: "Gmail isn't connected for this organization yet.",
@@ -98,6 +99,32 @@ export function LeadDetailTabs({
   const [sendResult, setSendResult] = useState<SendOutreachResult | null>(null);
   const [showAddContact, setShowAddContact] = useState(false);
   const [addContactPending, startAddContactTransition] = useTransition();
+
+  // Contact channels read from the company's own website. Seeded from what
+  // discovery already saved, and replaced in place when the user asks for a
+  // fresh read — so the card updates without a reload.
+  const [contact, setContact] = useState<ProspectContact | null>(discovery.contact);
+  const [findingContact, setFindingContact] = useState(false);
+  const [contactMessage, setContactMessage] = useState<string | null>(null);
+
+  async function findContact() {
+    setFindingContact(true);
+    setContactMessage(null);
+    const result = await findLeadContactAction(lead.id);
+    setFindingContact(false);
+
+    if (!result.ok) {
+      setContactMessage(result.message);
+      return;
+    }
+    if (!result.found) {
+      // An honest empty result, not a failure: the site was read and simply
+      // did not publish anything reachable.
+      setContactMessage("Read the website but found no published contact details.");
+      return;
+    }
+    setContact(result.contact);
+  }
 
   function submitAddContact(formData: FormData) {
     startAddContactTransition(async () => {
@@ -223,13 +250,27 @@ export function LeadDetailTabs({
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <div className="space-y-4 lg:col-span-2">
               <DarkCard className="p-5">
-                <h4 className="mb-3 border-b border-bb-border pb-3 text-sm font-semibold text-bb-text">Contact Information</h4>
-                <Row label="Email" val={recipientEmail ?? "—"} />
-                <Row label="Phone" val={primaryContact?.phone ?? "—"} />
-                <Row label="Company" val={companyName ?? "—"} />
-                <Row label="Location" val={discovery.location ?? "—"} />
-                <Row label="Industry" val={discovery.industry ?? "—"} />
-                <Row label="Campaign" val={campaignName ?? "—"} />
+                <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
+                  <h4 className="text-sm font-semibold text-bb-text">Contact Information</h4>
+                  {website ? (
+                    <DashButton variant="outline" disabled={findingContact} onClick={findContact}>
+                      {findingContact ? "Reading site…" : "Find Contact Info"}
+                    </DashButton>
+                  ) : null}
+                </div>
+                <ContactChannels
+                  contact={contact}
+                  email={recipientEmail}
+                  phone={primaryContact?.phone ?? null}
+                  website={website}
+                  location={discovery.location}
+                />
+                <div className="mt-2 border-t border-bb-border pt-2">
+                  <Row label="Company" val={companyName ?? "—"} />
+                  <Row label="Industry" val={discovery.industry ?? "—"} />
+                  <Row label="Campaign" val={campaignName ?? "—"} />
+                </div>
+                {contactMessage ? <p className="mt-3 text-xs text-bb-text-3">{contactMessage}</p> : null}
               </DarkCard>
               <DarkCard className="p-5">
                 <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
@@ -579,6 +620,126 @@ export function LeadDetailTabs({
       </div>
     </div>
   );
+}
+
+/**
+ * One contact channel, as a link where a link makes sense.
+ *
+ * The source URL is rendered as a title attribute rather than as visible
+ * text: the point of storing it is that every value on this card can be
+ * traced back to the page it was read from, without turning the card into a
+ * wall of URLs.
+ */
+function ContactRow({ label, field, href, display }: { label: string; field: ProspectContactField; href?: string; display?: string }) {
+  const text = display ?? field.value;
+  return (
+    <div className="flex items-start justify-between gap-3 py-1.5">
+      <span className="shrink-0 text-xs text-bb-text-3">{label}</span>
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Found on ${field.source}`}
+          className="truncate text-right text-sm text-bb-indigo-2 hover:underline"
+        >
+          {text}
+        </a>
+      ) : (
+        <span title={`Found on ${field.source}`} className="truncate text-right text-sm text-bb-text-2">
+          {text}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Shortens a URL to its host + first path segment, so a social link reads as a handle rather than a query string. */
+function shortenUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/\/$/, "");
+    return `${parsed.hostname.replace(/^www\./, "")}${path}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Every contact channel actually on file for this lead.
+ *
+ * Only channels that exist are rendered — a lead with no LinkedIn simply has
+ * no LinkedIn row, rather than a row reading "—". The one deliberate
+ * exception is the all-empty case, which says so in words instead of showing
+ * an empty card.
+ *
+ * A contact form counts as a real, usable channel: a business that publishes
+ * only a form is still reachable, and showing "Contact form available" with a
+ * working link is the honest way to say that — far better than the dash this
+ * card used to show while the research evidence held a perfectly good way in.
+ */
+function ContactChannels({
+  contact,
+  email,
+  phone,
+  website,
+  location,
+}: {
+  contact: ProspectContact | null;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  location: string | null;
+}) {
+  // A contact row entered by a human, or an address already on the prospect,
+  // outranks anything re-read from the website.
+  const emailField: ProspectContactField | null = email
+    ? { value: email, source: contact?.email?.source ?? "on file" }
+    : (contact?.email ?? null);
+  const phoneField: ProspectContactField | null = phone
+    ? { value: phone, source: contact?.phone?.source ?? "on file" }
+    : (contact?.phone ?? null);
+  const addressField: ProspectContactField | null = contact?.address ?? (location ? { value: location, source: "discovery" } : null);
+
+  const hasDirectContact = Boolean(emailField || phoneField || contact?.whatsapp);
+  const rows = [
+    emailField ? <ContactRow key="email" label="Email" field={emailField} href={`mailto:${emailField.value}`} /> : null,
+    phoneField ? <ContactRow key="phone" label="Phone" field={phoneField} href={`tel:${phoneField.value.replace(/\s+/g, "")}`} /> : null,
+    contact?.whatsapp ? (
+      <ContactRow key="whatsapp" label="WhatsApp" field={contact.whatsapp} href={contact.whatsapp.value} display="Open chat" />
+    ) : null,
+    contact?.contactPageUrl ? (
+      <ContactRow key="contact-page" label="Contact page" field={contact.contactPageUrl} href={contact.contactPageUrl.value} display="Open" />
+    ) : null,
+    contact?.contactFormUrl ? (
+      <ContactRow
+        key="contact-form"
+        label="Contact form"
+        field={contact.contactFormUrl}
+        href={contact.contactFormUrl.value}
+        display={hasDirectContact ? "Open form" : "Contact form available"}
+      />
+    ) : null,
+    contact?.instagram ? (
+      <ContactRow key="instagram" label="Instagram" field={contact.instagram} href={contact.instagram.value} display={shortenUrl(contact.instagram.value)} />
+    ) : null,
+    contact?.linkedin ? (
+      <ContactRow key="linkedin" label="LinkedIn" field={contact.linkedin} href={contact.linkedin.value} display={shortenUrl(contact.linkedin.value)} />
+    ) : null,
+    contact?.facebook ? (
+      <ContactRow key="facebook" label="Facebook" field={contact.facebook} href={contact.facebook.value} display={shortenUrl(contact.facebook.value)} />
+    ) : null,
+    website ? (
+      <ContactRow key="website" label="Website" field={{ value: website, source: website }} href={website} display={shortenUrl(website)} />
+    ) : null,
+    addressField ? <ContactRow key="address" label="Address" field={addressField} /> : null,
+  ].filter(Boolean);
+
+  if (rows.length === 0) {
+    return <p className="py-2 text-sm text-bb-text-3">No contact details on file yet.</p>;
+  }
+
+  return <div>{rows}</div>;
 }
 
 function Row({ label, val }: { label: string; val: string }) {

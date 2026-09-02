@@ -171,6 +171,10 @@ export interface Database {
           objective: string | null;
           target_audience: string | null;
           status: "draft" | "planning" | "active" | "paused" | "completed" | "archived";
+          discovery_state: "running" | "scheduled" | "stopped" | "completed" | "failed";
+          discovery_next_run_at: string | null;
+          discovery_last_run_at: string | null;
+          discovery_last_error: string | null;
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -185,6 +189,10 @@ export interface Database {
           objective?: string | null;
           target_audience?: string | null;
           status?: "draft" | "planning" | "active" | "paused" | "completed" | "archived";
+          discovery_state?: "running" | "scheduled" | "stopped" | "completed" | "failed";
+          discovery_next_run_at?: string | null;
+          discovery_last_run_at?: string | null;
+          discovery_last_error?: string | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -199,6 +207,10 @@ export interface Database {
           objective?: string | null;
           target_audience?: string | null;
           status?: "draft" | "planning" | "active" | "paused" | "completed" | "archived";
+          discovery_state?: "running" | "scheduled" | "stopped" | "completed" | "failed";
+          discovery_next_run_at?: string | null;
+          discovery_last_run_at?: string | null;
+          discovery_last_error?: string | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;

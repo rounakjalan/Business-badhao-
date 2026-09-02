@@ -14,6 +14,7 @@ describe("parseProspectRawData", () => {
       searchQuery: null,
       discoverySource: null,
       discoveredAt: null,
+      contact: null,
     });
   });
 
@@ -48,6 +49,7 @@ describe("parseProspectRawData", () => {
       searchQuery: "electronics stores Delhi",
       discoverySource: "tavily",
       discoveredAt: "2026-08-20T10:00:00.000Z",
+      contact: null,
     });
   });
 
@@ -68,5 +70,51 @@ describe("parseProspectRawData", () => {
   it("filters non-string entries out of matchedIcpCriteria rather than failing the whole field", () => {
     const result = parseProspectRawData({ matchedIcpCriteria: ["real one", 5, null, "real two"] } as unknown as Json);
     expect(result.matchedIcpCriteria).toEqual(["real one", "real two"]);
+  });
+
+  describe("contact channels", () => {
+    it("reads the contact block discovery's website enrichment writes", () => {
+      const result = parseProspectRawData({
+        contact: {
+          email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact" },
+          phone: { value: "+91 98765 43210", source: "https://brightpixel.in/contact" },
+          instagram: { value: "https://instagram.com/brightpixel", source: "https://brightpixel.in/" },
+          enrichedAt: "2026-09-02T10:00:00.000Z",
+        },
+      } as unknown as Json);
+
+      expect(result.contact?.email).toEqual({ value: "hello@brightpixel.in", source: "https://brightpixel.in/contact" });
+      expect(result.contact?.phone?.value).toBe("+91 98765 43210");
+      expect(result.contact?.instagram?.source).toBe("https://brightpixel.in/");
+      expect(result.contact?.enrichedAt).toBe("2026-09-02T10:00:00.000Z");
+    });
+
+    it("drops a contact that arrived without the page it came from — an unsourced contact is not evidence", () => {
+      const result = parseProspectRawData({
+        contact: { phone: { value: "+91 98765 43210" }, email: { value: "x@y.in", source: "" } },
+      } as unknown as Json);
+
+      expect(result.contact).toBeNull();
+    });
+
+    it("keeps the sourced channels and drops only the unsourced ones", () => {
+      const result = parseProspectRawData({
+        contact: {
+          phone: { value: "+91 98765 43210" },
+          email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact" },
+        },
+      } as unknown as Json);
+
+      expect(result.contact?.phone).toBeNull();
+      expect(result.contact?.email?.value).toBe("hello@brightpixel.in");
+    });
+
+    it("returns null when a prospect has no contact block at all", () => {
+      expect(parseProspectRawData({ location: "Delhi" } as unknown as Json).contact).toBeNull();
+    });
+
+    it("returns null for a contact block holding only a timestamp and no real channel", () => {
+      expect(parseProspectRawData({ contact: { enrichedAt: "2026-09-02T10:00:00.000Z" } } as unknown as Json).contact).toBeNull();
+    });
   });
 });

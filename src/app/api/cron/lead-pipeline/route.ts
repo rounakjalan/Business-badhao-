@@ -10,8 +10,14 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * step has to fit inside the AI provider's per-minute token allowance, so a
  * single run cannot be made much bigger without failing outright. Running on
  * a schedule is the way to accumulate leads over time without the AI running
- * continuously: each day adds a fresh batch, deduplicated against everything
- * already found.
+ * continuously: each cycle adds a fresh batch, deduplicated against
+ * everything already found.
+ *
+ * This sweep ticks hourly, but a campaign is only discovered for when its own
+ * discovery_next_run_at slot is due (roughly an hour after its last run) and
+ * its discovery has not been stopped — see discovery-schedule.ts. The tick
+ * rate is therefore the resolution of the cycle, not its frequency: raising
+ * it would not make any one campaign search more often.
  *
  * It also removes the clicking, in both directions:
  * - On the campaign side: a campaign only needs a saved ICP to be reachable.
@@ -97,10 +103,16 @@ export async function GET(request: Request) {
     summary.leadsFailed += finished.failed;
   }
 
-  // Pass 2: discovery.
+  // Pass 2: discovery — only for campaigns whose next scheduled run is
+  // actually due. This sweep runs hourly, so most campaigns are skipped on
+  // most ticks; a campaign the user stopped is never picked up at all.
   for (const campaign of campaigns) {
     if (outOfTime()) {
       summary.skipped.push({ campaignId: campaign.id, reason: "out_of_time" });
+      continue;
+    }
+    if (!campaign.discoveryDue) {
+      summary.skipped.push({ campaignId: campaign.id, reason: campaign.discoverySkipReason ?? "not_due" });
       continue;
     }
     const discovered = await runDiscoveryForCampaign(supabase, campaign.organizationId, campaign.id, startedAtMs, TOTAL_BUDGET_MS);

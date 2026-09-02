@@ -3,6 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discovery";
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
+import { isDiscoveryDue, markDiscoveryFinished, markDiscoveryRunning } from "@/lib/pipeline/discovery-schedule";
+import { enrichProspectContact, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
 import { qualifyLead, researchLead } from "@/lib/pipeline/lead-pipeline";
 import type { Database, Json } from "@/types/database.types";
 
@@ -21,17 +23,36 @@ export type PipelineRunSummary = {
 };
 
 /**
- * Don't re-discover a campaign that was searched recently. The schedule is
- * daily, but a manual run an hour earlier has already spent the search
- * budget and would mostly return the same businesses to be deduplicated
- * away again.
+ * Don't re-discover a campaign that was searched minutes ago — a manual run
+ * has already spent the search budget and would mostly return the same
+ * businesses to be deduplicated away again.
+ *
+ * Deliberately shorter than the hourly cycle this now drives: the campaign's
+ * own discovery_next_run_at is what decides when a run is due (see
+ * isDiscoveryDue), and a cooldown at or above the interval would veto every
+ * scheduled run before that slot was ever consulted. This is the backstop for
+ * a manual run and a scheduled one landing on top of each other, nothing more.
  */
-const DISCOVERY_COOLDOWN_MS = 20 * 60 * 60 * 1000;
+const DISCOVERY_COOLDOWN_MS = 55 * 60 * 1000;
 
 /** Ceiling on how many stale leads one scheduled run will finish per campaign. */
 const MAX_LEADS_FINISHED_PER_CAMPAIGN = 12;
 
-export type EligibleCampaign = { id: string; organizationId: string; wasAutoLaunched: boolean };
+export type EligibleCampaign = {
+  id: string;
+  organizationId: string;
+  wasAutoLaunched: boolean;
+  /**
+   * Whether this campaign's *discovery* is due this sweep. Backlog work
+   * (finishPendingLeads) is deliberately not gated on it: a campaign whose
+   * discovery the user stopped should still have its already-discovered leads
+   * researched and qualified, or stopping discovery would quietly strand
+   * every lead it had already found.
+   */
+  discoveryDue: boolean;
+  /** Set when discovery is not due, so the run summary can say why rather than reporting a silent skip. */
+  discoverySkipReason: "stopped" | "not_due" | null;
+};
 
 /**
  * Finds every campaign the scheduled pipeline should touch this run, and
@@ -54,7 +75,7 @@ export type EligibleCampaign = { id: string; organizationId: string; wasAutoLaun
 export async function findEligibleCampaigns(supabase: Client): Promise<EligibleCampaign[]> {
   const { data: campaigns } = await supabase
     .from("campaigns")
-    .select("id, organization_id, status, ideal_customer_profile_id")
+    .select("id, organization_id, status, ideal_customer_profile_id, discovery_state, discovery_next_run_at, discovery_last_run_at")
     .in("status", ["active", "draft", "planning"])
     .not("ideal_customer_profile_id", "is", null);
 
@@ -69,12 +90,15 @@ export async function findEligibleCampaigns(supabase: Client): Promise<EligibleC
     const criteria = campaign.ideal_customer_profile_id ? criteriaById.get(campaign.ideal_customer_profile_id) : null;
     if (!criteria || Object.keys(criteria).length === 0) continue;
 
+    const discoveryDue = isDiscoveryDue(campaign);
+    const discoverySkipReason = discoveryDue ? null : campaign.discovery_state === "stopped" ? "stopped" : "not_due";
+
     if (campaign.status !== "active") {
       const { error } = await supabase.from("campaigns").update({ status: "active" }).eq("id", campaign.id);
       if (error) continue; // Leave it for next run rather than processing a campaign still shown as draft.
-      eligible.push({ id: campaign.id, organizationId: campaign.organization_id, wasAutoLaunched: true });
+      eligible.push({ id: campaign.id, organizationId: campaign.organization_id, wasAutoLaunched: true, discoveryDue, discoverySkipReason });
     } else {
-      eligible.push({ id: campaign.id, organizationId: campaign.organization_id, wasAutoLaunched: false });
+      eligible.push({ id: campaign.id, organizationId: campaign.organization_id, wasAutoLaunched: false, discoveryDue, discoverySkipReason });
     }
   }
 
@@ -189,6 +213,8 @@ export async function runDiscoveryForCampaign(
   }
 
   const agentRun = await createAgentRun(organizationId, "lead_discovery", { campaignId, scheduled: true } as unknown as Json, supabase);
+  await markDiscoveryRunning(supabase, campaignId, organizationId);
+
   // Without the explicit client this returns empty Business Knowledge under
   // row-level security, silently ungrounding the whole run.
   const businessContext = await getBusinessContext(organizationId, supabase);
@@ -209,6 +235,10 @@ export async function runDiscoveryForCampaign(
       { code: result.code, message: result.message, telemetry: result.telemetry ?? null, scheduled: true } as unknown as Json,
       supabase
     );
+    // A failed run still books its next attempt — one slot, the same single
+    // slot a successful run writes, so a failure can never leave two
+    // schedules behind or end the cycle on a transient provider error.
+    await markDiscoveryFinished(supabase, campaignId, organizationId, { ok: false, error: result.message });
     return { ran: true, newLeads: 0, reason: result.code };
   }
 
@@ -246,6 +276,11 @@ export async function runDiscoveryForCampaign(
 
   let newLeadsCreated = 0;
   for (const prospect of newProspects) {
+    // Read the business's own site for publicly listed contact channels.
+    // Every field it returns carries the URL it was actually read from, and
+    // nothing is inferred — see contact-enrichment.ts.
+    const contact = await enrichProspectContact(prospect.website);
+
     const { data: prospectRow } = await supabase
       .from("prospects")
       .insert({
@@ -253,20 +288,23 @@ export async function runDiscoveryForCampaign(
         campaign_id: campaignId,
         lead_source_id: leadSourceId,
         company_name: prospect.companyName,
-        email: prospect.email,
-        phone: prospect.phone,
+        email: prospect.email ?? contact?.email?.value ?? null,
+        phone: prospect.phone ?? contact?.phone?.value ?? null,
         website: prospect.website,
-        raw_data: {
-          location: prospect.location,
-          industry: prospect.industry,
-          businessType: prospect.businessType,
-          matchedIcpCriteria: prospect.matchedIcpCriteria,
-          evidenceSnippet: prospect.evidenceSnippet,
-          sourceUrl: prospect.sourceUrl,
-          searchQuery: prospect.searchQuery,
-          discoverySource: provider.name,
-          discoveredAt: new Date().toISOString(),
-        } as unknown as Json,
+        raw_data: mergeContactIntoRawData(
+          {
+            location: prospect.location,
+            industry: prospect.industry,
+            businessType: prospect.businessType,
+            matchedIcpCriteria: prospect.matchedIcpCriteria,
+            evidenceSnippet: prospect.evidenceSnippet,
+            sourceUrl: prospect.sourceUrl,
+            searchQuery: prospect.searchQuery,
+            discoverySource: provider.name,
+            discoveredAt: new Date().toISOString(),
+          },
+          contact
+        ) as unknown as Json,
       })
       .select("id")
       .single();
@@ -316,6 +354,13 @@ export async function runDiscoveryForCampaign(
     } as unknown as Json,
     supabase
   );
+
+  // Book the next run in this campaign's single schedule slot. This is what
+  // makes discovery recurring: the run stops at its existing budget, and the
+  // campaign comes back about an hour later looking for prospects it has not
+  // already found (existingKeys above is rebuilt from the database each run,
+  // so everything discovered so far is excluded).
+  await markDiscoveryFinished(supabase, campaignId, organizationId, { ok: true });
 
   return { ran: true, newLeads: newLeadsCreated };
 }

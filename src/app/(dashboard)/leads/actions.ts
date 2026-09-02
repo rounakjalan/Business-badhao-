@@ -7,6 +7,8 @@ import type { LeadQualificationResult } from "@/lib/ai/agents/qualification";
 import { generateOutreach, type OutreachGeneratorResult } from "@/lib/ai/agents/outreach";
 import { getBusinessContext, selectOutreachContext } from "@/lib/business-context";
 import { OPEN_DEAL_STAGES } from "@/lib/deals";
+import { enrichProspectContact, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import { parseProspectRawData, type ProspectContact } from "@/lib/prospects";
 import { sendGmailMessage } from "@/lib/gmail/send";
 import { getConnectionStatus, type ConnectedAccountStatus } from "@/lib/gmail/tokens";
 import { resolveLeadIdentity } from "@/lib/lead-names";
@@ -31,6 +33,70 @@ export async function runLeadResearchAction(leadId: string): Promise<ProspectRes
   const result = await researchLead(supabase, currentOrg.organizationId, leadId);
   if (result.ok) revalidatePath(`/leads/${leadId}`);
   return result;
+}
+
+export type FindContactResult =
+  | { ok: true; found: boolean; contact: ProspectContact | null }
+  | { ok: false; message: string };
+
+/**
+ * Re-reads a lead's website for publicly listed contact channels.
+ *
+ * Discovery now does this the moment a prospect is saved, but leads found
+ * before that — or whose site was unreachable at the time — were stored with
+ * a website and nothing else. Cross-run deduplication means re-running
+ * discovery will never revisit them (they are correctly recognised as already
+ * found), so without this they could never gain contact details at all.
+ *
+ * Uses exactly the same grounded extraction as discovery: real pages, real
+ * values, each with the URL it was read from. Never invents a contact, and
+ * reports found:false honestly when the site states nothing.
+ */
+export async function findLeadContactAction(leadId: string): Promise<FindContactResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to look up contact details." };
+
+  const supabase = await createClient();
+  const { data: lead } = await supabase
+    .from("leads")
+    .select("id, prospect_id")
+    .eq("id", leadId)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!lead?.prospect_id) return { ok: false, message: "This lead has no linked company record to look up." };
+
+  const { data: prospect } = await supabase
+    .from("prospects")
+    .select("id, website, email, phone, raw_data")
+    .eq("id", lead.prospect_id)
+    .eq("organization_id", currentOrg.organizationId)
+    .maybeSingle();
+
+  if (!prospect?.website) return { ok: false, message: "No website is on file for this company, so there is nothing to read." };
+
+  const contacts = await enrichProspectContact(prospect.website);
+  if (!contacts) return { ok: true, found: false, contact: null };
+
+  const base = (prospect.raw_data && typeof prospect.raw_data === "object" && !Array.isArray(prospect.raw_data)
+    ? prospect.raw_data
+    : {}) as Record<string, unknown>;
+
+  await supabase
+    .from("prospects")
+    .update({
+      // Never overwrite a contact already on file — a human-entered or
+      // earlier-verified value outranks anything re-read from the site.
+      email: prospect.email ?? contacts.email?.value ?? null,
+      phone: prospect.phone ?? contacts.phone?.value ?? null,
+      raw_data: mergeContactIntoRawData(base, contacts) as unknown as Json,
+    })
+    .eq("id", prospect.id)
+    .eq("organization_id", currentOrg.organizationId);
+
+  revalidatePath(`/leads/${leadId}`);
+
+  return { ok: true, found: true, contact: parseProspectRawData(mergeContactIntoRawData(base, contacts) as Json).contact };
 }
 
 export async function runLeadQualificationAction(leadId: string): Promise<LeadQualificationResult> {
