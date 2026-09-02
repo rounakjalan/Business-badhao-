@@ -23,12 +23,15 @@ export type ProspectRawData = {
   contact: ProspectContact | null;
 };
 
+/** How sure discovery is that a value actually belongs to this prospect — never affects whether it's stored, only how confidently it's presented. */
+export type ProspectContactConfidence = "high" | "medium" | "low";
+
 /**
  * A contact channel together with the page it was actually read from. The
  * source is not decoration: it is what makes a saved phone number checkable
  * rather than something the app merely asserts.
  */
-export type ProspectContactField = { value: string; source: string };
+export type ProspectContactField = { value: string; source: string; confidence: ProspectContactConfidence };
 
 export type ProspectContact = {
   email: ProspectContactField | null;
@@ -40,6 +43,14 @@ export type ProspectContact = {
   linkedin: ProspectContactField | null;
   facebook: ProspectContactField | null;
   address: ProspectContactField | null;
+  /**
+   * "found" / "not_found" once contact discovery has genuinely run at least
+   * once; null for prospects saved before this existed, or that were never
+   * enriched at all. The distinction matters: "not_found" is an honest,
+   * completed search that turned up nothing verifiable — never a fabricated
+   * contact — while null just means nobody has looked yet.
+   */
+  contactStatus: "found" | "not_found" | null;
   enrichedAt: string | null;
 };
 
@@ -50,12 +61,15 @@ function parseContactField(raw: unknown): ProspectContactField | null {
   const value = typeof record.value === "string" ? record.value.trim() : "";
   const source = typeof record.source === "string" ? record.source.trim() : "";
   if (!value || !source) return null;
-  return { value, source };
+  const confidence: ProspectContactConfidence = record.confidence === "high" || record.confidence === "low" ? record.confidence : "medium";
+  return { value, source, confidence };
 }
 
 function parseProspectContact(raw: unknown): ProspectContact | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
+
+  const contactStatus: ProspectContact["contactStatus"] = record.contactStatus === "found" || record.contactStatus === "not_found" ? record.contactStatus : null;
 
   const contact: ProspectContact = {
     email: parseContactField(record.email),
@@ -67,11 +81,16 @@ function parseProspectContact(raw: unknown): ProspectContact | null {
     linkedin: parseContactField(record.linkedin),
     facebook: parseContactField(record.facebook),
     address: parseContactField(record.address),
+    contactStatus,
     enrichedAt: typeof record.enrichedAt === "string" ? record.enrichedAt : null,
   };
 
-  const hasChannel = Object.entries(contact).some(([key, value]) => key !== "enrichedAt" && value !== null);
-  return hasChannel ? contact : null;
+  // A completed "not_found" search is real, meaningful information — worth
+  // keeping even with every channel null — but a block with neither a
+  // channel nor a recorded status is empty noise from a malformed or
+  // pre-this-feature row, and reads exactly like "nobody has looked" either way.
+  const hasChannel = Object.entries(contact).some(([key, value]) => !["enrichedAt", "contactStatus"].includes(key) && value !== null);
+  return hasChannel || contactStatus ? contact : null;
 }
 
 /** Parses prospects.raw_data defensively — it's untyped jsonb, and rows created before a field existed simply won't have it. */

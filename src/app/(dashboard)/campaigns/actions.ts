@@ -7,7 +7,7 @@ import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discove
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
-import { enrichProspectContact, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import { discoverProspectContacts, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
 import {
   getCampaignDiscoverySchedule,
   markDiscoveryFinished,
@@ -520,9 +520,16 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   for (const prospect of newProspects) {
     // A search result almost never states an email or phone, which is why
     // prospects used to be saved with neither even when the business
-    // published both. Read the business's own site for what it actually
-    // lists — every field comes back with the page it was read from.
-    const contact = await enrichProspectContact(prospect.website);
+    // published both. Reads the business's own site first; when there is no
+    // website at all — a normal outcome of search-based discovery, not a
+    // failure — or the site said nothing, falls back to bounded, targeted
+    // search evidence. Every field comes back with the page it was read
+    // from either way.
+    const contactOutcome = await discoverProspectContacts({
+      companyName: prospect.companyName,
+      website: prospect.website,
+      location: prospect.location,
+    });
 
     const { data: prospectRow } = await supabase
       .from("prospects")
@@ -531,8 +538,8 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
         campaign_id: campaignId,
         lead_source_id: leadSourceId,
         company_name: prospect.companyName,
-        email: prospect.email ?? contact?.email?.value ?? null,
-        phone: prospect.phone ?? contact?.phone?.value ?? null,
+        email: prospect.email ?? contactOutcome.contacts?.email?.value ?? null,
+        phone: prospect.phone ?? contactOutcome.contacts?.phone?.value ?? null,
         website: prospect.website,
         raw_data: mergeContactIntoRawData(
           {
@@ -546,7 +553,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
             discoverySource: provider.name,
             discoveredAt: new Date().toISOString(),
           },
-          contact
+          contactOutcome
         ) as unknown as Json,
       })
       .select("id")

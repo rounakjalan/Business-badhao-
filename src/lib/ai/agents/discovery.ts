@@ -377,11 +377,11 @@ async function generateDiscoveryQueries(
 // Step 2 (deterministic): run each query against a real search provider.
 // ---------------------------------------------------------------------------
 
-type SearchHit = { title: string; url: string; content: string };
+export type SearchHit = { title: string; url: string; content: string };
 
 const TAVILY_URL = "https://api.tavily.com/search";
 
-async function tavilySearch(
+export async function tavilySearch(
   query: string,
   apiKey: string,
   telemetry?: ProviderTelemetry
@@ -436,7 +436,7 @@ async function tavilySearch(
 
 const EXA_URL = "https://api.exa.ai/search";
 
-async function exaSearch(
+export async function exaSearch(
   query: string,
   apiKey: string,
   telemetry?: ProviderTelemetry
@@ -489,7 +489,7 @@ async function exaSearch(
  * If Exa isn't configured, or Exa also fails, this surfaces exactly the
  * same failure shape callers already handled before Exa existed.
  */
-async function searchWithFallback(
+export async function searchWithFallback(
   query: string,
   tavilyApiKey: string,
   exaApiKey: string | undefined,

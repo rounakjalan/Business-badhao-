@@ -7,7 +7,7 @@ import type { LeadQualificationResult } from "@/lib/ai/agents/qualification";
 import { generateOutreach, type OutreachGeneratorResult } from "@/lib/ai/agents/outreach";
 import { getBusinessContext, selectOutreachContext } from "@/lib/business-context";
 import { OPEN_DEAL_STAGES } from "@/lib/deals";
-import { enrichProspectContact, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import { discoverProspectContacts, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
 import { parseProspectRawData, type ProspectContact } from "@/lib/prospects";
 import { sendGmailMessage } from "@/lib/gmail/send";
 import { getConnectionStatus, type ConnectedAccountStatus } from "@/lib/gmail/tokens";
@@ -40,17 +40,24 @@ export type FindContactResult =
   | { ok: false; message: string };
 
 /**
- * Re-reads a lead's website for publicly listed contact channels.
+ * Re-runs contact discovery for a lead's company — the business's own
+ * website first, then bounded search evidence when there is no website on
+ * file or the site stated nothing.
  *
- * Discovery now does this the moment a prospect is saved, but leads found
- * before that — or whose site was unreachable at the time — were stored with
- * a website and nothing else. Cross-run deduplication means re-running
- * discovery will never revisit them (they are correctly recognised as already
- * found), so without this they could never gain contact details at all.
+ * A missing website is a normal, common outcome of search-based Lead
+ * Discovery, not a failure: a directory or news listing can prove a
+ * business is real without ever stating its domain. Every such lead used to
+ * be permanently stuck with "no contacts recorded" — enrichment was 100%
+ * website-fetch-dependent, so it was never even attempted. It is attempted
+ * now, via the same discoverProspectContacts() every new discovery uses.
  *
- * Uses exactly the same grounded extraction as discovery: real pages, real
- * values, each with the URL it was read from. Never invents a contact, and
- * reports found:false honestly when the site states nothing.
+ * Cross-run deduplication means re-running Lead Discovery will never
+ * revisit an already-found prospect, so this per-lead action is the only
+ * way an existing lead can ever gain contact details after the fact.
+ *
+ * Never invents a contact — real pages or real search results, real
+ * values, each with the URL it was read from — and reports found:false
+ * honestly when nothing verifiable exists.
  */
 export async function findLeadContactAction(leadId: string): Promise<FindContactResult> {
   const currentOrg = await getCurrentOrg();
@@ -68,35 +75,40 @@ export async function findLeadContactAction(leadId: string): Promise<FindContact
 
   const { data: prospect } = await supabase
     .from("prospects")
-    .select("id, website, email, phone, raw_data")
+    .select("id, company_name, website, email, phone, raw_data")
     .eq("id", lead.prospect_id)
     .eq("organization_id", currentOrg.organizationId)
     .maybeSingle();
 
-  if (!prospect?.website) return { ok: false, message: "No website is on file for this company, so there is nothing to read." };
-
-  const contacts = await enrichProspectContact(prospect.website);
-  if (!contacts) return { ok: true, found: false, contact: null };
+  if (!prospect) return { ok: false, message: "This lead's company record could not be found." };
 
   const base = (prospect.raw_data && typeof prospect.raw_data === "object" && !Array.isArray(prospect.raw_data)
     ? prospect.raw_data
     : {}) as Record<string, unknown>;
+
+  const outcome = await discoverProspectContacts({
+    companyName: prospect.company_name ?? "",
+    website: prospect.website,
+    location: parseProspectRawData(prospect.raw_data).location,
+  });
+
+  const updatedRawData = mergeContactIntoRawData(base, outcome);
 
   await supabase
     .from("prospects")
     .update({
       // Never overwrite a contact already on file — a human-entered or
       // earlier-verified value outranks anything re-read from the site.
-      email: prospect.email ?? contacts.email?.value ?? null,
-      phone: prospect.phone ?? contacts.phone?.value ?? null,
-      raw_data: mergeContactIntoRawData(base, contacts) as unknown as Json,
+      email: prospect.email ?? outcome.contacts?.email?.value ?? null,
+      phone: prospect.phone ?? outcome.contacts?.phone?.value ?? null,
+      raw_data: updatedRawData as unknown as Json,
     })
     .eq("id", prospect.id)
     .eq("organization_id", currentOrg.organizationId);
 
   revalidatePath(`/leads/${leadId}`);
 
-  return { ok: true, found: true, contact: parseProspectRawData(mergeContactIntoRawData(base, contacts) as Json).contact };
+  return { ok: true, found: outcome.status === "found", contact: parseProspectRawData(updatedRawData as Json).contact };
 }
 
 export async function runLeadQualificationAction(leadId: string): Promise<LeadQualificationResult> {

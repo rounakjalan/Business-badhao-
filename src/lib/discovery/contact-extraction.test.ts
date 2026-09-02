@@ -1,16 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  emailConfidence,
   emptyContacts,
   extractContactsFromHtml,
   extractJsonLdAddress,
   extractLinks,
+  extractWhatsappNumber,
+  findPhoneInText,
+  findUsableEmailsInText,
   hasAnyContact,
   hasContactForm,
   isContactPageUrl,
   isSameHost,
+  isUsableEmail,
   looksLikePhoneNumber,
   mergeContacts,
+  nameTokens,
   normalizeDigits,
+  urlMatchesBusinessName,
 } from "@/lib/discovery/contact-extraction";
 
 /**
@@ -44,11 +51,18 @@ describe("extractContactsFromHtml", () => {
     expect(contacts.email?.value).toBe("hello@inquisitivedigital.in");
   });
 
-  it("extracts WhatsApp, Instagram, LinkedIn and Facebook", () => {
-    expect(contacts.whatsapp?.value).toBe("https://wa.me/919876543210");
+  it("extracts WhatsApp as the real number the link encodes, Instagram, LinkedIn and Facebook", () => {
+    expect(contacts.whatsapp?.value).toBe("919876543210");
     expect(contacts.instagram?.value).toBe("https://www.instagram.com/inquisitivedigital/");
     expect(contacts.linkedin?.value).toBe("https://www.linkedin.com/company/inquisitive-digital/");
     expect(contacts.facebook?.value).toBe("https://www.facebook.com/inquisitivedigital");
+  });
+
+  it("marks every channel found via an explicit link on the official site as high confidence", () => {
+    expect(contacts.phone?.confidence).toBe("high");
+    expect(contacts.whatsapp?.confidence).toBe("high");
+    expect(contacts.instagram?.confidence).toBe("high");
+    expect(contacts.linkedin?.confidence).toBe("high");
   });
 
   it("finds the contact page and absolutizes it against the page it was linked from", () => {
@@ -161,6 +175,15 @@ describe("regressions from live sites", () => {
     const html = `<html><body><a href="https://brightpixel.in/contact">Talk to us</a></body></html>`;
     expect(extractContactsFromHtml(html, "https://brightpixel.in/").contactPageUrl?.value).toBe("https://brightpixel.in/contact");
   });
+
+  it("never matches 'connect' at all — three live runs against zoho.com proved it a false positive via URL path, product root URL, and link text in turn", () => {
+    const html = `<html><body>
+      <a href="https://brightpixel.in/connect/10-years">10 years of Connect</a>
+      <a href="https://brightpixel.in/connect">Connect (our product)</a>
+      <a href="https://brightpixel.in/reach">Connect</a>
+    </body></html>`;
+    expect(extractContactsFromHtml(html, "https://brightpixel.in/").contactPageUrl).toBeNull();
+  });
 });
 
 describe("isSameHost", () => {
@@ -259,18 +282,142 @@ describe("extractJsonLdAddress", () => {
 
 describe("mergeContacts", () => {
   it("lets the earlier page win, so a value from /contact outranks a footer on the homepage", () => {
-    const contactPage = { ...emptyContacts(), phone: { value: "+911111111111", source: "https://x.in/contact" } };
-    const homepage = { ...emptyContacts(), phone: { value: "+912222222222", source: "https://x.in/" } };
+    const contactPage = { ...emptyContacts(), phone: { value: "+911111111111", source: "https://x.in/contact", confidence: "high" as const } };
+    const homepage = { ...emptyContacts(), phone: { value: "+912222222222", source: "https://x.in/", confidence: "high" as const } };
 
     expect(mergeContacts([contactPage, homepage]).phone?.value).toBe("+911111111111");
   });
 
   it("fills a channel from a later page when the earlier one lacked it", () => {
-    const contactPage = { ...emptyContacts(), phone: { value: "+911111111111", source: "https://x.in/contact" } };
-    const homepage = { ...emptyContacts(), instagram: { value: "https://instagram.com/x", source: "https://x.in/" } };
+    const contactPage = { ...emptyContacts(), phone: { value: "+911111111111", source: "https://x.in/contact", confidence: "high" as const } };
+    const homepage = { ...emptyContacts(), instagram: { value: "https://instagram.com/x", source: "https://x.in/", confidence: "high" as const } };
 
     const merged = mergeContacts([contactPage, homepage]);
     expect(merged.phone?.value).toBe("+911111111111");
     expect(merged.instagram?.value).toBe("https://instagram.com/x");
+  });
+
+  it("can never produce more than one value per channel — one JS key, one value, by construction", () => {
+    const a = { ...emptyContacts(), phone: { value: "+911111111111", source: "https://x.in/a", confidence: "high" as const } };
+    const b = { ...emptyContacts(), phone: { value: "+912222222222", source: "https://x.in/b", confidence: "high" as const } };
+    const merged = mergeContacts([a, b]);
+    // Structurally impossible for `merged.phone` to hold two values — this
+    // documents that guarantee rather than testing a runtime check.
+    expect(typeof merged.phone).toBe("object");
+    expect(merged.phone?.value).toBe("+911111111111");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Confidence scoring — domain-matched vs free-provider vs unanchored, per the
+// explicit business rule: never reject a free-provider address outright,
+// never blindly trust one either.
+// ---------------------------------------------------------------------------
+
+describe("emailConfidence", () => {
+  it("gives high confidence to an email whose domain matches the prospect's own site", () => {
+    expect(emailConfidence("hello@brightpixel.in", "brightpixel.in")).toBe("high");
+    expect(emailConfidence("hello@brightpixel.in", "www.brightpixel.in")).toBe("high");
+  });
+
+  it("gives medium confidence to a free-provider address found on the business's own page — never rejects it", () => {
+    expect(emailConfidence("triverse.studio@gmail.com", "triverse.in")).toBe("medium");
+  });
+
+  it("gives low confidence to a free-provider address with no page to anchor it to", () => {
+    expect(emailConfidence("triverse.studio@gmail.com", null)).toBe("low");
+  });
+
+  it("gives medium confidence to a domain-mismatched but page-anchored address, never high", () => {
+    expect(emailConfidence("hello@unrelatedagency.com", "brightpixel.in")).toBe("medium");
+  });
+
+  it("gives low confidence to an address with neither domain match nor an anchoring page", () => {
+    expect(emailConfidence("hello@unrelatedagency.com", null)).toBe("low");
+  });
+});
+
+describe("isUsableEmail", () => {
+  it("never fabricates — accepts only real-shaped addresses that already passed extraction's own filters", () => {
+    expect(isUsableEmail("hello@brightpixel.in")).toBe(true);
+    expect(isUsableEmail("you@company.com")).toBe(false);
+    expect(isUsableEmail("test@example.com")).toBe(false);
+  });
+});
+
+describe("obfuscated email normalization", () => {
+  it("reads a bracket-obfuscated address as the real address it spells out", () => {
+    const html = `<html><body><p>Write to hello [at] brightpixel [dot] in for a quote.</p></body></html>`;
+    expect(extractContactsFromHtml(html, "https://brightpixel.in/").email?.value).toBe("hello@brightpixel.in");
+  });
+
+  it("reads a parenthesis-obfuscated multi-label domain (.co.in)", () => {
+    const html = `<html><body><p>Mail hello(at)brightpixel(dot)co(dot)in anytime.</p></body></html>`;
+    expect(extractContactsFromHtml(html, "https://brightpixel.co.in/").email?.value).toBe("hello@brightpixel.co.in");
+  });
+
+  it("never invents an obfuscated email out of unrelated text merely containing the words at/dot", () => {
+    const html = `<html><body><p>Meet us at the dot on the map for the launch party.</p></body></html>`;
+    expect(extractContactsFromHtml(html, "https://brightpixel.in/").email).toBeNull();
+  });
+
+  it("still rejects a placeholder even when spelled in obfuscated form", () => {
+    const html = `<html><body><p>e.g. your [at] company [dot] com</p></body></html>`;
+    expect(extractContactsFromHtml(html, "https://brightpixel.in/").email).toBeNull();
+  });
+});
+
+describe("extractWhatsappNumber", () => {
+  it("pulls the real number out of a wa.me link", () => {
+    expect(extractWhatsappNumber("https://wa.me/919876543210")).toBe("919876543210");
+  });
+
+  it("pulls the real number out of an api.whatsapp.com send link", () => {
+    expect(extractWhatsappNumber("https://api.whatsapp.com/send?phone=919876543210&text=hi")).toBe("919876543210");
+  });
+
+  it("returns null rather than a guess when no number is actually encoded in the link", () => {
+    expect(extractWhatsappNumber("https://wa.me/")).toBeNull();
+    expect(extractWhatsappNumber("https://web.whatsapp.com/")).toBeNull();
+  });
+});
+
+describe("findUsableEmailsInText / findPhoneInText", () => {
+  it("finds a real email in plain search-result-shaped text", () => {
+    expect(findUsableEmailsInText("Triverse — reach us at hello@triverse.in for enquiries")).toEqual(["hello@triverse.in"]);
+  });
+
+  it("filters placeholders out of the same text a real page might contain", () => {
+    expect(findUsableEmailsInText("Contact us: you@company.com")).toEqual([]);
+  });
+
+  it("finds a real phone in plain text and rejects a merged-fragment one", () => {
+    expect(findPhoneInText("Call us on +91 98765 43210 today")).toBe("+91 98765 43210");
+    expect(findPhoneInText("Founded 2020    2021    22")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ownership verification for search-derived evidence: a same-named mention
+// is not proof; the platform's own URL must actually contain the business.
+// ---------------------------------------------------------------------------
+
+describe("nameTokens / urlMatchesBusinessName", () => {
+  it("extracts distinctive words, dropping generic business-entity suffixes", () => {
+    expect(nameTokens("Triverse Media Pvt Ltd")).toEqual(["triverse", "media"]);
+  });
+
+  it("accepts a URL whose own path contains a distinctive name token", () => {
+    expect(urlMatchesBusinessName("https://linkedin.com/company/triverse-media", "Triverse Media")).toBe(true);
+  });
+
+  it("rejects a URL that merely happens to be a social platform, with no name evidence in the URL itself", () => {
+    expect(urlMatchesBusinessName("https://linkedin.com/company/some-other-agency", "Triverse Media")).toBe(false);
+  });
+
+  it("never treats a same-named mention in prose as proof of ownership of an unrelated URL", () => {
+    // The business name appearing in a title string is not itself the URL —
+    // only tokens actually present IN the url or title text count.
+    expect(urlMatchesBusinessName("https://linkedin.com/company/unrelated-co", "Triverse")).toBe(false);
   });
 });

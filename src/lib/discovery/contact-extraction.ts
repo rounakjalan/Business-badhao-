@@ -13,10 +13,19 @@
  * access.
  */
 
+/**
+ * How sure we are this value actually belongs to the prospect, not just that
+ * it passed the anti-fabrication filters. Never affects whether a value is
+ * stored — a low-confidence value found on a real page is still real
+ * evidence, just weaker evidence — only how it should be presented.
+ */
+export type ContactConfidence = "high" | "medium" | "low";
+
 export type ContactField = {
   value: string;
   /** The page this value was actually read from. */
   source: string;
+  confidence: ContactConfidence;
 };
 
 export type ExtractedContacts = {
@@ -66,6 +75,56 @@ const PLACEHOLDER_EMAIL_PATTERN =
 const ASSET_LIKE_EMAIL_PATTERN = /\.(png|jpe?g|gif|svg|webp|css|js|woff2?|ico)$/i;
 
 const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+/**
+ * Sites routinely spell an email out to defeat scrapers: "hello [at] brand
+ * [dot] com" or "hello(at)brand(dot)co(dot)in". This is still the business's
+ * own real address, printed by the business itself — normalizing it is not
+ * inference, the way guessing a Gmail from the company name would be.
+ */
+const OBFUSCATED_EMAIL_PATTERN =
+  /([a-zA-Z0-9._%+-]+)\s*[[(]\s*at\s*[\])]\s*([a-zA-Z0-9.-]+(?:\s*[[(]\s*dot\s*[\])]\s*[a-zA-Z0-9-]+)+)/gi;
+
+/** Turns "brand [dot] co [dot] in" into "brand.co.in". */
+function normalizeObfuscatedDomain(raw: string): string {
+  return raw.replace(/\s*[[(]\s*dot\s*[\])]\s*/gi, ".").trim();
+}
+
+/** Free webmail providers, common in India and worldwide — never rejected, never boosted either. */
+const FREE_EMAIL_PROVIDERS = new Set([
+  "gmail.com",
+  "yahoo.com",
+  "yahoo.co.in",
+  "outlook.com",
+  "hotmail.com",
+  "rediffmail.com",
+  "icloud.com",
+  "protonmail.com",
+]);
+
+/** The registrable part of a hostname, stripping a leading "www." — good enough for same-business comparison without a public-suffix list. */
+function registrableHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/^www\./, "");
+}
+
+/**
+ * How much an email's domain says about whether it actually belongs to this
+ * prospect. Matches the exact business rule requested: a domain-matched
+ * business email is high confidence; a free provider is never auto-rejected,
+ * but only reaches medium when it was actually found published on the
+ * business's own official page (the caller passes null siteHost when the
+ * email came from somewhere else, e.g. a search snippet with no page of its
+ * own to anchor it to).
+ */
+export function emailConfidence(email: string, siteHost: string | null): ContactConfidence {
+  const domain = email.split("@")[1]?.toLowerCase();
+  if (!domain) return "low";
+
+  if (siteHost && registrableHost(domain) === registrableHost(siteHost)) return "high";
+  if (FREE_EMAIL_PROVIDERS.has(domain) && siteHost) return "medium";
+  if (FREE_EMAIL_PROVIDERS.has(domain)) return "low";
+  return siteHost ? "medium" : "low";
+}
 
 /**
  * Phone numbers as they appear in real markup: an optional country code, then
@@ -146,7 +205,7 @@ export function absolutize(href: string, pageUrl: string): string | null {
   }
 }
 
-function isUsableEmail(email: string): boolean {
+export function isUsableEmail(email: string): boolean {
   if (ASSET_LIKE_EMAIL_PATTERN.test(email)) return false;
   if (NON_BUSINESS_EMAIL_PATTERN.test(email)) return false;
   if (PLACEHOLDER_EMAIL_PATTERN.test(email)) return false;
@@ -233,8 +292,41 @@ export function isContactPageUrl(url: string, linkText = ""): boolean {
     path = url.split("?")[0];
   }
 
+  // "connect" is never matched at all, neither in the URL path nor the link
+  // text. Real businesses run actual products called "Connect" (Zoho does,
+  // at the literal path "/connect") — a live run against zoho.com wrongly
+  // matched it as a contact page twice: first via a sub-page's URL, then via
+  // the product's own root URL once the URL match was tightened, then via
+  // the link's own visible text ("Connect") once path-matching was dropped
+  // entirely. Three proven false positives against one real, major site is
+  // conclusive: the word is too overloaded to be a safe signal in any form,
+  // and a wrongly attributed contact page is exactly the failure this
+  // extractor exists to prevent.
   const haystack = `${path} ${linkText}`.toLowerCase();
-  return /contact|reach-us|reach_us|get-in-touch|about-us|about|enquiry|enquire|inquiry/.test(haystack);
+  return /contact|reach-?us|get-?in-?touch|talk-?to-?us|about-?us|about|company|enquiry|enquire|inquiry|support|our-?team\b|\bteam\b/.test(haystack);
+}
+
+/** Extracts the digits WhatsApp itself encodes in a wa.me / api.whatsapp.com link, when present. */
+export function extractWhatsappNumber(href: string): string | null {
+  const match = href.match(/(?:wa\.me\/|phone=)(\+?\d[\d\s-]{6,})/i);
+  if (!match) return null;
+  const digits = normalizeDigits(match[1]);
+  return digits.length >= 8 ? digits : null;
+}
+
+/**
+ * Every usable email address in a run of plain text — shared by the HTML
+ * extractor and the search-result extractor (contact-search.ts) so both
+ * apply exactly the same anti-fabrication filters, not two copies that could
+ * drift apart.
+ */
+export function findUsableEmailsInText(text: string): string[] {
+  return (text.match(EMAIL_PATTERN) ?? []).map(decodeEntities).filter(isUsableEmail);
+}
+
+/** The first plausible phone number in a run of plain text, or null. */
+export function findPhoneInText(text: string): string | null {
+  return (text.match(PHONE_PATTERN) ?? []).map((v) => v.trim()).find(looksLikePhoneNumber) ?? null;
 }
 
 /** Whether a page actually contains a form a visitor could submit. */
@@ -260,35 +352,46 @@ export function hasContactForm(html: string): boolean {
 export function extractContactsFromHtml(html: string, pageUrl: string): ExtractedContacts {
   const contacts = emptyContacts();
   const links = extractLinks(html, pageUrl);
+  const siteHost = (() => {
+    try {
+      return new URL(pageUrl).hostname;
+    } catch {
+      return null;
+    }
+  })();
 
   for (const { href, text } of links) {
     const lower = href.toLowerCase();
 
     if (!contacts.email && lower.startsWith("mailto:")) {
       const email = decodeEntities(href.slice("mailto:".length).split("?")[0].trim());
-      if (email && isUsableEmail(email)) contacts.email = { value: email, source: pageUrl };
+      if (email && isUsableEmail(email)) contacts.email = { value: email, source: pageUrl, confidence: emailConfidence(email, siteHost) };
       continue;
     }
 
     if (!contacts.phone && lower.startsWith("tel:")) {
       const phone = href.slice("tel:".length).trim();
       const digits = normalizeDigits(phone);
-      if (digits.length >= 8) contacts.phone = { value: phone, source: pageUrl };
+      if (digits.length >= 8) contacts.phone = { value: phone, source: pageUrl, confidence: "high" };
       continue;
     }
 
     if (!contacts.whatsapp && /(?:wa\.me\/|api\.whatsapp\.com\/send|web\.whatsapp\.com\/send|whatsapp:)/i.test(lower)) {
-      contacts.whatsapp = { value: href, source: pageUrl };
+      // The link itself declares the number where it can — that is direct
+      // evidence, not an inference, so this keeps high confidence even
+      // though the stored value is now the number rather than the URL.
+      const number = extractWhatsappNumber(href);
+      contacts.whatsapp = { value: number ?? href, source: pageUrl, confidence: "high" };
       continue;
     }
 
     if (!contacts.instagram && /(?:^|\/\/|\.)instagram\.com\//i.test(lower) && !/instagram\.com\/(p|reel|explore)\//i.test(lower)) {
-      contacts.instagram = { value: href, source: pageUrl };
+      contacts.instagram = { value: href, source: pageUrl, confidence: "high" };
       continue;
     }
 
     if (!contacts.linkedin && /(?:^|\/\/|\.)linkedin\.com\/(company|in|school)\//i.test(lower)) {
-      contacts.linkedin = { value: href, source: pageUrl };
+      contacts.linkedin = { value: href, source: pageUrl, confidence: "high" };
       continue;
     }
 
@@ -297,7 +400,7 @@ export function extractContactsFromHtml(html: string, pageUrl: string): Extracte
       /(?:^|\/\/|\.)(facebook\.com|fb\.com)\//i.test(lower) &&
       !/facebook\.com\/(sharer|share\.php|dialog)/i.test(lower)
     ) {
-      contacts.facebook = { value: href, source: pageUrl };
+      contacts.facebook = { value: href, source: pageUrl, confidence: "high" };
       continue;
     }
 
@@ -312,7 +415,7 @@ export function extractContactsFromHtml(html: string, pageUrl: string): Extracte
       isSameHost(href, pageUrl) &&
       isContactPageUrl(href, text)
     ) {
-      contacts.contactPageUrl = { value: href, source: pageUrl };
+      contacts.contactPageUrl = { value: href, source: pageUrl, confidence: "high" };
     }
   }
 
@@ -328,22 +431,34 @@ export function extractContactsFromHtml(html: string, pageUrl: string): Extracte
     .replace(/<[^>]*>/g, "\n");
 
   if (!contacts.email) {
-    const candidates = (visibleText.match(EMAIL_PATTERN) ?? []).map(decodeEntities).filter(isUsableEmail);
-    if (candidates[0]) contacts.email = { value: candidates[0], source: pageUrl };
+    const candidates = findUsableEmailsInText(visibleText);
+    if (candidates[0]) contacts.email = { value: candidates[0], source: pageUrl, confidence: emailConfidence(candidates[0], siteHost) };
+  }
+
+  // Obfuscated form ("hello [at] brand [dot] com") only checked when a plain
+  // "@" address wasn't already found — sites use one style or the other, not
+  // both for the same address.
+  if (!contacts.email) {
+    const match = OBFUSCATED_EMAIL_PATTERN.exec(visibleText);
+    OBFUSCATED_EMAIL_PATTERN.lastIndex = 0;
+    if (match) {
+      const candidate = `${match[1]}@${normalizeObfuscatedDomain(match[2])}`;
+      if (isUsableEmail(candidate)) contacts.email = { value: candidate, source: pageUrl, confidence: emailConfidence(candidate, siteHost) };
+    }
   }
 
   if (!contacts.phone) {
-    const candidate = (visibleText.match(PHONE_PATTERN) ?? []).map((v) => v.trim()).find(looksLikePhoneNumber);
-    if (candidate) contacts.phone = { value: candidate, source: pageUrl };
+    const candidate = findPhoneInText(visibleText);
+    if (candidate) contacts.phone = { value: candidate, source: pageUrl, confidence: "medium" };
   }
 
   if (!contacts.address) {
     const address = extractJsonLdAddress(html);
-    if (address) contacts.address = { value: address, source: pageUrl };
+    if (address) contacts.address = { value: address, source: pageUrl, confidence: "high" };
   }
 
   if (!contacts.contactFormUrl && hasContactForm(html)) {
-    contacts.contactFormUrl = { value: pageUrl, source: pageUrl };
+    contacts.contactFormUrl = { value: pageUrl, source: pageUrl, confidence: "high" };
   }
 
   return contacts;
@@ -370,4 +485,40 @@ export function mergeContacts(results: ExtractedContacts[]): ExtractedContacts {
 /** Whether anything at all was found — used to decide if a lead is contactable. */
 export function hasAnyContact(contacts: ExtractedContacts): boolean {
   return Object.values(contacts).some((field) => field !== null);
+}
+
+/**
+ * Distinctive words from a business name — short/common words ("the", "and",
+ * "llp") are dropped because they would match almost any URL, which is
+ * exactly the false "proof" the anti-fabrication requirement rules out.
+ */
+export function nameTokens(businessName: string): string[] {
+  const STOPWORDS = new Set(["the", "and", "llp", "pvt", "ltd", "inc", "co", "company", "india", "services", "solutions"]);
+  return businessName
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !STOPWORDS.has(token));
+}
+
+/**
+ * Whether a URL contains real, checkable evidence that it belongs to this
+ * business — a distinctive name token actually present in the URL itself,
+ * not merely mentioned somewhere in a search snippet next to an unrelated
+ * link. This is the bar for accepting a social profile or page found via
+ * search rather than found linked from the business's own website.
+ */
+export function urlMatchesBusinessName(url: string, businessName: string): boolean {
+  const tokens = nameTokens(businessName);
+  if (tokens.length === 0) return false;
+
+  let path: string;
+  try {
+    const parsed = new URL(url);
+    path = `${parsed.hostname}${parsed.pathname}`.toLowerCase();
+  } catch {
+    path = url.toLowerCase();
+  }
+  const normalizedPath = path.replace(/[^a-z0-9]+/g, "");
+
+  return tokens.some((token) => normalizedPath.includes(token));
 }

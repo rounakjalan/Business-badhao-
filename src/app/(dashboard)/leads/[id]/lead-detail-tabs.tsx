@@ -461,8 +461,33 @@ export function LeadDetailTabs({
               </DarkCard>
             ) : null}
             <DarkCard className="p-5">
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
                 <h4 className="text-sm font-semibold text-bb-text">Contacts</h4>
+                {website ? (
+                  <DashButton variant="outline" disabled={findingContact} onClick={findContact}>
+                    {findingContact ? "Reading site…" : "Find Contact Info"}
+                  </DashButton>
+                ) : null}
+              </div>
+              {/*
+                AI-discovered contact channels — the same data the Overview
+                tab shows. This card used to check only the human-entered
+                People list below, so a lead with real, sourced channels here
+                could still read "No contacts recorded yet" a few lines away
+                from where they were actually shown. One data source, shown
+                consistently everywhere it appears.
+              */}
+              <ContactChannels
+                contact={contact}
+                email={recipientEmail}
+                phone={primaryContact?.phone ?? null}
+                website={website}
+                location={discovery.location}
+              />
+              {contactMessage ? <p className="mt-2 text-xs text-bb-text-3">{contactMessage}</p> : null}
+
+              <div className="mt-4 flex items-center justify-between border-t border-bb-border pt-3">
+                <h5 className="text-xs font-semibold uppercase tracking-wide text-bb-text-3">People</h5>
                 {!showAddContact ? (
                   <DashButton variant="outline" onClick={() => setShowAddContact(true)}>
                     + Add Contact
@@ -470,9 +495,9 @@ export function LeadDetailTabs({
                 ) : null}
               </div>
               {contacts.length === 0 ? (
-                <p className="mb-3 text-sm text-bb-text-3">No contacts recorded yet.</p>
+                <p className="mb-3 mt-2 text-sm text-bb-text-3">No named contacts added yet.</p>
               ) : (
-                <div className="mb-3 space-y-3">
+                <div className="mb-3 mt-2 space-y-3">
                   {contacts.map((c) => (
                     <div key={c.id} className="flex items-center justify-between border-b border-bb-border/50 pb-2 last:border-0">
                       <div>
@@ -694,12 +719,13 @@ function ContactChannels({
   // A contact row entered by a human, or an address already on the prospect,
   // outranks anything re-read from the website.
   const emailField: ProspectContactField | null = email
-    ? { value: email, source: contact?.email?.source ?? "on file" }
+    ? { value: email, source: contact?.email?.source ?? "on file", confidence: contact?.email?.confidence ?? "high" }
     : (contact?.email ?? null);
   const phoneField: ProspectContactField | null = phone
-    ? { value: phone, source: contact?.phone?.source ?? "on file" }
+    ? { value: phone, source: contact?.phone?.source ?? "on file", confidence: contact?.phone?.confidence ?? "high" }
     : (contact?.phone ?? null);
-  const addressField: ProspectContactField | null = contact?.address ?? (location ? { value: location, source: "discovery" } : null);
+  const addressField: ProspectContactField | null =
+    contact?.address ?? (location ? { value: location, source: "discovery", confidence: "medium" } : null);
 
   const hasDirectContact = Boolean(emailField || phoneField || contact?.whatsapp);
   const rows = [
@@ -730,13 +756,27 @@ function ContactChannels({
       <ContactRow key="facebook" label="Facebook" field={contact.facebook} href={contact.facebook.value} display={shortenUrl(contact.facebook.value)} />
     ) : null,
     website ? (
-      <ContactRow key="website" label="Website" field={{ value: website, source: website }} href={website} display={shortenUrl(website)} />
+      <ContactRow
+        key="website"
+        label="Website"
+        field={{ value: website, source: website, confidence: "high" }}
+        href={website}
+        display={shortenUrl(website)}
+      />
     ) : null,
     addressField ? <ContactRow key="address" label="Address" field={addressField} /> : null,
   ].filter(Boolean);
 
   if (rows.length === 0) {
-    return <p className="py-2 text-sm text-bb-text-3">No contact details on file yet.</p>;
+    // A completed search that genuinely found nothing is different from one
+    // that never ran — worth saying so, rather than one flat, ambiguous line.
+    return (
+      <p className="py-2 text-sm text-bb-text-3">
+        {contact?.contactStatus === "not_found"
+          ? "Searched the business's website and public search results — no verified contact channel found."
+          : "No contact details on file yet."}
+      </p>
+    );
   }
 
   return <div>{rows}</div>;

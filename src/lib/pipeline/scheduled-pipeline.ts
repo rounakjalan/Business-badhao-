@@ -4,7 +4,7 @@ import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discove
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
 import { isDiscoveryDue, markDiscoveryFinished, markDiscoveryRunning } from "@/lib/pipeline/discovery-schedule";
-import { enrichProspectContact, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import { discoverProspectContacts, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
 import { qualifyLead, researchLead } from "@/lib/pipeline/lead-pipeline";
 import type { Database, Json } from "@/types/database.types";
 
@@ -276,10 +276,16 @@ export async function runDiscoveryForCampaign(
 
   let newLeadsCreated = 0;
   for (const prospect of newProspects) {
-    // Read the business's own site for publicly listed contact channels.
-    // Every field it returns carries the URL it was actually read from, and
-    // nothing is inferred — see contact-enrichment.ts.
-    const contact = await enrichProspectContact(prospect.website);
+    // Reads the business's own site for publicly listed contact channels,
+    // falling back to bounded search evidence when there is no website or
+    // the site said nothing — see discoverProspectContacts. Every field it
+    // returns carries the URL it was actually read from, and nothing is
+    // inferred.
+    const contactOutcome = await discoverProspectContacts({
+      companyName: prospect.companyName,
+      website: prospect.website,
+      location: prospect.location,
+    });
 
     const { data: prospectRow } = await supabase
       .from("prospects")
@@ -288,8 +294,8 @@ export async function runDiscoveryForCampaign(
         campaign_id: campaignId,
         lead_source_id: leadSourceId,
         company_name: prospect.companyName,
-        email: prospect.email ?? contact?.email?.value ?? null,
-        phone: prospect.phone ?? contact?.phone?.value ?? null,
+        email: prospect.email ?? contactOutcome.contacts?.email?.value ?? null,
+        phone: prospect.phone ?? contactOutcome.contacts?.phone?.value ?? null,
         website: prospect.website,
         raw_data: mergeContactIntoRawData(
           {
@@ -303,7 +309,7 @@ export async function runDiscoveryForCampaign(
             discoverySource: provider.name,
             discoveredAt: new Date().toISOString(),
           },
-          contact
+          contactOutcome
         ) as unknown as Json,
       })
       .select("id")

@@ -1,5 +1,7 @@
 import "server-only";
+import type { ProviderTelemetry } from "@/lib/ai/agents/discovery";
 import {
+  emptyContacts,
   extractContactsFromHtml,
   extractLinks,
   hasAnyContact,
@@ -8,6 +10,7 @@ import {
   mergeContacts,
   type ExtractedContacts,
 } from "@/lib/discovery/contact-extraction";
+import { searchContactEvidence } from "@/lib/discovery/contact-search";
 
 /**
  * Contact discovery — the fetching half.
@@ -39,8 +42,14 @@ const MAX_INTERNAL_PAGES = 3;
  */
 const SITE_BUDGET_MS = 20_000;
 
-/** Paths worth trying when the homepage links to no contact page at all. */
-const COMMON_CONTACT_PATHS = ["/contact", "/contact-us", "/about", "/about-us"];
+/**
+ * Paths worth trying when the homepage links to no contact page at all.
+ * Deliberately no "/connect" — real businesses run products literally named
+ * "Connect" at that exact path (Zoho does), so guessing it wastes a page
+ * budget slot on an unrelated page at best and misattributes a product page
+ * as the contact page at worst, proven by a live run against zoho.com.
+ */
+const COMMON_CONTACT_PATHS = ["/contact", "/contact-us", "/contactus", "/about", "/about-us", "/company", "/get-in-touch", "/reach-us", "/support", "/team"];
 
 const USER_AGENT = "BusinessBadhaoBot/1.0 (+contact discovery; respects robots meta)";
 
@@ -151,32 +160,86 @@ export async function enrichProspectContact(website: string | null): Promise<Ext
   return hasAnyContact(merged) ? merged : null;
 }
 
+export type ContactDiscoveryOutcome = {
+  contacts: ExtractedContacts | null;
+  /** "found" once anything real was found, from either stage; "not_found" when both stages genuinely ran and turned up nothing. */
+  status: "found" | "not_found";
+};
+
+/**
+ * The full contact-discovery fallback chain: the business's own website
+ * first (its own stated preference for how to be reached), then — only when
+ * that produced nothing at all, including when there is no website to
+ * fetch — bounded, targeted search evidence. A prospect discovered from a
+ * directory or news listing with no domain ever mentioned is a normal,
+ * common outcome of search-based discovery, not a failure of the website
+ * crawler; without this second stage such a prospect could never gain a
+ * contact by any path.
+ *
+ * Always returns a definite status rather than silence: "not_found" is
+ * recorded explicitly (see mergeContactIntoRawData) precisely so a prospect
+ * that was genuinely searched and came up empty is distinguishable from one
+ * that was never attempted at all.
+ */
+export async function discoverProspectContacts(params: {
+  companyName: string;
+  website: string | null;
+  location: string | null;
+  telemetry?: ProviderTelemetry;
+}): Promise<ContactDiscoveryOutcome> {
+  const websiteContacts = await enrichProspectContact(params.website);
+  if (websiteContacts && hasAnyContact(websiteContacts)) {
+    return { contacts: websiteContacts, status: "found" };
+  }
+
+  const websiteHost = (() => {
+    const url = toFetchableUrl(params.website);
+    if (!url) return null;
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return null;
+    }
+  })();
+
+  const searchContacts = await searchContactEvidence({
+    businessName: params.companyName,
+    location: params.location,
+    websiteHost,
+    telemetry: params.telemetry,
+  });
+
+  const merged = mergeContacts([websiteContacts ?? emptyContacts(), searchContacts ?? emptyContacts()]);
+  return hasAnyContact(merged) ? { contacts: merged, status: "found" } : { contacts: null, status: "not_found" };
+}
+
 /**
  * Everything discovery already writes into prospects.raw_data, plus the
  * contact block. Kept as a merge helper so both discovery paths (the
  * interactive action and the scheduled pipeline) write exactly the same
- * shape, and so a null enrichment result leaves raw_data untouched rather
- * than writing an empty contact object that would read as "we looked and
- * there is nothing" when we may simply have failed to reach the site.
+ * shape.
+ *
+ * Always writes a contact block, even when nothing was found — a real,
+ * recorded "not_found" is what tells the Lead page (and this deployment's
+ * own audit trail) that enrichment genuinely ran and had nothing to report,
+ * rather than never having been attempted.
  */
-export function mergeContactIntoRawData(
-  base: Record<string, unknown>,
-  contacts: ExtractedContacts | null
-): Record<string, unknown> {
-  if (!contacts) return base;
+export function mergeContactIntoRawData(base: Record<string, unknown>, outcome: ContactDiscoveryOutcome): Record<string, unknown> {
+  const contacts = outcome.contacts;
 
   return {
     ...base,
     contact: {
-      email: contacts.email,
-      phone: contacts.phone,
-      whatsapp: contacts.whatsapp,
-      contactPageUrl: contacts.contactPageUrl,
-      contactFormUrl: contacts.contactFormUrl,
-      instagram: contacts.instagram,
-      linkedin: contacts.linkedin,
-      facebook: contacts.facebook,
-      address: contacts.address,
+      email: contacts?.email ?? null,
+      phone: contacts?.phone ?? null,
+      whatsapp: contacts?.whatsapp ?? null,
+      contactPageUrl: contacts?.contactPageUrl ?? null,
+      contactFormUrl: contacts?.contactFormUrl ?? null,
+      instagram: contacts?.instagram ?? null,
+      linkedin: contacts?.linkedin ?? null,
+      facebook: contacts?.facebook ?? null,
+      address: contacts?.address ?? null,
+      contactStatus: outcome.status,
       enrichedAt: new Date().toISOString(),
     },
   };

@@ -76,17 +76,39 @@ describe("parseProspectRawData", () => {
     it("reads the contact block discovery's website enrichment writes", () => {
       const result = parseProspectRawData({
         contact: {
-          email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact" },
-          phone: { value: "+91 98765 43210", source: "https://brightpixel.in/contact" },
-          instagram: { value: "https://instagram.com/brightpixel", source: "https://brightpixel.in/" },
+          email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" },
+          phone: { value: "+91 98765 43210", source: "https://brightpixel.in/contact", confidence: "high" },
+          instagram: { value: "https://instagram.com/brightpixel", source: "https://brightpixel.in/", confidence: "high" },
+          contactStatus: "found",
           enrichedAt: "2026-09-02T10:00:00.000Z",
         },
       } as unknown as Json);
 
-      expect(result.contact?.email).toEqual({ value: "hello@brightpixel.in", source: "https://brightpixel.in/contact" });
+      expect(result.contact?.email).toEqual({ value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" });
       expect(result.contact?.phone?.value).toBe("+91 98765 43210");
       expect(result.contact?.instagram?.source).toBe("https://brightpixel.in/");
+      expect(result.contact?.contactStatus).toBe("found");
       expect(result.contact?.enrichedAt).toBe("2026-09-02T10:00:00.000Z");
+    });
+
+    it("defaults confidence to medium when a field arrives without one, rather than dropping it", () => {
+      const result = parseProspectRawData({
+        contact: { email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact" } },
+      } as unknown as Json);
+      expect(result.contact?.email?.confidence).toBe("medium");
+    });
+
+    it("preserves a not_found status with every channel null — a completed search is real information, not silence", () => {
+      const result = parseProspectRawData({ contact: { contactStatus: "not_found", enrichedAt: "2026-09-02T10:00:00.000Z" } } as unknown as Json);
+      expect(result.contact?.contactStatus).toBe("not_found");
+      expect(result.contact?.email).toBeNull();
+    });
+
+    it("ignores a garbage contactStatus value rather than trusting it", () => {
+      const result = parseProspectRawData({
+        contact: { email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/" }, contactStatus: "definitely-real-i-promise" },
+      } as unknown as Json);
+      expect(result.contact?.contactStatus).toBeNull();
     });
 
     it("drops a contact that arrived without the page it came from — an unsourced contact is not evidence", () => {
