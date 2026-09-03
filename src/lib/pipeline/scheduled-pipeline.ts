@@ -4,7 +4,7 @@ import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discove
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
 import { isDiscoveryDue, markDiscoveryFinished, markDiscoveryRunning } from "@/lib/pipeline/discovery-schedule";
-import { discoverProspectContacts, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import { discoverProspectContacts, mergeContactIntoRawData, type ContactDiscoveryOutcome } from "@/lib/discovery/contact-enrichment";
 import { qualifyLead, researchLead } from "@/lib/pipeline/lead-pipeline";
 import type { Database, Json } from "@/types/database.types";
 
@@ -281,11 +281,24 @@ export async function runDiscoveryForCampaign(
     // the site said nothing — see discoverProspectContacts. Every field it
     // returns carries the URL it was actually read from, and nothing is
     // inferred.
-    const contactOutcome = await discoverProspectContacts({
-      companyName: prospect.companyName,
-      website: prospect.website,
-      location: prospect.location,
-    });
+    //
+    // Every internal path here already degrades to null on a real failure
+    // (a broken site, a Tavily outage) rather than throwing — this catch is
+    // the hard guarantee on top of that: a genuinely unexpected error in
+    // enrichment must never lose the lead itself, or abort every remaining
+    // prospect in this batch, which an uncaught throw inside a for-loop
+    // would otherwise do.
+    let contactOutcome: ContactDiscoveryOutcome;
+    try {
+      contactOutcome = await discoverProspectContacts({
+        companyName: prospect.companyName,
+        website: prospect.website,
+        location: prospect.location,
+      });
+    } catch (error) {
+      console.error("[scheduled-pipeline] contact discovery threw unexpectedly — proceeding without it", error);
+      contactOutcome = { contacts: null, status: "not_found" };
+    }
 
     const { data: prospectRow } = await supabase
       .from("prospects")

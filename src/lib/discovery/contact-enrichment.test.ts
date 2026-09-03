@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverProspectContacts, enrichProspectContact, mergeContactIntoRawData, toFetchableUrl } from "@/lib/discovery/contact-enrichment";
+import { emptyContacts } from "@/lib/discovery/contact-extraction";
 
 /**
  * discoverProspectContacts is the fix for the exact production bug reported:
@@ -128,6 +129,67 @@ describe("mergeContactIntoRawData", () => {
     const result = mergeContactIntoRawData({ location: "Pune", industry: "Retail", evidenceSnippet: "a real snippet" }, { contacts: null, status: "not_found" });
     expect(result.industry).toBe("Retail");
     expect(result.evidenceSnippet).toBe("a real snippet");
+  });
+
+  it("never overwrites an existing high-confidence contact with a weaker retry result", () => {
+    const base = { contact: { email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } } };
+    const retry = {
+      contacts: { ...emptyContacts(), email: { value: "brightpixel.studio@gmail.com", source: "https://directory.example/listing", confidence: "low" as const } },
+      status: "found" as const,
+    };
+
+    const result = mergeContactIntoRawData(base, retry);
+    expect((result.contact as { email: { value: string } }).email.value).toBe("hello@brightpixel.in");
+  });
+
+  it("upgrades an existing low-confidence contact when a retry finds genuinely stronger evidence", () => {
+    const base = { contact: { email: { value: "brightpixel.studio@gmail.com", source: "https://directory.example/listing", confidence: "low" } } };
+    const retry = {
+      contacts: { ...emptyContacts(), email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" as const } },
+      status: "found" as const,
+    };
+
+    const result = mergeContactIntoRawData(base, retry);
+    expect((result.contact as { email: { value: string } }).email.value).toBe("hello@brightpixel.in");
+  });
+
+  it("keeps the existing value on a same-confidence tie rather than churning on every retry", () => {
+    const base = { contact: { phone: { value: "+91 98765 43210", source: "https://brightpixel.in/contact", confidence: "high" } } };
+    const retry = {
+      contacts: { ...emptyContacts(), phone: { value: "+91 11111 11111", source: "https://brightpixel.in/about", confidence: "high" as const } },
+      status: "found" as const,
+    };
+
+    const result = mergeContactIntoRawData(base, retry);
+    expect((result.contact as { phone: { value: string } }).phone.value).toBe("+91 98765 43210");
+  });
+
+  it("fills in a channel the retry found that the original enrichment never had, without touching the channel it already had", () => {
+    const base = { contact: { email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } } };
+    const retry = {
+      contacts: { ...emptyContacts(), linkedin: { value: "https://linkedin.com/company/brightpixel", source: "https://brightpixel.in/about", confidence: "high" as const } },
+      status: "found" as const,
+    };
+
+    const result = mergeContactIntoRawData(base, retry) as { contact: { email: { value: string }; linkedin: { value: string } } };
+    expect(result.contact.email.value).toBe("hello@brightpixel.in");
+    expect(result.contact.linkedin.value).toBe("https://linkedin.com/company/brightpixel");
+  });
+
+  it("never downgrades an already-found prospect back to not_found when a retry turns up nothing new", () => {
+    const base = { contact: { email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } } };
+    const retry = { contacts: null, status: "not_found" as const };
+
+    const result = mergeContactIntoRawData(base, retry);
+    expect((result.contact as { contactStatus: string }).contactStatus).toBe("found");
+  });
+
+  it("has no existing contact to protect on a fresh prospect's first insert — the new outcome is simply written through", () => {
+    const result = mergeContactIntoRawData(
+      { location: "Pune" },
+      { contacts: { ...emptyContacts(), email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } }, status: "found" }
+    );
+    expect((result.contact as { email: { value: string } }).email.value).toBe("hello@brightpixel.in");
   });
 });
 

@@ -223,24 +223,52 @@ export async function discoverProspectContacts(params: {
  * recorded "not_found" is what tells the Lead page (and this deployment's
  * own audit trail) that enrichment genuinely ran and had nothing to report,
  * rather than never having been attempted.
+ *
+ * Per channel, an existing value is only replaced when the new one is
+ * strictly stronger evidence (higher confidence) — never on a tie, never on
+ * a downgrade. This only does real work on a re-run of an already-enriched
+ * prospect (the manual "Find Contact Info" retry): a fresh prospect being
+ * inserted for the first time has no existing contact block, so every field
+ * here is simply new. Without this, a retry that fell back to weaker search
+ * evidence — because the site happened to be briefly unreachable, say —
+ * could silently replace a genuinely stronger, already-verified contact.
  */
+const CONFIDENCE_RANK: Record<"high" | "medium" | "low", number> = { high: 3, medium: 2, low: 1 };
+
+function strongerField<T extends { confidence: "high" | "medium" | "low" }>(existing: T | null | undefined, incoming: T | null | undefined): T | null {
+  if (!incoming) return existing ?? null;
+  if (!existing) return incoming;
+  return CONFIDENCE_RANK[incoming.confidence] > CONFIDENCE_RANK[existing.confidence] ? incoming : existing;
+}
+
 export function mergeContactIntoRawData(base: Record<string, unknown>, outcome: ContactDiscoveryOutcome): Record<string, unknown> {
   const contacts = outcome.contacts;
 
+  const existingContact =
+    base.contact && typeof base.contact === "object" && !Array.isArray(base.contact) ? (base.contact as Record<string, unknown>) : null;
+  const existing = (key: string) => (existingContact?.[key] as ExtractedContacts["email"] | undefined) ?? null;
+
+  const merged = {
+    email: strongerField(existing("email"), contacts?.email),
+    phone: strongerField(existing("phone"), contacts?.phone),
+    whatsapp: strongerField(existing("whatsapp"), contacts?.whatsapp),
+    contactPageUrl: strongerField(existing("contactPageUrl"), contacts?.contactPageUrl),
+    contactFormUrl: strongerField(existing("contactFormUrl"), contacts?.contactFormUrl),
+    instagram: strongerField(existing("instagram"), contacts?.instagram),
+    linkedin: strongerField(existing("linkedin"), contacts?.linkedin),
+    facebook: strongerField(existing("facebook"), contacts?.facebook),
+    address: strongerField(existing("address"), contacts?.address),
+  };
+
+  // The overall status reflects the merged result, not just this run's own
+  // outcome: a re-run that found nothing new must never turn an already
+  // "found" prospect back into "not_found" — the earlier evidence is still
+  // real and still on file.
+  const anyChannel = Object.values(merged).some((field) => field !== null);
+  const status: "found" | "not_found" = anyChannel ? "found" : outcome.status;
+
   return {
     ...base,
-    contact: {
-      email: contacts?.email ?? null,
-      phone: contacts?.phone ?? null,
-      whatsapp: contacts?.whatsapp ?? null,
-      contactPageUrl: contacts?.contactPageUrl ?? null,
-      contactFormUrl: contacts?.contactFormUrl ?? null,
-      instagram: contacts?.instagram ?? null,
-      linkedin: contacts?.linkedin ?? null,
-      facebook: contacts?.facebook ?? null,
-      address: contacts?.address ?? null,
-      contactStatus: outcome.status,
-      enrichedAt: new Date().toISOString(),
-    },
+    contact: { ...merged, contactStatus: status, enrichedAt: new Date().toISOString() },
   };
 }

@@ -7,7 +7,7 @@ import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discove
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
-import { discoverProspectContacts, mergeContactIntoRawData } from "@/lib/discovery/contact-enrichment";
+import { discoverProspectContacts, mergeContactIntoRawData, type ContactDiscoveryOutcome } from "@/lib/discovery/contact-enrichment";
 import {
   getCampaignDiscoverySchedule,
   markDiscoveryFinished,
@@ -525,11 +525,22 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     // failure — or the site said nothing, falls back to bounded, targeted
     // search evidence. Every field comes back with the page it was read
     // from either way.
-    const contactOutcome = await discoverProspectContacts({
-      companyName: prospect.companyName,
-      website: prospect.website,
-      location: prospect.location,
-    });
+    //
+    // Every internal path already degrades to null on a real failure rather
+    // than throwing — this catch is the hard guarantee that a genuinely
+    // unexpected error in enrichment can never lose the lead itself or
+    // abort every remaining prospect in this run.
+    let contactOutcome: ContactDiscoveryOutcome;
+    try {
+      contactOutcome = await discoverProspectContacts({
+        companyName: prospect.companyName,
+        website: prospect.website,
+        location: prospect.location,
+      });
+    } catch (error) {
+      console.error("[campaigns/actions] contact discovery threw unexpectedly — proceeding without it", error);
+      contactOutcome = { contacts: null, status: "not_found" };
+    }
 
     const { data: prospectRow } = await supabase
       .from("prospects")
