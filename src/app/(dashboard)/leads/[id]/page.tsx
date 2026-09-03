@@ -15,14 +15,22 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   const supabase = await createClient();
   const { data: lead } = await supabase
     .from("leads")
-    .select(
-      "id, status, qualification_status, current_score, intent, buying_intent, next_action, notes, research_status, research_error, prospect_id, campaign_id, created_at"
-    )
+    .select("id, status, qualification_status, current_score, intent, buying_intent, next_action, notes, prospect_id, campaign_id, created_at")
     .eq("id", id)
     .eq("organization_id", currentOrg.organizationId)
     .maybeSingle();
 
   if (!lead) notFound();
+
+  // research_status/research_error (Automatic AI Research) are read in their
+  // own best-effort query, deliberately kept out of the select above: this
+  // page's own notFound() gate must never depend on a column a production
+  // database happens not to have migrated yet. A query error here just
+  // falls back to "pending" — an honest, safe default until the migration
+  // (supabase/migrations/20260903000000_lead_research_status.sql) runs.
+  const researchStateQuery = await supabase.from("leads").select("research_status, research_error").eq("id", id).maybeSingle();
+  const researchStatus = (researchStateQuery.data?.research_status as "pending" | "researching" | "completed" | "failed" | undefined) ?? "pending";
+  const researchError = researchStateQuery.data?.research_error ?? null;
 
   const [contacts, prospect, campaign, research, conversations, tasks, deals, latestScore] = await Promise.all([
     supabase.from("contacts").select("id, full_name, email, phone, role_title, is_primary").eq("lead_id", id),
@@ -53,7 +61,7 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
 
   return (
     <LeadDetailTabs
-      lead={lead}
+      lead={{ ...lead, research_status: researchStatus, research_error: researchError }}
       leadName={primaryContact?.full_name ?? prospect.data?.company_name ?? "Unnamed lead"}
       primaryContact={primaryContact}
       recipientEmail={recipientEmail}
