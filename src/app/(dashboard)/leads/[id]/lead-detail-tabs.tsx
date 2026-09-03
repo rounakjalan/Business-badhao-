@@ -252,11 +252,18 @@ export function LeadDetailTabs({
               <DarkCard className="p-5">
                 <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
                   <h4 className="text-sm font-semibold text-bb-text">Contact Information</h4>
-                  {website ? (
-                    <DashButton variant="outline" disabled={findingContact} onClick={findContact}>
-                      {findingContact ? "Reading site…" : "Find Contact Info"}
-                    </DashButton>
-                  ) : null}
+                  {/*
+                    Not gated on `website` — discoverProspectContacts (see
+                    findLeadContactAction) falls back to bounded Tavily/Exa
+                    search evidence precisely when there is no website on
+                    file, which is a normal outcome of search-based Lead
+                    Discovery, not an edge case. Hiding this button for
+                    exactly the leads with no website meant the one leads
+                    that most needed a second attempt could never get one.
+                  */}
+                  <DashButton variant="outline" disabled={findingContact} onClick={findContact}>
+                    {findingContact ? "Reading site…" : "Find Contact Info"}
+                  </DashButton>
                 </div>
                 <ContactChannels
                   contact={contact}
@@ -463,11 +470,10 @@ export function LeadDetailTabs({
             <DarkCard className="p-5">
               <div className="mb-3 flex items-center justify-between border-b border-bb-border pb-3">
                 <h4 className="text-sm font-semibold text-bb-text">Contacts</h4>
-                {website ? (
-                  <DashButton variant="outline" disabled={findingContact} onClick={findContact}>
-                    {findingContact ? "Reading site…" : "Find Contact Info"}
-                  </DashButton>
-                ) : null}
+                {/* Not gated on `website` — see the matching comment on the Overview tab's identical button. */}
+                <DashButton variant="outline" disabled={findingContact} onClick={findContact}>
+                  {findingContact ? "Reading site…" : "Find Contact Info"}
+                </DashButton>
               </div>
               {/*
                 AI-discovered contact channels — the same data the Overview
