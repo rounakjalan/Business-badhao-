@@ -43,6 +43,8 @@ type Lead = {
   buying_intent: "low" | "medium" | "high" | null;
   next_action: string | null;
   notes: string | null;
+  research_status: "pending" | "researching" | "completed" | "failed";
+  research_error: string | null;
   created_at: string;
 };
 type Contact = { id: string; full_name: string | null; email: string | null; phone: string | null; role_title: string | null; is_primary: boolean };
@@ -566,9 +568,26 @@ export function LeadDetailTabs({
                 {aiPending ? "Researching…" : "Run AI Research"}
               </DashButton>
             </div>
-            {researchError ? <p className="text-xs text-bb-rose">{researchError}</p> : null}
+            {researchError ? (
+              <p className="text-xs text-bb-rose">{researchError}</p>
+            ) : !aiPending && lead.research_status === "failed" && lead.research_error ? (
+              // A newly discovered lead is researched automatically; this is
+              // what that attempt (or an earlier manual one) left behind when
+              // it genuinely failed. Not retried automatically — see
+              // finishPendingLeads — so it stays visible until a human
+              // presses Run AI Research again.
+              <p className="text-xs text-bb-rose">
+                The research attempt failed and was not retried automatically: {lead.research_error}
+              </p>
+            ) : null}
             {research.length === 0 ? (
-              <p className="py-16 text-center text-sm text-bb-text-3">No research recorded for this lead yet.</p>
+              <p className="py-16 text-center text-sm text-bb-text-3">
+                {aiPending || lead.research_status === "researching"
+                  ? "Researching…"
+                  : lead.research_status === "failed"
+                    ? "Research failed — see above. It will not be retried automatically."
+                    : "No research recorded for this lead yet. New leads are researched automatically shortly after discovery."}
+              </p>
             ) : (
               research.map((r) => <ResearchCard key={r.id} research={r} />)
             )}

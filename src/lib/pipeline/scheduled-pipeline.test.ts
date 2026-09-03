@@ -12,10 +12,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // the "right" answer).
 
 import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
-import { runDiscoveryForCampaign } from "@/lib/pipeline/scheduled-pipeline";
+import { finishPendingLeads, runDiscoveryForCampaign } from "@/lib/pipeline/scheduled-pipeline";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const TAVILY_URL = "https://api.tavily.com/search";
+
+const VALID_RESEARCH = {
+  companySummary: "A small web design studio serving local businesses in Pune.",
+  likelyNeeds: ["A modern, mobile-friendly website"],
+  possiblePainPoints: ["Outdated online presence"],
+  relevantProductsOrServices: ["Website design"],
+  buyingSignals: [],
+  personalizationOpportunities: ["Mention their Pune location"],
+  potentialObjections: ["Budget"],
+  confidence: "medium",
+  verifiedInformation: [],
+  businessFactsReferenced: [],
+  inferredInformation: [],
+  unavailableInformation: ["Team size"],
+};
+
+const VALID_QUALIFICATION = {
+  qualificationScore: 72,
+  fitScore: 75,
+  intentScore: 65,
+  confidence: "medium",
+  positiveReasons: ["Matches ICP location and industry"],
+  negativeReasons: [],
+  missingInformation: [],
+  recommendedStatus: "qualifying",
+};
 
 // ---------------------------------------------------------------------------
 // Generic in-memory Supabase stand-in. Deliberately not a per-call scripted
@@ -81,6 +107,10 @@ function createFakeSupabase(tables: Tables) {
       },
       eq(column: string, value: unknown) {
         filters.push((row) => row[column] === value);
+        return api;
+      },
+      neq(column: string, value: unknown) {
+        filters.push((row) => row[column] !== value);
         return api;
       },
       not() {
@@ -198,7 +228,18 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
       vi.fn(async (url: string, init?: RequestInit) => {
         if (url === OPENROUTER_URL) {
           const body = JSON.parse(String(init?.body ?? "{}"));
+          const systemPrompt = String(body.messages?.[0]?.content ?? "");
           const userPrompt = String(body.messages?.[1]?.content ?? "");
+          // finishPendingLeads's own two calls (researchLead, then
+          // qualifyLead), distinguished by their real, distinct system
+          // prompts — checked first since neither ever contains the
+          // discovery-stage markers below.
+          if (systemPrompt.includes("AI research agent")) {
+            return openRouterResponse(VALID_RESEARCH);
+          }
+          if (systemPrompt.includes("AI lead-qualification engine")) {
+            return openRouterResponse(VALID_QUALIFICATION);
+          }
           if (userPrompt.includes("CANDIDATE PROSPECTS TO REVIEW")) {
             return openRouterResponse({ accepted: [CANDIDATE_WITH_WEBSITE, CANDIDATE_NO_WEBSITE] }, "nousresearch/hermes-4-70b");
           }
@@ -395,5 +436,207 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
       expect(prospect.raw_data.contact?.email).toBeNull();
     }
     expect(tables.leads).toHaveLength(2);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Automatic AI Research: finishPendingLeads is the REAL function the cron
+  // route (src/app/api/cron/lead-pipeline/route.ts) calls immediately after
+  // runDiscoveryForCampaign, in the same sweep — that composition is what
+  // makes research automatic for a newly discovered lead with nobody opening
+  // it or pressing "Run AI Research". These tests prove finishPendingLeads
+  // itself is safe to run unattended, every hour, forever: a lead already
+  // researched is never re-researched, a lead that genuinely failed is never
+  // silently retried forever, and one lead's failure never blocks another.
+  //
+  // Nested inside the same describe (rather than a sibling) so it shares
+  // stubRealPipeline/seedTables/CANDIDATE_* — the exact discovery-stage
+  // setup already proven above — for the two tests that compose real
+  // discovery with real automatic research.
+  // ---------------------------------------------------------------------------
+  describe("finishPendingLeads — automatic AI research wiring", () => {
+  const ENV_KEYS = ["OPENROUTER_API_KEY", "OPENROUTER_MODEL", "AI_PROVIDER", "AI_FALLBACK_PROVIDER"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+    process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    delete process.env.OPENROUTER_MODEL;
+    delete process.env.AI_PROVIDER;
+    delete process.env.AI_FALLBACK_PROVIDER;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+    vi.unstubAllGlobals();
+  });
+
+  function stubResearchAndQualification() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url !== OPENROUTER_URL) throw new Error(`unexpected fetch url: ${url}`);
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        const systemPrompt = String(body.messages?.[0]?.content ?? "");
+        if (systemPrompt.includes("AI research agent")) return openRouterResponse(VALID_RESEARCH);
+        if (systemPrompt.includes("AI lead-qualification engine")) return openRouterResponse(VALID_QUALIFICATION);
+        throw new Error(`unexpected OpenRouter call: ${systemPrompt.slice(0, 80)}`);
+      })
+    );
+  }
+
+  function seedLead(overrides: Partial<Row> & { id?: string } = {}): Row {
+    const suffix = overrides.id ?? "1";
+    return {
+      organization_id: "org-1",
+      campaign_id: "campaign-1",
+      prospect_id: `prospect-${suffix}`,
+      status: "new",
+      qualification_status: "pending",
+      current_score: null,
+      research_status: "pending",
+      research_error: null,
+      created_at: new Date().toISOString(),
+      ...overrides,
+      id: `lead-${suffix}`,
+    };
+  }
+
+  it("a genuinely new pending lead is automatically researched and then qualified — no button pressed", async () => {
+    stubResearchAndQualification();
+    const tables: Tables = {
+      leads: [seedLead({ id: "1" })],
+      prospects: [{ id: "prospect-1", company_name: "Bright Pixel", website: "brightpixel.in", title: null }],
+    };
+    const supabase = createFakeSupabase(tables);
+
+    const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+
+    expect(result).toEqual({ finished: 1, failed: 0 });
+    const lead = (tables.leads as (Row & { research_status: string; qualification_status: string })[])[0];
+    expect(lead.research_status).toBe("completed");
+    expect(lead.qualification_status).toBe("qualifying");
+    expect(tables.lead_research).toHaveLength(1);
+  });
+
+  it("a lead already researched successfully is never re-researched — only qualification is retried", async () => {
+    stubResearchAndQualification();
+    const tables: Tables = {
+      leads: [seedLead({ id: "1", research_status: "completed" })],
+      prospects: [{ id: "prospect-1", company_name: "Bright Pixel", website: "brightpixel.in", title: null }],
+      lead_research: [{ id: "existing-research", lead_id: "lead-1", organization_id: "org-1", summary: "Already researched.", findings: {}, source: "ai" }],
+    };
+    const supabase = createFakeSupabase(tables);
+
+    const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+
+    expect(result).toEqual({ finished: 1, failed: 0 });
+    // Still exactly one row — the pre-existing one. A wiring bug that called
+    // researchLead anyway would leave two.
+    expect(tables.lead_research).toHaveLength(1);
+    const lead = (tables.leads as (Row & { qualification_status: string })[])[0];
+    expect(lead.qualification_status).toBe("qualifying");
+  });
+
+  it("a lead already known to have failed research is excluded from the automatic sweep entirely, left for manual retry", async () => {
+    stubResearchAndQualification();
+    const tables: Tables = {
+      leads: [seedLead({ id: "1", research_status: "failed", research_error: "a previous attempt failed" })],
+      prospects: [{ id: "prospect-1", company_name: "Bright Pixel", website: "brightpixel.in", title: null }],
+    };
+    const supabase = createFakeSupabase(tables);
+
+    const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+
+    // Not even attempted this run — excluded by the query itself.
+    expect(result).toEqual({ finished: 0, failed: 0 });
+    const lead = (tables.leads as (Row & { research_status: string; research_error: string | null; qualification_status: string })[])[0];
+    expect(lead.research_status).toBe("failed");
+    expect(lead.research_error).toBe("a previous attempt failed");
+    expect(lead.qualification_status).toBe("pending");
+    expect(tables.lead_research ?? []).toHaveLength(0);
+  });
+
+  it("one lead's research failure does not stop another lead in the same run from being researched and qualified", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url !== OPENROUTER_URL) throw new Error(`unexpected fetch url: ${url}`);
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        const systemPrompt = String(body.messages?.[0]?.content ?? "");
+        const userPrompt = String(body.messages?.[1]?.content ?? "");
+        if (systemPrompt.includes("AI research agent")) {
+          if (userPrompt.includes("Company: FailCo")) return new Response("Service Unavailable", { status: 503 });
+          return openRouterResponse(VALID_RESEARCH);
+        }
+        if (systemPrompt.includes("AI lead-qualification engine")) return openRouterResponse(VALID_QUALIFICATION);
+        throw new Error(`unexpected OpenRouter call: ${systemPrompt.slice(0, 80)}`);
+      })
+    );
+
+    const tables: Tables = {
+      leads: [seedLead({ id: "1", prospect_id: "prospect-fail" }), seedLead({ id: "2", prospect_id: "prospect-good" })],
+      prospects: [
+        { id: "prospect-fail", company_name: "FailCo", website: null, title: null },
+        { id: "prospect-good", company_name: "GoodCo", website: "goodco.example", title: null },
+      ],
+    };
+    const supabase = createFakeSupabase(tables);
+
+    const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+
+    expect(result).toEqual({ finished: 1, failed: 1 });
+    const leads = tables.leads as (Row & { id: string; research_status: string; qualification_status: string })[];
+    const failLead = leads.find((l) => l.id === "lead-1")!;
+    const goodLead = leads.find((l) => l.id === "lead-2")!;
+    expect(failLead.research_status).toBe("failed");
+    expect(failLead.qualification_status).toBe("pending");
+    expect(goodLead.research_status).toBe("completed");
+    expect(goodLead.qualification_status).toBe("qualifying");
+  });
+
+  it("scheduled discovery (runDiscoveryForCampaign) followed by finishPendingLeads — exactly what the cron route does in one sweep — automatically researches the newly discovered leads with no button pressed", async () => {
+    stubRealPipeline();
+    const tables = seedTables();
+    const supabase = createFakeSupabase(tables);
+
+    const discovered = await runDiscoveryForCampaign(supabase, "org-1", "campaign-1", Date.now(), 240_000);
+    expect(discovered.newLeads).toBe(2);
+
+    // Same call the cron route's pass 3 makes right after discovery, for
+    // the same campaign, in the same sweep.
+    stubResearchAndQualification();
+    const finished = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+
+    expect(finished).toEqual({ finished: 2, failed: 0 });
+    const leads = tables.leads as (Row & { research_status: string })[];
+    expect(leads.every((l) => l.research_status === "completed")).toBe(true);
+    expect(tables.lead_research).toHaveLength(2);
+  });
+
+  it("no duplicate research occurs across two consecutive scheduled sweeps — the second sweep's discovery finds nothing new (cross-run dedup), and no lead gains a second lead_research row", async () => {
+    stubRealPipeline();
+    const tables = seedTables();
+    const supabase = createFakeSupabase(tables);
+
+    await runDiscoveryForCampaign(supabase, "org-1", "campaign-1", Date.now(), 240_000);
+    stubResearchAndQualification();
+    await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+    expect(tables.lead_research).toHaveLength(2);
+
+    // Next hourly tick: cross-run dedup means discovery finds nothing new...
+    stubRealPipeline();
+    const secondDiscovery = await runDiscoveryForCampaign(supabase, "org-1", "campaign-1", Date.now(), 240_000);
+    expect(secondDiscovery.newLeads).toBe(0);
+
+    // ...and the second finishPendingLeads pass has nothing to do either,
+    // since both leads are already research_status: 'completed'.
+    stubResearchAndQualification();
+    const secondFinish = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
+    expect(secondFinish).toEqual({ finished: 0, failed: 0 });
+    expect(tables.lead_research).toHaveLength(2);
+  });
   });
 });

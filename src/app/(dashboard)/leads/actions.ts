@@ -31,7 +31,11 @@ export async function runLeadResearchAction(leadId: string): Promise<ProspectRes
 
   const supabase = await createClient();
   const result = await researchLead(supabase, currentOrg.organizationId, leadId);
-  if (result.ok) revalidatePath(`/leads/${leadId}`);
+  // Revalidated on failure too — researchLead now always writes a terminal
+  // research_status ("completed"/"failed") plus, on failure, research_error,
+  // so the lead page's own state reflects a failed attempt immediately
+  // rather than only after a full reload.
+  revalidatePath(`/leads/${leadId}`);
   return result;
 }
 

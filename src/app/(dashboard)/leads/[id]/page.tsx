@@ -15,7 +15,9 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   const supabase = await createClient();
   const { data: lead } = await supabase
     .from("leads")
-    .select("id, status, qualification_status, current_score, intent, buying_intent, next_action, notes, prospect_id, campaign_id, created_at")
+    .select(
+      "id, status, qualification_status, current_score, intent, buying_intent, next_action, notes, research_status, research_error, prospect_id, campaign_id, created_at"
+    )
     .eq("id", id)
     .eq("organization_id", currentOrg.organizationId)
     .maybeSingle();

@@ -308,6 +308,8 @@ export interface Database {
           buying_intent: "low" | "medium" | "high" | null;
           next_action: string | null;
           notes: string | null;
+          research_status: "pending" | "researching" | "completed" | "failed";
+          research_error: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -324,6 +326,8 @@ export interface Database {
           buying_intent?: "low" | "medium" | "high" | null;
           next_action?: string | null;
           notes?: string | null;
+          research_status?: "pending" | "researching" | "completed" | "failed";
+          research_error?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -340,6 +344,8 @@ export interface Database {
           buying_intent?: "low" | "medium" | "high" | null;
           next_action?: string | null;
           notes?: string | null;
+          research_status?: "pending" | "researching" | "completed" | "failed";
+          research_error?: string | null;
           created_at?: string;
           updated_at?: string;
         };

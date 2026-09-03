@@ -82,6 +82,13 @@ export async function researchLead(
   const context = await loadLeadContext(supabase, leadId, organizationId);
   if (!context) return { ok: false, message: "Lead not found." };
 
+  // Marks the lead as actively being researched before the (potentially
+  // slow) AI call, so a page load mid-run — or the automatic pipeline
+  // crashing between here and the write below — shows "Researching" rather
+  // than the stale prior state. Best-effort: a tracking write failing here
+  // must never block the research itself.
+  await supabase.from("leads").update({ research_status: "researching" }).eq("id", leadId).eq("organization_id", organizationId);
+
   const businessContext = await getBusinessContext(organizationId, supabase);
 
   const result = await runProspectResearch({
@@ -103,6 +110,22 @@ export async function researchLead(
       findings: result.research as unknown as Json,
       source: "ai",
     });
+    await supabase
+      .from("leads")
+      .update({ research_status: "completed", research_error: null })
+      .eq("id", leadId)
+      .eq("organization_id", organizationId);
+  } else {
+    // Recorded so the automatic pipeline never retries this lead on a later
+    // cycle (see finishPendingLeads) and the lead page can show it honestly
+    // instead of looking indistinguishable from "never researched". The
+    // existing manual "Run AI Research" button is unaffected — it calls this
+    // same function regardless of the lead's current research_status.
+    await supabase
+      .from("leads")
+      .update({ research_status: "failed", research_error: result.message })
+      .eq("id", leadId)
+      .eq("organization_id", organizationId);
   }
 
   return result;

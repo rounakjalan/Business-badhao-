@@ -111,13 +111,33 @@ function outOfTime(startedAtMs: number, budgetMs: number, reserveMs = 55_000) {
 
 /**
  * Researches and qualifies leads that never got that far — deferred when a
- * discovery run hit its time budget, or left behind when research failed.
- * This is the part that stops the user having to open each lead and press
- * two buttons.
+ * discovery run hit its time budget, including leads a campaign's own
+ * discovery step (runDiscoveryForCampaign) just created moments ago in the
+ * same sweep. This is the part that stops the user having to open each lead
+ * and press two buttons.
  *
- * Qualification still only runs on a lead whose research succeeded, exactly
- * as in the interactive path: a lead is never scored on discovery evidence
- * alone, whoever triggered it.
+ * research_status (see the migration adding it) is what makes this safe to
+ * run unattended, every hour, forever:
+ * - 'completed' — this lead already has real research on file. Never
+ *   re-researched (that would both waste the AI/search budget and create a
+ *   second lead_research row for no reason); if qualification alone didn't
+ *   finish last time, it is retried using the research already on file.
+ * - 'failed' — genuinely attempted and it didn't work. Excluded from the
+ *   query entirely: the automatic pipeline never retries a failed lead on a
+ *   later cycle, which would otherwise cost a real model call every single
+ *   hour forever for a lead that may never succeed. It is left exactly as
+ *   researchLead left it, for a human to retry with the existing manual
+ *   "Run AI Research" button — that button calls the same researchLead
+ *   regardless of the lead's current status, so the retry is unaffected.
+ * - 'pending' / 'researching' — never attempted, or a previous attempt died
+ *   mid-run without reaching a terminal status (a serverless timeout, say).
+ *   Either way, safe and correct to attempt now.
+ *
+ * Qualification still only runs on a lead with real research on file,
+ * exactly as in the interactive path: a lead is never scored on discovery
+ * evidence alone, whoever triggered it. A failure on one lead — research or
+ * qualification — never stops the rest of the batch; it is recorded and the
+ * loop moves on.
  */
 export async function finishPendingLeads(
   supabase: Client,
@@ -128,10 +148,11 @@ export async function finishPendingLeads(
 ): Promise<{ finished: number; failed: number }> {
   const { data: pending } = await supabase
     .from("leads")
-    .select("id")
+    .select("id, research_status")
     .eq("organization_id", organizationId)
     .eq("campaign_id", campaignId)
     .eq("qualification_status", "pending")
+    .neq("research_status", "failed")
     .order("created_at", { ascending: true })
     .limit(MAX_LEADS_FINISHED_PER_CAMPAIGN);
 
@@ -141,10 +162,12 @@ export async function finishPendingLeads(
   for (const lead of pending ?? []) {
     if (outOfTime(startedAtMs, budgetMs)) break;
 
-    const research = await researchLead(supabase, organizationId, lead.id);
-    if (!research.ok) {
-      failed += 1;
-      continue;
+    if (lead.research_status !== "completed") {
+      const research = await researchLead(supabase, organizationId, lead.id);
+      if (!research.ok) {
+        failed += 1;
+        continue;
+      }
     }
 
     const qualification = await qualifyLead(supabase, organizationId, lead.id);
