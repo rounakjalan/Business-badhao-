@@ -88,12 +88,23 @@ async function findLeadByPhone(admin: NonNullable<ReturnType<typeof createAdminC
 export async function POST(request: Request) {
   const rawBody = await request.text();
 
+  // Fails closed, not open: an unsigned/unverifiable payload is never
+  // processed, whether because it genuinely lacks a valid signature or
+  // because this deployment hasn't configured WHATSAPP_APP_SECRET at all.
+  // Distinguished only for operator troubleshooting (503 = misconfigured
+  // deployment, 401 = a signature that didn't verify) — neither path ever
+  // logs the secret or the request body, only that a request was rejected
+  // and why, in general terms.
   const appSecret = getWhatsAppAppSecret();
-  if (appSecret) {
-    const signature = request.headers.get("x-hub-signature-256");
-    if (!verifySignature(rawBody, signature, appSecret)) {
-      return NextResponse.json({ error: "invalid signature" }, { status: 401 });
-    }
+  if (!appSecret) {
+    console.error("[whatsapp webhook] rejected POST: WHATSAPP_APP_SECRET is not configured for this deployment");
+    return NextResponse.json({ error: "WhatsApp webhook signature verification isn't configured for this deployment." }, { status: 503 });
+  }
+
+  const signature = request.headers.get("x-hub-signature-256");
+  if (!verifySignature(rawBody, signature, appSecret)) {
+    console.error("[whatsapp webhook] rejected POST: missing or invalid X-Hub-Signature-256");
+    return NextResponse.json({ error: "invalid signature" }, { status: 401 });
   }
 
   let payload: WhatsAppWebhookPayload;

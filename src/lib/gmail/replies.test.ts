@@ -13,7 +13,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getLastHistoryId, getValidAccessToken, setLastHistoryId } from "@/lib/gmail/tokens";
 import { ensureConversation } from "@/lib/outreach/conversation";
 import { respondToConversation } from "@/lib/conversation-agent/respond";
-import { checkForReplies, extractEmailAddress, extractPlainTextBody } from "@/lib/gmail/replies";
+import { checkForReplies, checkRepliesForAllConnectedOrganizations, extractEmailAddress, extractPlainTextBody } from "@/lib/gmail/replies";
 
 describe("extractEmailAddress", () => {
   it("pulls the address out of a display-name header", () => {
@@ -273,5 +273,189 @@ describe("checkForReplies", () => {
     const result = await checkForReplies("org-1");
     expect(result).toEqual({ ok: true, newReplies: 0, matchedLeadIds: [], unmatchedSenders: [] });
     expect(setLastHistoryId).toHaveBeenCalledWith("org-1", "5000");
+  });
+});
+
+/**
+ * checkRepliesForAllConnectedOrganizations orchestrates checkForReplies per
+ * organization — it does not re-implement any of checkForReplies' own
+ * matching/storage logic (that's fully covered above), so these tests only
+ * exercise the orchestration: summing results across organizations, letting
+ * one organization's failure not stop the sweep, and respecting the time
+ * budget. checkForReplies is not mocked at the module level here — a
+ * same-file internal call cannot be intercepted that way — instead these
+ * drive it through a real, multi-org-aware admin client and fetch stub, the
+ * same way checkForReplies' own tests do above.
+ */
+describe("checkRepliesForAllConnectedOrganizations", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function makeMultiOrgAdminClient(config: { accounts: Row[] | null; contactsByOrg?: Record<string, Row | null> }) {
+    const from = (table: string) => {
+      if (table === "email_accounts") {
+        return { select: () => Promise.resolve({ data: config.accounts }) };
+      }
+      return {
+        select: () => ({
+          eq: (_col: string, orgId: string) => ({
+            eq: () => ({
+              maybeSingle: async () => {
+                if (table === "contacts") return { data: config.contactsByOrg?.[orgId] ?? null };
+                return { data: null };
+              },
+            }),
+          }),
+        }),
+        insert: () => Promise.resolve({ data: null, error: null }),
+        update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
+      };
+    };
+    return { from } as unknown as ReturnType<typeof createAdminClient>;
+  }
+
+  // Both organizations hit identical relative Gmail paths (/profile,
+  // /history, /messages/{id}) — only the bearer token, which comes from
+  // each organization's own getValidAccessToken result, tells them apart.
+  function stubMultiOrgGmailFetch(byToken: Record<string, Record<string, { status: number; body: unknown }>>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+        const token = (init?.headers?.Authorization ?? "").replace("Bearer ", "");
+        const responses = byToken[token] ?? {};
+        const match = Object.keys(responses).find((key) => url.includes(key));
+        const response = match ? responses[match] : { status: 404, body: {} };
+        return {
+          ok: response.status >= 200 && response.status < 300,
+          status: response.status,
+          json: async () => response.body,
+          text: async () => JSON.stringify(response.body),
+        };
+      })
+    );
+  }
+
+  it("sums replies found across every connected organization", async () => {
+    vi.mocked(getValidAccessToken).mockImplementation(async (orgId: string) =>
+      orgId === "org-a"
+        ? { ok: true, accessToken: "token-a", emailAddress: "a@example.com" }
+        : { ok: true, accessToken: "token-b", emailAddress: "b@example.com" }
+    );
+    vi.mocked(getLastHistoryId).mockResolvedValue("900");
+    vi.mocked(ensureConversation).mockResolvedValue({ ok: true, conversationId: "conv-x" });
+    vi.mocked(createAdminClient).mockReturnValue(
+      makeMultiOrgAdminClient({
+        accounts: [{ organization_id: "org-a" }, { organization_id: "org-b" }],
+        contactsByOrg: { "org-a": { lead_id: "lead-a" }, "org-b": { lead_id: "lead-b" } },
+      })
+    );
+
+    const historyBody = (messageId: string) => ({
+      status: 200,
+      body: { history: [{ messagesAdded: [{ message: { id: messageId, labelIds: ["INBOX"] } }] }], historyId: "1000" },
+    });
+    const messageBody = (messageId: string, from: string) => ({
+      status: 200,
+      body: {
+        id: messageId,
+        threadId: `thread-${messageId}`,
+        payload: { headers: [{ name: "From", value: from }], mimeType: "text/plain", body: { data: Buffer.from("Hi").toString("base64") } },
+      },
+    });
+    stubMultiOrgGmailFetch({
+      "token-a": {
+        "/profile": { status: 200, body: { emailAddress: "a@example.com", historyId: "1000" } },
+        "/history": historyBody("gm-a"),
+        "/messages/gm-a": messageBody("gm-a", "customer-a@example.com"),
+      },
+      "token-b": {
+        "/profile": { status: 200, body: { emailAddress: "b@example.com", historyId: "1000" } },
+        "/history": historyBody("gm-b"),
+        "/messages/gm-b": messageBody("gm-b", "customer-b@example.com"),
+      },
+    });
+
+    const summary = await checkRepliesForAllConnectedOrganizations(Date.now(), 60_000);
+
+    expect(summary).toEqual({ organizationsChecked: 2, newReplies: 2, failed: [] });
+  });
+
+  it("records one organization's failure without dropping another organization's successful result", async () => {
+    vi.mocked(getValidAccessToken).mockImplementation(async (orgId: string) =>
+      orgId === "org-a"
+        ? { ok: true, accessToken: "token-a", emailAddress: "a@example.com" }
+        : { ok: false, code: "refresh_failed", message: "Gmail access was revoked; reconnect required." }
+    );
+    vi.mocked(getLastHistoryId).mockResolvedValue("900");
+    vi.mocked(ensureConversation).mockResolvedValue({ ok: true, conversationId: "conv-a" });
+    vi.mocked(createAdminClient).mockReturnValue(
+      makeMultiOrgAdminClient({
+        accounts: [{ organization_id: "org-a" }, { organization_id: "org-b" }],
+        contactsByOrg: { "org-a": { lead_id: "lead-a" } },
+      })
+    );
+    stubMultiOrgGmailFetch({
+      "token-a": {
+        "/profile": { status: 200, body: { emailAddress: "a@example.com", historyId: "1000" } },
+        "/history": { status: 200, body: { history: [{ messagesAdded: [{ message: { id: "gm-a", labelIds: ["INBOX"] } }] }], historyId: "1000" } },
+        "/messages/gm-a": {
+          status: 200,
+          body: {
+            id: "gm-a",
+            threadId: "thread-a",
+            payload: { headers: [{ name: "From", value: "customer-a@example.com" }], mimeType: "text/plain", body: { data: Buffer.from("Hi").toString("base64") } },
+          },
+        },
+      },
+    });
+
+    const summary = await checkRepliesForAllConnectedOrganizations(Date.now(), 60_000);
+
+    expect(summary.organizationsChecked).toBe(2);
+    expect(summary.newReplies).toBe(1);
+    expect(summary.failed).toEqual([{ organizationId: "org-b", code: "reauth_required" }]);
+  });
+
+  it("stops processing further organizations once the time budget is spent, without losing what was already collected", async () => {
+    vi.mocked(getValidAccessToken).mockImplementation(async (orgId: string) =>
+      orgId === "org-a"
+        ? { ok: true, accessToken: "token-a", emailAddress: "a@example.com" }
+        : { ok: true, accessToken: "token-b", emailAddress: "b@example.com" }
+    );
+    vi.mocked(getLastHistoryId).mockResolvedValue("900");
+    vi.mocked(createAdminClient).mockReturnValue(
+      makeMultiOrgAdminClient({ accounts: [{ organization_id: "org-a" }, { organization_id: "org-b" }] })
+    );
+    stubMultiOrgGmailFetch({
+      "token-a": {
+        "/profile": { status: 200, body: { emailAddress: "a@example.com", historyId: "1000" } },
+        "/history": { status: 200, body: { history: [], historyId: "1000" } },
+      },
+    });
+
+    const startedAtMs = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now");
+    // First budget check (before org-a) reads as within budget; every check
+    // after that reads as already over budget, so org-b is never reached.
+    nowSpy.mockReturnValueOnce(startedAtMs + 100).mockReturnValue(startedAtMs + 999_999);
+
+    const summary = await checkRepliesForAllConnectedOrganizations(startedAtMs, 5_000);
+
+    expect(summary.organizationsChecked).toBe(1);
+    expect(getValidAccessToken).toHaveBeenCalledTimes(1);
+    expect(getValidAccessToken).toHaveBeenCalledWith("org-a");
+
+    nowSpy.mockRestore();
+  });
+
+  it("reports a zeroed summary when no organization has a connected Gmail account", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(makeMultiOrgAdminClient({ accounts: [] }));
+
+    const summary = await checkRepliesForAllConnectedOrganizations(Date.now(), 60_000);
+
+    expect(summary).toEqual({ organizationsChecked: 0, newReplies: 0, failed: [] });
+    expect(getValidAccessToken).not.toHaveBeenCalled();
   });
 });

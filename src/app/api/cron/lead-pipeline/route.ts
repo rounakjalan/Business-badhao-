@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { findEligibleCampaigns, runDiscoveryForCampaign, finishPendingLeads, type PipelineRunSummary } from "@/lib/pipeline/scheduled-pipeline";
+import { checkRepliesForAllConnectedOrganizations } from "@/lib/gmail/replies";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
@@ -34,6 +35,17 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * pass, every lead a campaign's own discovery step just created would sit
  * untouched until tomorrow's run, adding a full day of pure dead time
  * between "found" and "qualified" by construction, every single day.
+ *
+ * This endpoint's name predates a second, unrelated responsibility it now
+ * also carries: pulling in real inbound Gmail replies for every connected
+ * organization (see checkRepliesForAllConnectedOrganizations,
+ * gmail/replies.ts), which is what makes the Conversation Agent and
+ * Buying Intent detection run automatically instead of only when someone
+ * presses "Check for Replies". Kept on this same cron entry rather than a
+ * second one — this deployment's plan allows only a small number of
+ * scheduled functions, and daily is already the actual cadence for
+ * everything on this route, Gmail included; not renamed, to avoid
+ * re-registering the cron path for no functional reason.
  */
 
 // This does real AI work per lead, so it needs the long end of the platform's
@@ -42,6 +54,14 @@ export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 const TOTAL_BUDGET_MS = 240_000;
+
+/**
+ * Own slice of the total request budget, spent first: a real customer
+ * waiting on a reply matters more than discovering one more prospect, and
+ * capping it here means a busy mailbox can never crowd out the rest of
+ * this sweep the way an unbounded pass could.
+ */
+const GMAIL_REPLY_BUDGET_MS = 60_000;
 
 function unauthorized() {
   return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -83,6 +103,16 @@ export async function GET(request: Request) {
     newLeads: 0,
     skipped: [],
   };
+
+  // Real inbound Gmail replies, for every organization with a connected
+  // account — automatic ingestion (this call), not the manual "Check for
+  // Replies" button, which stays as an on-demand fallback. Runs first, on
+  // its own bounded sub-budget, before any lead-discovery work below: see
+  // checkRepliesForAllConnectedOrganizations (gmail/replies.ts) for how
+  // this reuses checkForReplies completely unchanged — same per-message
+  // dedup, same human-takeover gate inside respondToConversation, same
+  // token refresh.
+  const gmailReplies = await checkRepliesForAllConnectedOrganizations(startedAtMs, GMAIL_REPLY_BUDGET_MS);
 
   const campaigns = await findEligibleCampaigns(supabase);
   summary.campaignsConsidered = campaigns.length;
@@ -137,6 +167,7 @@ export async function GET(request: Request) {
   return NextResponse.json({
     ok: true,
     ...summary,
+    gmailReplies,
     elapsedMs: Date.now() - startedAtMs,
   });
 }

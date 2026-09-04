@@ -287,8 +287,13 @@ export async function handBackToAi(conversationId: string) {
 }
 
 export async function updateConversationStatus(conversationId: string, status: "open" | "pending" | "resolved" | "closed") {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return;
+
   const supabase = await createClient();
-  await supabase.from("conversations").update({ status }).eq("id", conversationId);
+  // Explicit org scoping alongside RLS, matching every other write in this
+  // file — never trust the row-level policy alone.
+  await supabase.from("conversations").update({ status }).eq("id", conversationId).eq("organization_id", currentOrg.organizationId);
   revalidatePath(`/conversations/${conversationId}`);
   revalidatePath("/conversations");
 }
@@ -356,10 +361,16 @@ export async function createDealFromConversation(conversationId: string) {
 
 /**
  * Polls the connected Gmail account for new replies and stores any that
- * match a known lead's email into that lead's conversation. Manually
- * triggered rather than automatic — see the comment on checkForReplies for
- * why this is the deliberately smallest foundation for inbound mail
- * rather than a real-time push subscription.
+ * match a known lead's email into that lead's conversation.
+ *
+ * This is the manual, on-demand fallback/debugging path only — the
+ * scheduled cron sweep (checkRepliesForAllConnectedOrganizations in
+ * gmail/replies.ts, called from api/cron/lead-pipeline/route.ts) already
+ * checks every organization with a connected Gmail account automatically,
+ * with nobody opening the dashboard. Pressing this button never misses
+ * anything the automatic sweep would have found and never duplicates it —
+ * both go through the exact same checkForReplies, whose per-message
+ * external_id check is what makes that safe.
  */
 export async function checkForRepliesAction(): Promise<CheckRepliesResult> {
   const currentOrg = await getCurrentOrg();

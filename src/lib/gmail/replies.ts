@@ -8,15 +8,22 @@ import type { Json } from "@/types/database.types";
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 
 /**
- * Smallest clean foundation for inbound mail, not the full autonomous
- * conversation agent: a manually-triggered poll rather than a Cloud
- * Pub/Sub push subscription. Real-time push needs its own Google Cloud
- * project setup (a Pub/Sub topic, a public push endpoint, a users.watch()
- * registration renewed every 7 days) that can't be verified without the
- * user provisioning it — this reuses only the OAuth token already
- * required for sending, so it works the moment Gmail is connected, with
- * no extra external setup. A later phase can add the push subscription
- * on top of the same matching/storage logic below without changing it.
+ * A poll rather than a Cloud Pub/Sub push subscription, on purpose:
+ * real-time push needs its own Google Cloud project setup (a Pub/Sub
+ * topic, a public push endpoint, a users.watch() registration renewed
+ * every 7 days) that can't be provisioned or verified from this codebase
+ * alone. This reuses only the OAuth token already required for sending,
+ * so it works the moment Gmail is connected, with no extra external
+ * setup. A later phase can add the push subscription on top of the same
+ * matching/storage logic below without changing it.
+ *
+ * checkForReplies (below) is called from two places: the scheduled cron
+ * sweep (checkRepliesForAllConnectedOrganizations, further down this
+ * file, wired into api/cron/lead-pipeline/route.ts) — which is what makes
+ * ingestion automatic, with nobody opening the dashboard — and the manual
+ * "Check for Replies" button (checkForRepliesAction,
+ * conversations/actions.ts), kept as an on-demand fallback/debugging path
+ * now that it is no longer the primary mechanism.
  */
 
 export function extractEmailAddress(fromHeader: string): string | null {
@@ -205,6 +212,54 @@ export async function checkForReplies(organizationId: string): Promise<CheckRepl
   await setLastHistoryId(organizationId, historyResult.data.historyId ?? profileResult.data.historyId);
 
   return { ok: true, newReplies: matchedLeadIds.length, matchedLeadIds, unmatchedSenders };
+}
+
+export type CheckAllRepliesSummary = {
+  organizationsChecked: number;
+  newReplies: number;
+  failed: { organizationId: string; code: string }[];
+};
+
+/**
+ * Runs checkForReplies for every organization with a connected Gmail
+ * account — the automatic counterpart to the manual "Check for Replies"
+ * button (checkForRepliesAction, conversations/actions.ts), which remains
+ * as a fallback/debugging path but is no longer the only way inbound mail
+ * gets pulled in. Called from the scheduled cron route
+ * (api/cron/lead-pipeline/route.ts) rather than a Cloud Pub/Sub push
+ * subscription — see the module doc comment above for why: real-time push
+ * needs its own external Google Cloud provisioning this deployment cannot
+ * set up or verify on its own. This reuses checkForReplies completely
+ * unchanged, so every existing guarantee still holds automatically: token
+ * refresh, per-message external_id dedup, human-takeover respected inside
+ * respondToConversation, and no fabricated lead association for an
+ * unmatched sender.
+ *
+ * One organization's failure (a revoked Gmail connection, a transient
+ * network error) is recorded and never stops the sweep from continuing to
+ * the next organization.
+ */
+export async function checkRepliesForAllConnectedOrganizations(startedAtMs: number, budgetMs: number): Promise<CheckAllRepliesSummary> {
+  const summary: CheckAllRepliesSummary = { organizationsChecked: 0, newReplies: 0, failed: [] };
+
+  const admin = createAdminClient();
+  if (!admin) return summary;
+
+  const { data: accounts } = await admin.from("email_accounts").select("organization_id");
+
+  for (const account of accounts ?? []) {
+    if (Date.now() - startedAtMs > budgetMs) break;
+
+    summary.organizationsChecked += 1;
+    const result = await checkForReplies(account.organization_id);
+    if (result.ok) {
+      summary.newReplies += result.newReplies;
+    } else {
+      summary.failed.push({ organizationId: account.organization_id, code: result.code });
+    }
+  }
+
+  return summary;
 }
 
 async function findLeadByEmail(

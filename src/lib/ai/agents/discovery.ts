@@ -31,9 +31,26 @@ import type { BusinessContext } from "@/lib/business-context";
 //
 //   Business Badhao (campaigns/actions.ts / scheduled-pipeline.ts)
 //     -> Hermes Planner (runHermesCompletion, no model override) routes
-//        LEAD_DISCOVERY to the "openrouter" provider, whose configured
-//        model defaults to Nemotron 3 Ultra (DEFAULT_OPENROUTER_MODEL in
-//        providers/openrouter.ts)
+//        LEAD_DISCOVERY to the "openrouter" provider first, whose
+//        configured model defaults to Nemotron 3 Ultra
+//        (DEFAULT_OPENROUTER_MODEL in providers/openrouter.ts) — "Nemotron
+//        Reasoner"/"Nemotron Analyst" below name the INTENDED model for
+//        these two stages, not a guarantee. When openrouter's free-tier
+//        Nemotron endpoint is unavailable, Hermes falls through to
+//        config.fallbackProvider (AI_FALLBACK_PROVIDER) honestly and
+//        automatically — recorded per call as response.provider/
+//        response.model on model_usage and as usedFallback on
+//        agent_runs.output (see runHermesCompletion in hermes-service.ts)
+//        — never silently and never mislabeled as Nemotron in what gets
+//        stored. A live production audit (2026-09) found the fallback
+//        firing on 60-90% of real Reasoner/Analyst calls on this
+//        deployment's free-tier OpenRouter quota; that is this stage
+//        genuinely running on whatever config.fallbackProvider is set to
+//        (Groq's openai/gpt-oss-120b in that deployment) rather than
+//        Nemotron, honestly recorded as such — not a bug in the fallback
+//        mechanism, but worth knowing before reading "Nemotron" below as
+//        a claim about what actually answered a specific call. Check
+//        model_usage for the ground truth for any real run.
 //     -> Nemotron Reasoner: that call is generateDiscoveryQueries below,
 //        turning the campaign/ICP into real search queries
 //     -> Tavily, Exa on Tavily failure (searchWithFallback) — real HTTP

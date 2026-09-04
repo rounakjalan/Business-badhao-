@@ -163,8 +163,13 @@ export async function generateLeadOutreachAction(leadId: string, channel: string
 
 export async function updateLeadNotes(leadId: string, formData: FormData) {
   const notes = String(formData.get("notes") ?? "");
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return;
+
   const supabase = await createClient();
-  await supabase.from("leads").update({ notes }).eq("id", leadId);
+  // Explicit org scoping alongside RLS, matching every other write in this
+  // file — never trust the row-level policy alone.
+  await supabase.from("leads").update({ notes }).eq("id", leadId).eq("organization_id", currentOrg.organizationId);
   revalidatePath(`/leads/${leadId}`);
 }
 

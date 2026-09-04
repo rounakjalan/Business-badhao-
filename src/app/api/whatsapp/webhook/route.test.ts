@@ -123,9 +123,26 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     return new Request(WEBHOOK_URL, { method: "POST", headers, body: JSON.stringify(body) });
   }
 
+  const SIGNING_SECRET = "app-secret";
+
+  /** For tests exercising message-handling logic downstream of signature verification, not the verification itself. */
+  function signedPostRequest(body: unknown) {
+    process.env.WHATSAPP_APP_SECRET = SIGNING_SECRET;
+    const rawBody = JSON.stringify(body);
+    const signature = "sha256=" + crypto.createHmac("sha256", SIGNING_SECRET).update(rawBody).digest("hex");
+    return new Request(WEBHOOK_URL, { method: "POST", headers: { "x-hub-signature-256": signature }, body: rawBody });
+  }
+
   it("rejects a payload with an invalid X-Hub-Signature-256 when WHATSAPP_APP_SECRET is configured", async () => {
     process.env.WHATSAPP_APP_SECRET = "app-secret";
     const response = await POST(postRequest(textMessagePayload(), { "x-hub-signature-256": "sha256=deadbeef" }));
+    expect(response.status).toBe(401);
+    expect(createAdminClient).not.toHaveBeenCalled();
+  });
+
+  it("rejects a payload with no X-Hub-Signature-256 header at all when WHATSAPP_APP_SECRET is configured", async () => {
+    process.env.WHATSAPP_APP_SECRET = "app-secret";
+    const response = await POST(postRequest(textMessagePayload()));
     expect(response.status).toBe(401);
     expect(createAdminClient).not.toHaveBeenCalled();
   });
@@ -144,14 +161,18 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     expect(response.status).toBe(200);
   });
 
-  it("skips signature verification entirely when WHATSAPP_APP_SECRET is not set, rather than blocking the feature", async () => {
-    vi.mocked(findOrgByPhoneNumberId).mockResolvedValue({ organizationId: "org-1", phoneNumberId: "111222333", accessToken: "tok" });
-    vi.mocked(ensureConversation).mockResolvedValue({ ok: true, conversationId: "conv-1" });
-    vi.mocked(respondToConversation).mockResolvedValue({ ok: true, replied: true, messageId: "wamid.reply" });
-    vi.mocked(createAdminClient).mockReturnValue(makeAdminClient({ contacts: [{ lead_id: "lead-1", phone: "+91 98765 43210" }] }));
-
+  it("fails closed — 503, nothing processed — when WHATSAPP_APP_SECRET is not configured at all, rather than skipping verification", async () => {
     const response = await POST(postRequest(textMessagePayload()));
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
+    expect(createAdminClient).not.toHaveBeenCalled();
+    expect(ensureConversation).not.toHaveBeenCalled();
+    expect(respondToConversation).not.toHaveBeenCalled();
+  });
+
+  it("fails closed even when a (necessarily unverifiable) signature header is present but WHATSAPP_APP_SECRET is not configured", async () => {
+    const response = await POST(postRequest(textMessagePayload(), { "x-hub-signature-256": "sha256=deadbeef" }));
+    expect(response.status).toBe(503);
+    expect(createAdminClient).not.toHaveBeenCalled();
   });
 
   it("matches an inbound sender to a contact's phone number after normalizing formatting differences, stores the message, and triggers the AI conversation agent", async () => {
@@ -161,7 +182,7 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     const admin = makeAdminClient({ contacts: [{ lead_id: "lead-1", phone: "+91 98765-43210" }] });
     vi.mocked(createAdminClient).mockReturnValue(admin);
 
-    const response = await POST(postRequest(textMessagePayload({ from: "919876543210", body: "What's the price?" })));
+    const response = await POST(signedPostRequest(textMessagePayload({ from: "919876543210", body: "What's the price?" })));
 
     expect(response.status).toBe(200);
     expect(admin.__inserted).toHaveLength(1);
@@ -174,7 +195,7 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     const admin = makeAdminClient({});
     vi.mocked(createAdminClient).mockReturnValue(admin);
 
-    const response = await POST(postRequest(textMessagePayload()));
+    const response = await POST(signedPostRequest(textMessagePayload()));
     expect(response.status).toBe(200);
     expect(admin.__inserted).toHaveLength(0);
     expect(ensureConversation).not.toHaveBeenCalled();
@@ -185,7 +206,7 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     const admin = makeAdminClient({ contacts: [], prospects: [] });
     vi.mocked(createAdminClient).mockReturnValue(admin);
 
-    const response = await POST(postRequest(textMessagePayload({ from: "911111111111" })));
+    const response = await POST(signedPostRequest(textMessagePayload({ from: "911111111111" })));
     expect(response.status).toBe(200);
     expect(admin.__inserted).toHaveLength(0);
     expect(ensureConversation).not.toHaveBeenCalled();
@@ -196,7 +217,7 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     const admin = makeAdminClient({ contacts: [{ lead_id: "lead-1", phone: "919876543210" }], existingMessage: { id: "existing-row" } });
     vi.mocked(createAdminClient).mockReturnValue(admin);
 
-    const response = await POST(postRequest(textMessagePayload()));
+    const response = await POST(signedPostRequest(textMessagePayload()));
     expect(response.status).toBe(200);
     expect(admin.__inserted).toHaveLength(0);
     expect(respondToConversation).not.toHaveBeenCalled();
@@ -208,7 +229,7 @@ describe("WhatsApp webhook POST (inbound messages)", () => {
     const admin = makeAdminClient({ contacts: [{ lead_id: "lead-1", phone: "919876543210" }] });
     vi.mocked(createAdminClient).mockReturnValue(admin);
 
-    const response = await POST(postRequest(textMessagePayload({ type: "image" })));
+    const response = await POST(signedPostRequest(textMessagePayload({ type: "image" })));
 
     expect(response.status).toBe(200);
     expect(admin.__inserted[0].values.body).toBe("[Received a image message — not yet supported]");

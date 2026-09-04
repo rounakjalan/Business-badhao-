@@ -23,7 +23,13 @@ export async function createTask(formData: FormData) {
 }
 
 export async function completeTask(taskId: string) {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return;
+
   const supabase = await createClient();
-  await supabase.from("tasks").update({ status: "completed" }).eq("id", taskId);
+  // Explicit org scoping alongside RLS — never trust the row-level policy
+  // alone to be every organization's only defense against a stray or
+  // future-loosened rule.
+  await supabase.from("tasks").update({ status: "completed" }).eq("id", taskId).eq("organization_id", currentOrg.organizationId);
   revalidatePath("/tasks");
 }

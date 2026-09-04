@@ -27,7 +27,16 @@ export function getWhatsAppWebhookVerifyToken(): string {
   return token;
 }
 
-/** Optional but recommended: verifies X-Hub-Signature-256 on inbound webhook payloads so an attacker can't forge inbound messages. Null (not configured) means signature verification is skipped, not that the webhook is rejected — matches how this app never blocks a feature merely because an optional hardening step is missing. */
+/**
+ * Required for the webhook to accept any inbound payload: verifies
+ * X-Hub-Signature-256 so an attacker who learns/guesses an organization's
+ * public phone_number_id cannot forge inbound messages (which would
+ * otherwise create real conversations, spend a real AI reply, and send a
+ * real WhatsApp message to a real customer). Deliberately fails closed —
+ * unlike a feature that's simply unset and absent, an unsigned inbound
+ * payload is an active spoofing/cost-abuse surface, not a missing
+ * capability, so it is never processed as if verification had passed.
+ */
 export function getWhatsAppAppSecret(): string | null {
   return process.env.WHATSAPP_APP_SECRET?.trim() || null;
 }

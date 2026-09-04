@@ -160,6 +160,27 @@ describe("runHermesCompletion", () => {
     expect(createProvider).toHaveBeenNthCalledWith(2, "groq");
   });
 
+  it("honestly records usedFallback:true and the real serving provider/model when the fallback actually answered — never mislabels a fallback response as the preferred provider", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+
+    const failingPrimary = fakeProvider({
+      name: "openrouter",
+      complete: vi.fn().mockRejectedValue(new AiError({ code: "provider_unavailable", provider: "openrouter", message: "down" })),
+    });
+    const workingFallback = fakeProvider({
+      name: "groq",
+      complete: vi.fn().mockResolvedValue(fakeResponse({ provider: "groq", model: "llama-3.3-70b-versatile" })),
+    });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "openrouter" ? failingPrimary : workingFallback));
+
+    await runHermesCompletion(baseRequest);
+
+    const completionUpdate = updateSpy.mock.calls.find(([payload]) => (payload as { status?: string }).status === "completed");
+    expect(completionUpdate?.[0]).toMatchObject({
+      output: expect.objectContaining({ provider: "groq", model: "llama-3.3-70b-versatile", usedFallback: true }),
+    });
+  });
+
   it("never calls the fallback provider unless AI_FALLBACK_PROVIDER is explicitly set", async () => {
     const provider = fakeProvider({
       complete: vi.fn().mockRejectedValue(new AiError({ code: "provider_unavailable", provider: "openrouter", message: "down" })),
