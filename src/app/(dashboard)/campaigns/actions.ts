@@ -716,6 +716,33 @@ export async function resumeLeadDiscoveryAction(campaignId: string): Promise<Dis
   return schedule ? { ok: true, schedule } : { ok: false, message: "Campaign not found." };
 }
 
+export type ToggleWhatsAppAutoOutreachResult = { ok: true; enabled: boolean } | { ok: false; message: string };
+
+/**
+ * Per-campaign kill switch for automatic WhatsApp outreach (see
+ * selectOutreachChannel / sendAutomaticWhatsAppOutreach in
+ * lib/pipeline/lead-pipeline.ts) — lets an org keep WhatsApp connected and
+ * used for other campaigns while opting one specific campaign out. Never
+ * affects Gmail, discovery, research, or qualification; a paused/archived
+ * campaign already never reaches this at all (see findEligibleCampaigns).
+ */
+export async function toggleWhatsAppAutoOutreachAction(campaignId: string, enabled: boolean): Promise<ToggleWhatsAppAutoOutreachResult> {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) return { ok: false, message: "Sign in to a workspace to change this." };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("campaigns")
+    .update({ whatsapp_auto_outreach_enabled: enabled })
+    .eq("id", campaignId)
+    .eq("organization_id", currentOrg.organizationId);
+
+  if (error) return { ok: false, message: error.message };
+
+  revalidatePath(`/campaigns/${campaignId}`);
+  return { ok: true, enabled };
+}
+
 export async function getDiscoveryScheduleAction(campaignId: string): Promise<DiscoveryScheduleView | null> {
   return readSchedule(campaignId);
 }

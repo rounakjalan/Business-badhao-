@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { findEligibleCampaigns, runDiscoveryForCampaign, finishPendingLeads, type PipelineRunSummary } from "@/lib/pipeline/scheduled-pipeline";
+import {
+  findEligibleCampaigns,
+  runDiscoveryForCampaign,
+  finishPendingLeads,
+  addOutreachSummary,
+  emptyOutreachSummary,
+  type PipelineRunSummary,
+} from "@/lib/pipeline/scheduled-pipeline";
 import { checkRepliesForAllConnectedOrganizations } from "@/lib/gmail/replies";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -46,6 +53,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * scheduled functions, and daily is already the actual cadence for
  * everything on this route, Gmail included; not renamed, to avoid
  * re-registering the cron path for no functional reason.
+ *
+ * finishPendingLeads (called from passes 1 and 3 below) also carries the
+ * automatic WhatsApp outreach step: a lead that just qualified goes straight
+ * to sendAutomaticWhatsAppOutreach in the same loop, so a qualified lead
+ * with a usable WhatsApp channel is messaged the same run it qualifies in —
+ * see lead-pipeline.ts and outreach/channel-selection.ts for the actual
+ * eligibility/send logic. This never sends automatic Gmail: cold email stays
+ * the existing human-reviewed manual flow (leads/actions.ts) exactly as
+ * before this was added.
  */
 
 // This does real AI work per lead, so it needs the long end of the platform's
@@ -102,6 +118,7 @@ export async function GET(request: Request) {
     discoveryRuns: 0,
     newLeads: 0,
     skipped: [],
+    outreach: emptyOutreachSummary(),
   };
 
   // Real inbound Gmail replies, for every organization with a connected
@@ -131,6 +148,7 @@ export async function GET(request: Request) {
     const finished = await finishPendingLeads(supabase, campaign.organizationId, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
     summary.leadsFinished += finished.finished;
     summary.leadsFailed += finished.failed;
+    addOutreachSummary(summary.outreach, finished.outreach);
   }
 
   // Pass 2: discovery — only for campaigns whose next scheduled run is
@@ -162,6 +180,7 @@ export async function GET(request: Request) {
     const finished = await finishPendingLeads(supabase, campaign.organizationId, campaign.id, startedAtMs, TOTAL_BUDGET_MS);
     summary.leadsFinished += finished.finished;
     summary.leadsFailed += finished.failed;
+    addOutreachSummary(summary.outreach, finished.outreach);
   }
 
   return NextResponse.json({

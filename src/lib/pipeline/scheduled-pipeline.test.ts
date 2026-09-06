@@ -514,7 +514,7 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
 
     const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
 
-    expect(result).toEqual({ finished: 1, failed: 0 });
+    expect(result).toEqual({ finished: 1, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     const lead = (tables.leads as (Row & { research_status: string; qualification_status: string })[])[0];
     expect(lead.research_status).toBe("completed");
     expect(lead.qualification_status).toBe("qualifying");
@@ -532,7 +532,7 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
 
     const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
 
-    expect(result).toEqual({ finished: 1, failed: 0 });
+    expect(result).toEqual({ finished: 1, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     // Still exactly one row — the pre-existing one. A wiring bug that called
     // researchLead anyway would leave two.
     expect(tables.lead_research).toHaveLength(1);
@@ -551,7 +551,7 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
 
     // Not even attempted this run — excluded by the query itself.
-    expect(result).toEqual({ finished: 0, failed: 0 });
+    expect(result).toEqual({ finished: 0, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     const lead = (tables.leads as (Row & { research_status: string; research_error: string | null; qualification_status: string })[])[0];
     expect(lead.research_status).toBe("failed");
     expect(lead.research_error).toBe("a previous attempt failed");
@@ -587,7 +587,7 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
 
     const result = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
 
-    expect(result).toEqual({ finished: 1, failed: 1 });
+    expect(result).toEqual({ finished: 1, failed: 1, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     const leads = tables.leads as (Row & { id: string; research_status: string; qualification_status: string })[];
     const failLead = leads.find((l) => l.id === "lead-1")!;
     const goodLead = leads.find((l) => l.id === "lead-2")!;
@@ -610,7 +610,7 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     stubResearchAndQualification();
     const finished = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
 
-    expect(finished).toEqual({ finished: 2, failed: 0 });
+    expect(finished).toEqual({ finished: 2, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     const leads = tables.leads as (Row & { research_status: string })[];
     expect(leads.every((l) => l.research_status === "completed")).toBe(true);
     expect(tables.lead_research).toHaveLength(2);
@@ -635,7 +635,7 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     // since both leads are already research_status: 'completed'.
     stubResearchAndQualification();
     const secondFinish = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
-    expect(secondFinish).toEqual({ finished: 0, failed: 0 });
+    expect(secondFinish).toEqual({ finished: 0, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     expect(tables.lead_research).toHaveLength(2);
   });
   });

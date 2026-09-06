@@ -175,6 +175,7 @@ export interface Database {
           discovery_next_run_at: string | null;
           discovery_last_run_at: string | null;
           discovery_last_error: string | null;
+          whatsapp_auto_outreach_enabled: boolean;
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -193,6 +194,7 @@ export interface Database {
           discovery_next_run_at?: string | null;
           discovery_last_run_at?: string | null;
           discovery_last_error?: string | null;
+          whatsapp_auto_outreach_enabled?: boolean;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -211,6 +213,7 @@ export interface Database {
           discovery_next_run_at?: string | null;
           discovery_last_run_at?: string | null;
           discovery_last_error?: string | null;
+          whatsapp_auto_outreach_enabled?: boolean;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -642,6 +645,8 @@ export interface Database {
           business_account_id: string | null;
           display_phone_number: string | null;
           access_token: string;
+          template_name: string | null;
+          template_language: string;
           created_at: string;
           updated_at: string;
         };
@@ -653,6 +658,8 @@ export interface Database {
           business_account_id?: string | null;
           display_phone_number?: string | null;
           access_token: string;
+          template_name?: string | null;
+          template_language?: string;
           created_at?: string;
           updated_at?: string;
         };
@@ -664,6 +671,8 @@ export interface Database {
           business_account_id?: string | null;
           display_phone_number?: string | null;
           access_token?: string;
+          template_name?: string | null;
+          template_language?: string;
           created_at?: string;
           updated_at?: string;
         };

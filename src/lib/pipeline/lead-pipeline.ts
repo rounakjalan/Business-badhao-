@@ -1,15 +1,25 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { generateOutreach } from "@/lib/ai/agents/outreach";
 import { runProspectResearch, type ProspectResearchResult } from "@/lib/ai/agents/prospect-research";
 import { runLeadQualification, type LeadQualificationResult } from "@/lib/ai/agents/qualification";
-import { getBusinessContext, selectQualificationContext, selectResearchContext } from "@/lib/business-context";
+import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
+import { getBusinessContext, selectOutreachContext, selectQualificationContext, selectResearchContext } from "@/lib/business-context";
+import { getConnectionStatus as getGmailConnectionStatus } from "@/lib/gmail/tokens";
+import { resolveLeadIdentity } from "@/lib/lead-names";
+import { selectOutreachChannel, type WhatsAppIneligibleReason } from "@/lib/outreach/channel-selection";
+import { ensureConversation } from "@/lib/outreach/conversation";
+import { normalizePhoneNumber } from "@/lib/whatsapp/phone";
+import { getWhatsAppAutomationConfig } from "@/lib/whatsapp/tokens";
+import { sendWhatsAppTemplateMessage } from "@/lib/whatsapp/send";
 import type { Database, Json } from "@/types/database.types";
 
 type Client = SupabaseClient<Database>;
 
 /**
- * The per-lead half of the pipeline — research, then qualification —
- * expressed without any dependency on who is signed in.
+ * The per-lead half of the pipeline — research, then qualification, then
+ * (see sendAutomaticWhatsAppOutreach below) outreach — expressed without any
+ * dependency on who is signed in.
  *
  * The Server Actions behind the Research and Qualify buttons resolve the
  * organization from the session and then call these. Scheduled work has no
@@ -177,4 +187,211 @@ export async function qualifyLead(
   }
 
   return result;
+}
+
+/**
+ * A lead is never retried forever on a genuinely broken destination (a
+ * disconnected number, a permanently rejecting template) — after this many
+ * recorded failures for the same lead, the automatic sweep stops trying and
+ * leaves it for a human, exactly like a permanently-failed research_status
+ * lead already does. Not an arbitrary send *limit*; it only ever gates
+ * retries of the same initial message, never anything WhatsApp's own rules
+ * already allow.
+ */
+const MAX_AUTOMATIC_WHATSAPP_ATTEMPTS = 3;
+
+type OutreachSkipReason =
+  | "not_found"
+  | "already_contacted"
+  | "already_sent"
+  | "max_attempts_reached"
+  | "generation_failed"
+  | WhatsAppIneligibleReason;
+
+export type AutomaticOutreachResult =
+  | { attempted: true; ok: true; channel: "whatsapp"; messageId: string }
+  | { attempted: true; ok: false; channel: "whatsapp"; code: string; message: string }
+  | { attempted: false; channel: "gmail_manual" | "none"; reason: OutreachSkipReason };
+
+/**
+ * The automatic counterpart to the existing manual outreach flow
+ * (generateLeadOutreachAction + sendLeadOutreachAction in leads/actions.ts)
+ * — reuses the same AI drafting (generateOutreach), the same conversation/
+ * message plumbing (ensureConversation, the messages table), and the same
+ * "mark contacted" signal, but decides the channel itself and sends without
+ * a human previewing the draft first. Only ever sends WhatsApp; when
+ * WhatsApp isn't eligible this never falls back to an automatic email —
+ * see selectOutreachChannel's own doc comment for why.
+ *
+ * Idempotency: leads.status flips to 'contacted' only once Meta has
+ * actually confirmed the send (a real message id back), never merely on
+ * attempting — so a lead is safe to pass to this function on every
+ * scheduled sweep indefinitely. A prior attempt that failed leaves status
+ * exactly as it was, so a later sweep retries it automatically, bounded by
+ * MAX_AUTOMATIC_WHATSAPP_ATTEMPTS recorded failed messages rather than
+ * retrying forever.
+ */
+export async function sendAutomaticWhatsAppOutreach(supabase: Client, organizationId: string, leadId: string): Promise<AutomaticOutreachResult> {
+  const { data: lead } = await supabase.from("leads").select("id, status, campaign_id").eq("id", leadId).eq("organization_id", organizationId).maybeSingle();
+
+  if (!lead) return { attempted: false, channel: "none", reason: "not_found" };
+  if (lead.status === "contacted") return { attempted: false, channel: "none", reason: "already_contacted" };
+
+  const campaignRow = lead.campaign_id
+    ? (
+        await supabase.from("campaigns").select("whatsapp_auto_outreach_enabled").eq("id", lead.campaign_id).eq("organization_id", organizationId).maybeSingle()
+      ).data
+    : null;
+
+  const identity = await resolveLeadIdentity(supabase, leadId);
+  const whatsappConfig = await getWhatsAppAutomationConfig(organizationId);
+  const gmailStatus = await getGmailConnectionStatus(organizationId);
+
+  const decision = selectOutreachChannel({
+    whatsappEnabledForCampaign: campaignRow?.whatsapp_auto_outreach_enabled ?? true,
+    whatsappConnected: whatsappConfig.connected,
+    whatsappTemplateConfigured: Boolean(whatsappConfig.templateName),
+    phone: identity.phone,
+    gmailConnected: gmailStatus.connected,
+  });
+
+  if (decision.channel !== "whatsapp") {
+    return { attempted: false, channel: decision.channel, reason: decision.whatsappIneligibleReason };
+  }
+  // Guaranteed non-null by selectOutreachChannel's own eligibility check — reasserted for type safety, not as a second real validation.
+  if (!identity.phone) return { attempted: false, channel: "none", reason: "invalid_or_missing_phone" };
+  // Stored and sent in the same normalized international-digits form
+  // (see whatsapp/phone.ts) — never the raw, inconsistently-formatted
+  // string a contact/prospect record happens to have on file.
+  const phone = normalizePhoneNumber(identity.phone);
+
+  // Dedup / bounded retry: a "sent" attempt already on file means this lead
+  // is done; a growing pile of "failed" ones means stop trying, not keep
+  // guessing forever against a destination that keeps rejecting.
+  const { data: priorMessages } = await supabase
+    .from("messages")
+    .select("status, metadata")
+    .eq("organization_id", organizationId)
+    .eq("lead_id", leadId)
+    .eq("channel", "whatsapp");
+
+  const initialOutreachAttempts = (priorMessages ?? []).filter(
+    (m) => (m.metadata as Record<string, unknown> | null)?.automationKind === "initial_outreach"
+  );
+  if (initialOutreachAttempts.some((m) => m.status === "sent")) return { attempted: false, channel: "none", reason: "already_sent" };
+  if (initialOutreachAttempts.filter((m) => m.status === "failed").length >= MAX_AUTOMATIC_WHATSAPP_ATTEMPTS) {
+    return { attempted: false, channel: "none", reason: "max_attempts_reached" };
+  }
+
+  const context = await loadLeadContext(supabase, leadId, organizationId);
+  if (!context) return { attempted: false, channel: "none", reason: "not_found" };
+
+  const businessContext = await getBusinessContext(organizationId, supabase);
+  const { data: latestScore } = await supabase
+    .from("lead_scores")
+    .select("reason")
+    .eq("lead_id", leadId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const draft = await generateOutreach({
+    organizationId,
+    leadName: context.leadName,
+    companyName: context.companyName,
+    channel: "whatsapp",
+    campaignName: context.campaignName,
+    campaignObjective: context.campaignObjective,
+    icpCriteria: context.icpCriteria,
+    researchSummary: context.latestResearchSummary,
+    qualificationReasons: latestScore?.reason ? [latestScore.reason] : [],
+    businessContext: selectOutreachContext(businessContext),
+  });
+
+  const agentRun = await createAgentRun(organizationId, "outreach_send", { leadId, channel: "whatsapp", automatic: true } as unknown as Json, supabase);
+
+  if (!draft.ok) {
+    await completeAgentRun(agentRun, "failed", { stage: "generation", message: draft.message } as unknown as Json, supabase);
+    return { attempted: false, channel: "none", reason: "generation_failed" };
+  }
+
+  const conversation = await ensureConversation(supabase, organizationId, leadId, "whatsapp");
+  const conversationId = conversation.ok ? conversation.conversationId : null;
+
+  // Reserved before the real send, same pattern as sendLeadOutreachAction —
+  // the row exists (with an honest status) regardless of what happens next,
+  // so a crash between here and the WhatsApp call can never look like
+  // nothing was attempted.
+  const { data: reserved, error: reserveError } = await supabase
+    .from("messages")
+    .insert({
+      organization_id: organizationId,
+      conversation_id: conversationId,
+      lead_id: leadId,
+      direction: "outbound",
+      channel: "whatsapp",
+      sender_type: "agent",
+      body: draft.draft.message,
+      to_address: phone,
+      send_idempotency_key: crypto.randomUUID(),
+      metadata: { automationKind: "initial_outreach", aiDrafted: true, templateName: whatsappConfig.templateName } as unknown as Json,
+    })
+    .select("id")
+    .single();
+
+  if (!reserved) {
+    await completeAgentRun(agentRun, "failed", { stage: "reserve", message: reserveError?.message } as unknown as Json, supabase);
+    return { attempted: true, ok: false, channel: "whatsapp", code: "send_failed", message: reserveError?.message ?? "Could not record this send attempt." };
+  }
+
+  const sendResult = await sendWhatsAppTemplateMessage({
+    organizationId,
+    to: phone,
+    templateName: whatsappConfig.templateName as string,
+    templateLanguage: whatsappConfig.templateLanguage,
+    bodyText: draft.draft.message,
+  });
+
+  if (!sendResult.ok) {
+    await supabase
+      .from("messages")
+      .update({
+        status: "failed",
+        metadata: { automationKind: "initial_outreach", aiDrafted: true, error: sendResult.message, code: sendResult.code } as unknown as Json,
+      })
+      .eq("id", reserved.id);
+    await completeAgentRun(agentRun, "failed", { stage: "send", code: sendResult.code, message: sendResult.message } as unknown as Json, supabase);
+    return { attempted: true, ok: false, channel: "whatsapp", code: sendResult.code, message: sendResult.message };
+  }
+
+  await supabase
+    .from("messages")
+    .update({
+      status: "sent",
+      external_id: sendResult.messageId,
+      metadata: { automationKind: "initial_outreach", aiDrafted: true, templateName: whatsappConfig.templateName } as unknown as Json,
+    })
+    .eq("id", reserved.id);
+
+  if (conversationId) {
+    await supabase.from("conversations").update({ last_message_at: new Date().toISOString() }).eq("id", conversationId);
+  }
+  // The dedup gate above and every future sweep's eligibility check both
+  // key off this — only ever set once a real provider message id came back.
+  await supabase.from("leads").update({ status: "contacted" }).eq("id", leadId).eq("organization_id", organizationId);
+
+  await completeAgentRun(agentRun, "completed", { messageId: sendResult.messageId, channel: "whatsapp" } as unknown as Json, supabase);
+  if (agentRun) {
+    await recordAgentAction({
+      organizationId,
+      agentRunId: agentRun.id,
+      actionType: "outreach_sent",
+      targetEntityType: "lead",
+      targetEntityId: leadId,
+      payload: { channel: "whatsapp" } as unknown as Json,
+      client: supabase,
+    });
+  }
+
+  return { attempted: true, ok: true, channel: "whatsapp", messageId: sendResult.messageId };
 }

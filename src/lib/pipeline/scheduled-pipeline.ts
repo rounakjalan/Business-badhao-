@@ -5,7 +5,7 @@ import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tr
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
 import { isDiscoveryDue, markDiscoveryFinished, markDiscoveryRunning } from "@/lib/pipeline/discovery-schedule";
 import { discoverProspectContacts, mergeContactIntoRawData, type ContactDiscoveryOutcome } from "@/lib/discovery/contact-enrichment";
-import { qualifyLead, researchLead } from "@/lib/pipeline/lead-pipeline";
+import { qualifyLead, researchLead, sendAutomaticWhatsAppOutreach } from "@/lib/pipeline/lead-pipeline";
 import type { Database, Json } from "@/types/database.types";
 
 type Client = SupabaseClient<Database>;
@@ -20,7 +20,36 @@ export type PipelineRunSummary = {
   discoveryRuns: number;
   newLeads: number;
   skipped: { campaignId: string; reason: string }[];
+  outreach: OutreachSweepSummary;
 };
+
+/**
+ * Tallies what selectOutreachChannel/sendAutomaticWhatsAppOutreach actually
+ * did across every qualified lead this run touched — never a claim that a
+ * message was delivered, only what this deployment attempted and what Meta
+ * (or the eligibility check) actually reported back. gmailManualPending
+ * counts leads left for a human to send Gmail outreach to manually (this
+ * automatic sweep never sends email itself); noChannelAvailable counts
+ * leads with no usable channel at all right now (e.g. no phone, no
+ * connected account) — never silently dropped, always one of these buckets.
+ */
+export type OutreachSweepSummary = {
+  whatsappSent: number;
+  whatsappFailed: number;
+  gmailManualPending: number;
+  noChannelAvailable: number;
+};
+
+export function emptyOutreachSummary(): OutreachSweepSummary {
+  return { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 };
+}
+
+export function addOutreachSummary(into: OutreachSweepSummary, from: OutreachSweepSummary) {
+  into.whatsappSent += from.whatsappSent;
+  into.whatsappFailed += from.whatsappFailed;
+  into.gmailManualPending += from.gmailManualPending;
+  into.noChannelAvailable += from.noChannelAvailable;
+}
 
 /**
  * Don't re-discover a campaign that was searched minutes ago — a manual run
@@ -138,6 +167,13 @@ function outOfTime(startedAtMs: number, budgetMs: number, reserveMs = 55_000) {
  * evidence alone, whoever triggered it. A failure on one lead — research or
  * qualification — never stops the rest of the batch; it is recorded and the
  * loop moves on.
+ *
+ * A lead that qualifies goes straight on to sendAutomaticWhatsAppOutreach —
+ * this is what makes WhatsApp outreach automatic rather than requiring
+ * someone to open the lead and click Send. A failure there (no channel
+ * available, WhatsApp rejected the send, generation failed) never counts
+ * against `failed` here — qualification itself succeeded; outreach's own
+ * outcome is tallied separately in the returned outreach summary.
  */
 export async function finishPendingLeads(
   supabase: Client,
@@ -145,7 +181,7 @@ export async function finishPendingLeads(
   campaignId: string,
   startedAtMs: number,
   budgetMs: number
-): Promise<{ finished: number; failed: number }> {
+): Promise<{ finished: number; failed: number; outreach: OutreachSweepSummary }> {
   const { data: pending } = await supabase
     .from("leads")
     .select("id, research_status")
@@ -158,6 +194,7 @@ export async function finishPendingLeads(
 
   let finished = 0;
   let failed = 0;
+  const outreach = emptyOutreachSummary();
 
   for (const lead of pending ?? []) {
     if (outOfTime(startedAtMs, budgetMs)) break;
@@ -171,11 +208,31 @@ export async function finishPendingLeads(
     }
 
     const qualification = await qualifyLead(supabase, organizationId, lead.id);
-    if (qualification.ok) finished += 1;
-    else failed += 1;
+    if (!qualification.ok) {
+      failed += 1;
+      continue;
+    }
+    finished += 1;
+
+    if (qualification.qualification.recommendedStatus !== "qualified") continue;
+
+    const outcome = await sendAutomaticWhatsAppOutreach(supabase, organizationId, lead.id);
+    if (outcome.attempted) {
+      if (outcome.ok) outreach.whatsappSent += 1;
+      else outreach.whatsappFailed += 1;
+    } else if (outcome.channel === "gmail_manual") {
+      outreach.gmailManualPending += 1;
+    } else if (outcome.reason !== "already_contacted" && outcome.reason !== "already_sent" && outcome.reason !== "not_found") {
+      // Every other skip reason (no phone, WhatsApp not connected/no
+      // template, campaign opted out, max attempts reached, generation
+      // failed) means this lead genuinely has no automatic channel right
+      // now — worth surfacing. A lead already contacted/already sent isn't
+      // a gap to report; it's this function correctly doing nothing again.
+      outreach.noChannelAvailable += 1;
+    }
   }
 
-  return { finished, failed };
+  return { finished, failed, outreach };
 }
 
 /**

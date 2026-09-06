@@ -401,6 +401,12 @@ export async function sendLeadOutreachAction(
     await supabase.from("conversations").update({ last_message_at: new Date().toISOString() }).eq("id", conversationId);
   }
 
+  // Marks this lead as contacted the same way the automatic WhatsApp path
+  // does (see sendAutomaticWhatsAppOutreach, lib/pipeline/lead-pipeline.ts)
+  // — a lead a human already emailed here is never also auto-messaged on
+  // WhatsApp by a later scheduled sweep.
+  await supabase.from("leads").update({ status: "contacted" }).eq("id", leadId).eq("organization_id", currentOrg.organizationId);
+
   await completeAgentRun(agentRun, "completed", { messageId: result.messageId, threadId: result.threadId } as unknown as Json);
   if (agentRun) {
     await recordAgentAction({

@@ -1,4 +1,11 @@
-import { connectWhatsAppAction, disconnectGmailAction, disconnectWhatsAppAction, updateOrganization, updateProfile } from "@/app/(dashboard)/settings/actions";
+import {
+  connectWhatsAppAction,
+  disconnectGmailAction,
+  disconnectWhatsAppAction,
+  updateOrganization,
+  updateProfile,
+  updateWhatsAppTemplateAction,
+} from "@/app/(dashboard)/settings/actions";
 import { SettingsSections } from "@/app/(dashboard)/settings/settings-sections";
 import { getConnectionStatus } from "@/lib/gmail/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
@@ -65,6 +72,7 @@ export default async function SettingsPage({
       whatsappNotice={whatsapp ? { status: whatsapp, detail: whatsappMessage } : null}
       connectWhatsAppAction={connectWhatsAppAction}
       disconnectWhatsAppAction={disconnectWhatsAppAction}
+      updateWhatsAppTemplateAction={updateWhatsAppTemplateAction}
     />
   );
 }

@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { disconnectAccount } from "@/lib/gmail/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
-import { disconnectWhatsAppAccount, saveWhatsAppAccount } from "@/lib/whatsapp/tokens";
+import { disconnectWhatsAppAccount, saveWhatsAppAccount, updateWhatsAppTemplate } from "@/lib/whatsapp/tokens";
 
 export async function updateProfile(formData: FormData) {
   const fullName = String(formData.get("fullName") ?? "").trim();
@@ -82,6 +82,8 @@ export async function connectWhatsAppAction(formData: FormData) {
   const phoneNumberId = String(formData.get("phoneNumberId") ?? "").trim();
   const accessToken = String(formData.get("accessToken") ?? "").trim();
   const displayPhoneNumber = String(formData.get("displayPhoneNumber") ?? "").trim();
+  const templateName = String(formData.get("templateName") ?? "").trim();
+  const templateLanguage = String(formData.get("templateLanguage") ?? "").trim();
 
   if (!phoneNumberId || !accessToken) {
     redirect(`/settings?tab=Integrations&whatsapp=error&whatsappMessage=${encodeURIComponent("Phone Number ID and Access Token are both required.")}`);
@@ -100,6 +102,8 @@ export async function connectWhatsAppAction(formData: FormData) {
     businessAccountId: null,
     displayPhoneNumber: displayPhoneNumber || null,
     accessToken,
+    templateName: templateName || null,
+    templateLanguage: templateLanguage || undefined,
   });
 
   if (!saved.ok) {
@@ -108,6 +112,29 @@ export async function connectWhatsAppAction(formData: FormData) {
 
   revalidatePath("/settings");
   redirect("/settings?tab=Integrations&whatsapp=connected");
+}
+
+/**
+ * Lets an already-connected org add or change its approved cold-outreach
+ * template without re-entering phone_number_id/access_token — see the doc
+ * comment on updateWhatsAppTemplate (whatsapp/tokens.ts) for why this is a
+ * separate action from connectWhatsAppAction.
+ */
+export async function updateWhatsAppTemplateAction(formData: FormData) {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  const templateName = String(formData.get("templateName") ?? "").trim();
+  const templateLanguage = String(formData.get("templateLanguage") ?? "").trim() || "en_US";
+
+  const result = await updateWhatsAppTemplate(currentOrg.organizationId, { templateName: templateName || null, templateLanguage });
+
+  if (!result.ok) {
+    redirect(`/settings?tab=Integrations&whatsapp=error&whatsappMessage=${encodeURIComponent(result.message ?? "Could not save the WhatsApp template.")}`);
+  }
+
+  revalidatePath("/settings");
+  redirect("/settings?tab=Integrations&whatsapp=template_saved");
 }
 
 export async function disconnectWhatsAppAction() {

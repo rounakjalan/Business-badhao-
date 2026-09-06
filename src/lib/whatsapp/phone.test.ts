@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizePhoneNumber } from "@/lib/whatsapp/phone";
+import { isValidWhatsAppNumber, normalizePhoneNumber } from "@/lib/whatsapp/phone";
 
 describe("normalizePhoneNumber", () => {
   it("strips a leading + and internal spaces", () => {
@@ -18,5 +18,36 @@ describe("normalizePhoneNumber", () => {
     const storedContactPhone = "+91 98765-43210";
     const inboundFrom = "919876543210";
     expect(normalizePhoneNumber(storedContactPhone)).toBe(normalizePhoneNumber(inboundFrom));
+  });
+});
+
+describe("isValidWhatsAppNumber", () => {
+  it("accepts a real-looking international number", () => {
+    expect(isValidWhatsAppNumber("+91 98765 43210")).toBe(true);
+  });
+
+  it("rejects null", () => {
+    expect(isValidWhatsAppNumber(null)).toBe(false);
+  });
+
+  it("rejects undefined", () => {
+    expect(isValidWhatsAppNumber(undefined)).toBe(false);
+  });
+
+  it("rejects an empty string", () => {
+    expect(isValidWhatsAppNumber("")).toBe(false);
+  });
+
+  it("rejects a too-short digit string", () => {
+    expect(isValidWhatsAppNumber("12345")).toBe(false);
+  });
+
+  it("rejects a random non-numeric phone-like string with no real digits", () => {
+    expect(isValidWhatsAppNumber("call us!")).toBe(false);
+  });
+
+  it("agrees with the exact threshold sendWhatsAppMessage itself enforces (>= 8 digits)", () => {
+    expect(isValidWhatsAppNumber("1234567")).toBe(false);
+    expect(isValidWhatsAppNumber("12345678")).toBe(true);
   });
 });

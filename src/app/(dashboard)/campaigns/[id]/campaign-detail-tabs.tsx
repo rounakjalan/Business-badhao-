@@ -10,6 +10,7 @@ import {
   stopLeadDiscoveryAction,
   resumeLeadDiscoveryAction,
   getLeadDiscoveryProgressAction,
+  toggleWhatsAppAutoOutreachAction,
   type DiscoveryProgress,
   type DiscoveryScheduleView,
   type DiscoveredLeadRow,
@@ -37,6 +38,7 @@ type Campaign = {
   target_audience: string | null;
   status: string;
   created_at: string;
+  whatsapp_auto_outreach_enabled: boolean;
 };
 
 type ConversationRow = { id: string; channel: string; status: string; intent: string | null; created_at: string };
@@ -146,6 +148,19 @@ export function CampaignDetailTabs({
     setSchedulePending(false);
     if (result.ok) setSchedule(result.schedule);
     else setScheduleError(result.message);
+  };
+
+  const [whatsappAutoOutreachEnabled, setWhatsappAutoOutreachEnabled] = useState(campaign.whatsapp_auto_outreach_enabled);
+  const [whatsappTogglePending, setWhatsappTogglePending] = useState(false);
+  const [whatsappToggleError, setWhatsappToggleError] = useState<string | null>(null);
+
+  const toggleWhatsAppAutoOutreach = async () => {
+    setWhatsappTogglePending(true);
+    setWhatsappToggleError(null);
+    const result = await toggleWhatsAppAutoOutreachAction(campaign.id, !whatsappAutoOutreachEnabled);
+    setWhatsappTogglePending(false);
+    if (result.ok) setWhatsappAutoOutreachEnabled(result.enabled);
+    else setWhatsappToggleError(result.message);
   };
 
   const startDiscovery = () => {
@@ -380,6 +395,10 @@ export function CampaignDetailTabs({
             scheduleError={scheduleError}
             onStop={stopDiscovery}
             onResume={resumeDiscovery}
+            whatsappAutoOutreachEnabled={whatsappAutoOutreachEnabled}
+            whatsappTogglePending={whatsappTogglePending}
+            whatsappToggleError={whatsappToggleError}
+            onToggleWhatsAppAutoOutreach={toggleWhatsAppAutoOutreach}
           />
         ) : null}
 
@@ -701,6 +720,10 @@ function LeadDiscoveryTab({
   scheduleError,
   onStop,
   onResume,
+  whatsappAutoOutreachEnabled,
+  whatsappTogglePending,
+  whatsappToggleError,
+  onToggleWhatsAppAutoOutreach,
 }: {
   hasIcp: boolean;
   discoveryConfigured: boolean;
@@ -712,6 +735,10 @@ function LeadDiscoveryTab({
   onStart: () => void;
   schedule: DiscoveryScheduleView | null;
   schedulePending: boolean;
+  whatsappAutoOutreachEnabled: boolean;
+  whatsappTogglePending: boolean;
+  whatsappToggleError: string | null;
+  onToggleWhatsAppAutoOutreach: () => void;
   scheduleError: string | null;
   onStop: () => void;
   onResume: () => void;
@@ -791,6 +818,23 @@ function LeadDiscoveryTab({
           {scheduleError ? <p className="mt-3 text-xs text-bb-rose">{scheduleError}</p> : null}
         </DarkCard>
       ) : null}
+
+      <DarkCard className="p-5 text-sm">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="font-medium text-bb-text-2">Automatic WhatsApp outreach</p>
+            <p className="mt-1 text-xs text-bb-text-3">
+              {whatsappAutoOutreachEnabled
+                ? "A lead that qualifies with a usable WhatsApp number is automatically messaged. Turn this off to leave this campaign's leads for manual/Gmail outreach only."
+                : "Off for this campaign — qualified leads are never automatically messaged on WhatsApp, even if WhatsApp is connected. Discovery, research and qualification are unaffected."}
+            </p>
+          </div>
+          <DashButton variant="outline" disabled={whatsappTogglePending} onClick={onToggleWhatsAppAutoOutreach}>
+            {whatsappTogglePending ? "Saving…" : whatsappAutoOutreachEnabled ? "Turn Off" : "Turn On"}
+          </DashButton>
+        </div>
+        {whatsappToggleError ? <p className="mt-3 text-xs text-bb-rose">{whatsappToggleError}</p> : null}
+      </DarkCard>
 
       {!discoveryConfigured ? (
         <DarkAlert variant="error">

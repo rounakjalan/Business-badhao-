@@ -40,7 +40,7 @@ const NOTIFICATION_TOGGLES = [
 type TeamMember = { userId: string; role: OrgRole; name: string; email: string };
 type GmailStatus = { connected: boolean; emailAddress: string | null };
 type GmailNotice = { status: string; detail?: string } | null;
-type WhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null };
+type WhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null; templateName: string | null; templateLanguage: string };
 type WhatsAppNotice = { status: string; detail?: string } | null;
 
 function isSection(value: string | undefined): value is (typeof SECTIONS)[number] {
@@ -63,6 +63,7 @@ export function SettingsSections({
   whatsappNotice,
   connectWhatsAppAction,
   disconnectWhatsAppAction,
+  updateWhatsAppTemplateAction,
 }: {
   error?: string;
   message?: string;
@@ -79,6 +80,7 @@ export function SettingsSections({
   whatsappNotice: WhatsAppNotice;
   connectWhatsAppAction: (formData: FormData) => void;
   disconnectWhatsAppAction: () => void;
+  updateWhatsAppTemplateAction: (formData: FormData) => void;
 }) {
   const [section, setSection] = useState<(typeof SECTIONS)[number]>(isSection(initialTab) ? initialTab : "Account");
   const [showWhatsAppForm, setShowWhatsAppForm] = useState(false);
@@ -206,7 +208,9 @@ export function SettingsSections({
                     ? "WhatsApp connected."
                     : whatsappNotice.status === "disconnected"
                       ? "WhatsApp disconnected."
-                      : (whatsappNotice.detail ?? "Something went wrong connecting WhatsApp.")}
+                      : whatsappNotice.status === "template_saved"
+                        ? "WhatsApp template saved."
+                        : (whatsappNotice.detail ?? "Something went wrong connecting WhatsApp.")}
                 </DarkAlert>
               </div>
             ) : null}
@@ -270,8 +274,59 @@ export function SettingsSections({
                             className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
                           />
                         </div>
+                        <p className="text-xs text-bb-text-3">
+                          Optional: an already Meta-approved message template name, for automatic outreach to a lead who has
+                          never messaged you before. WhatsApp requires one for any first message — without it, WhatsApp only
+                          continues conversations leads already started. You can add this later from here too.
+                        </p>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Approved Template Name (optional)</label>
+                          <input
+                            name="templateName"
+                            placeholder="e.g. first_outreach"
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Template Language Code</label>
+                          <input
+                            name="templateLanguage"
+                            placeholder="en_US"
+                            defaultValue="en_US"
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
                         <DashButton type="submit" variant="gradient">
                           Save Connection
+                        </DashButton>
+                      </form>
+                    ) : null}
+                    {whatsappStatus.connected ? (
+                      <form action={updateWhatsAppTemplateAction} className="mt-4 space-y-3 border-t border-bb-border pt-4">
+                        <p className="text-xs text-bb-text-3">
+                          {whatsappStatus.templateName
+                            ? `Automatic WhatsApp outreach to new leads uses the "${whatsappStatus.templateName}" template (${whatsappStatus.templateLanguage}).`
+                            : "No approved template configured yet — automatic WhatsApp outreach to a lead who hasn't messaged you is unavailable until one is set. Replies to leads who message you first are unaffected."}
+                        </p>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Approved Template Name</label>
+                          <input
+                            name="templateName"
+                            defaultValue={whatsappStatus.templateName ?? ""}
+                            placeholder="e.g. first_outreach"
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-bb-text-2">Template Language Code</label>
+                          <input
+                            name="templateLanguage"
+                            defaultValue={whatsappStatus.templateLanguage}
+                            className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text outline-none focus:border-bb-indigo"
+                          />
+                        </div>
+                        <DashButton type="submit" variant="outline">
+                          Save Template
                         </DashButton>
                       </form>
                     ) : null}

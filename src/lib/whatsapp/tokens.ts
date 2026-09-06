@@ -10,16 +10,39 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * even by accident.
  */
 
-export type ConnectedWhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null };
+export type ConnectedWhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null; templateName: string | null; templateLanguage: string };
 
 /** Safe-to-render status only — never returns the access token. */
 export async function getWhatsAppConnectionStatus(organizationId: string): Promise<ConnectedWhatsAppStatus> {
   const admin = createAdminClient();
-  if (!admin) return { connected: false, displayPhoneNumber: null };
+  if (!admin) return { connected: false, displayPhoneNumber: null, templateName: null, templateLanguage: "en_US" };
 
-  const { data } = await admin.from("whatsapp_accounts").select("display_phone_number, phone_number_id").eq("organization_id", organizationId).maybeSingle();
+  const { data } = await admin
+    .from("whatsapp_accounts")
+    .select("display_phone_number, phone_number_id, template_name, template_language")
+    .eq("organization_id", organizationId)
+    .maybeSingle();
 
-  return { connected: Boolean(data), displayPhoneNumber: data?.display_phone_number ?? data?.phone_number_id ?? null };
+  return {
+    connected: Boolean(data),
+    displayPhoneNumber: data?.display_phone_number ?? data?.phone_number_id ?? null,
+    templateName: data?.template_name ?? null,
+    templateLanguage: data?.template_language ?? "en_US",
+  };
+}
+
+/**
+ * What selectOutreachChannel (lead-pipeline.ts) needs to decide whether a
+ * lead is WhatsApp-eligible for COLD outreach specifically: connected is not
+ * enough on its own, since a free-form message always fails outside Meta's
+ * 24h window — only an org with both a connection AND an approved template
+ * name on file can originate a conversation automatically.
+ */
+export type WhatsAppAutomationConfig = { connected: boolean; templateName: string | null; templateLanguage: string };
+
+export async function getWhatsAppAutomationConfig(organizationId: string): Promise<WhatsAppAutomationConfig> {
+  const status = await getWhatsAppConnectionStatus(organizationId);
+  return { connected: status.connected, templateName: status.templateName, templateLanguage: status.templateLanguage };
 }
 
 export async function saveWhatsAppAccount(params: {
@@ -29,6 +52,8 @@ export async function saveWhatsAppAccount(params: {
   businessAccountId: string | null;
   displayPhoneNumber: string | null;
   accessToken: string;
+  templateName?: string | null;
+  templateLanguage?: string;
 }): Promise<{ ok: boolean; message?: string }> {
   const admin = createAdminClient();
   if (!admin) return { ok: false, message: "Automation isn't configured in this deployment." };
@@ -41,6 +66,8 @@ export async function saveWhatsAppAccount(params: {
       business_account_id: params.businessAccountId,
       display_phone_number: params.displayPhoneNumber,
       access_token: params.accessToken,
+      template_name: params.templateName || null,
+      template_language: params.templateLanguage || "en_US",
     },
     { onConflict: "organization_id" }
   );
@@ -50,6 +77,29 @@ export async function saveWhatsAppAccount(params: {
   // phone_number_id is globally unique (see the migration).
   if (error?.code === "23505") return { ok: false, message: "This WhatsApp number is already connected to another organization." };
   return { ok: !error, message: error?.message };
+}
+
+/**
+ * Updates just the approved cold-outreach template on an already-connected
+ * account — separate from saveWhatsAppAccount so an org can add/change its
+ * template later without re-entering the phone_number_id/access_token it
+ * already has on file.
+ */
+export async function updateWhatsAppTemplate(
+  organizationId: string,
+  params: { templateName: string | null; templateLanguage: string }
+): Promise<{ ok: boolean; message?: string }> {
+  const admin = createAdminClient();
+  if (!admin) return { ok: false, message: "Automation isn't configured in this deployment." };
+
+  const { error, count } = await admin
+    .from("whatsapp_accounts")
+    .update({ template_name: params.templateName, template_language: params.templateLanguage || "en_US" }, { count: "exact" })
+    .eq("organization_id", organizationId);
+
+  if (error) return { ok: false, message: error.message };
+  if (count === 0) return { ok: false, message: "Connect WhatsApp before configuring a template." };
+  return { ok: true };
 }
 
 export async function disconnectWhatsAppAccount(organizationId: string): Promise<{ ok: boolean }> {

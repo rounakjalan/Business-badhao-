@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/whatsapp/tokens", () => ({ getWhatsAppCredentials: vi.fn() }));
 
 import { getWhatsAppCredentials } from "@/lib/whatsapp/tokens";
-import { sendWhatsAppMessage } from "@/lib/whatsapp/send";
+import { sendWhatsAppMessage, sendWhatsAppTemplateMessage } from "@/lib/whatsapp/send";
 
 const VALID_CREDENTIALS = { ok: true as const, credentials: { organizationId: "org-1", phoneNumberId: "1234567890", accessToken: "wa-access-token" } };
 
@@ -114,5 +114,79 @@ describe("sendWhatsAppMessage", () => {
 
     const result = await sendWhatsAppMessage({ organizationId: "org-1", to: "919876543210", body: "Hi" });
     expect(result).toMatchObject({ ok: false, code: "network_error" });
+  });
+});
+
+describe("sendWhatsAppTemplateMessage", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("sends a type:template payload with the configured template name/language, never type:text", async () => {
+    vi.mocked(getWhatsAppCredentials).mockResolvedValue(VALID_CREDENTIALS);
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ messages: [{ id: "wamid.tmpl1" }] }) });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await sendWhatsAppTemplateMessage({
+      organizationId: "org-1",
+      to: "+91 98765 43210",
+      templateName: "first_outreach",
+      templateLanguage: "en_US",
+      bodyText: "Hi! We noticed your business and wanted to reach out.",
+    });
+
+    expect(result).toEqual({ ok: true, messageId: "wamid.tmpl1" });
+    const requestBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(requestBody.type).toBe("template");
+    expect(requestBody.text).toBeUndefined();
+    expect(requestBody.template).toEqual({
+      name: "first_outreach",
+      language: { code: "en_US" },
+      components: [{ type: "body", parameters: [{ type: "text", text: "Hi! We noticed your business and wanted to reach out." }] }],
+    });
+  });
+
+  it("sends no body component at all when no bodyText is given, for a template with zero variables", async () => {
+    vi.mocked(getWhatsAppCredentials).mockResolvedValue(VALID_CREDENTIALS);
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ messages: [{ id: "wamid.tmpl2" }] }) });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await sendWhatsAppTemplateMessage({ organizationId: "org-1", to: "919876543210", templateName: "static_intro", templateLanguage: "en_US" });
+
+    const requestBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(requestBody.template.components).toBeUndefined();
+  });
+
+  it("rejects an invalid recipient before ever checking credentials, same as the free-text send", async () => {
+    const result = await sendWhatsAppTemplateMessage({ organizationId: "org-1", to: "123", templateName: "first_outreach", templateLanguage: "en_US" });
+    expect(result).toMatchObject({ ok: false, code: "invalid_recipient" });
+    expect(getWhatsAppCredentials).not.toHaveBeenCalled();
+  });
+
+  it("reports not_connected when WhatsApp isn't connected, without calling fetch", async () => {
+    vi.mocked(getWhatsAppCredentials).mockResolvedValue({ ok: false, code: "not_connected", message: "No WhatsApp Business number is connected." });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await sendWhatsAppTemplateMessage({ organizationId: "org-1", to: "919876543210", templateName: "first_outreach", templateLanguage: "en_US" });
+    expect(result).toMatchObject({ ok: false, code: "not_connected" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("surfaces Meta's real rejection (never fabricated) when the approved template doesn't match the parameters sent", async () => {
+    vi.mocked(getWhatsAppCredentials).mockResolvedValue(VALID_CREDENTIALS);
+    mockFetchOnce(400, { error: { message: "Number of parameters does not match the expected number of params", code: 132000 } });
+
+    const result = await sendWhatsAppTemplateMessage({
+      organizationId: "org-1",
+      to: "919876543210",
+      templateName: "first_outreach",
+      templateLanguage: "en_US",
+      bodyText: "Hi there",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("Number of parameters does not match");
   });
 });

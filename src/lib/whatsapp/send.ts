@@ -1,6 +1,6 @@
 import "server-only";
 import { WHATSAPP_GRAPH_API_BASE } from "@/lib/whatsapp/config";
-import { normalizePhoneNumber } from "@/lib/whatsapp/phone";
+import { isValidWhatsAppNumber, normalizePhoneNumber } from "@/lib/whatsapp/phone";
 import { getWhatsAppCredentials } from "@/lib/whatsapp/tokens";
 
 export type SendWhatsAppResult =
@@ -26,19 +26,25 @@ type WhatsAppErrorBody = { error?: { message?: string; code?: number; error_subc
  */
 const OUTSIDE_WINDOW_ERROR_CODE = 131047;
 
-/**
- * Sends exactly one WhatsApp text message through the organization's
- * connected number. Never returns ok:true unless Meta's API itself
- * returned a message id — every failure mode is a distinct, honestly
- * reported code, matching gmail/send.ts's contract exactly.
- */
-export async function sendWhatsAppMessage(params: { organizationId: string; to: string; body: string }): Promise<SendWhatsAppResult> {
-  const to = normalizePhoneNumber(params.to);
-  if (to.length < 8) {
-    return { ok: false, code: "invalid_recipient", message: `"${params.to}" doesn't look like a valid phone number.` };
-  }
+/** Shared by both send paths below — the only difference between a free-text send and a template send is this one field. */
+type OutboundPayload = { messaging_product: "whatsapp"; to: string; type: "text"; text: { body: string } } | TemplatePayload;
 
-  const credentials = await getWhatsAppCredentials(params.organizationId);
+type TemplatePayload = {
+  messaging_product: "whatsapp";
+  to: string;
+  type: "template";
+  template: { name: string; language: { code: string }; components?: { type: "body"; parameters: { type: "text"; text: string }[] }[] };
+};
+
+/**
+ * The actual HTTP call to Meta's /messages endpoint, shared by the free-text
+ * and template send paths — the request shape differs (see OutboundPayload)
+ * but credential lookup, transport, and every error-mapping rule below is
+ * identical for both, since Meta returns the same error shapes regardless of
+ * message type.
+ */
+async function postToWhatsAppApi(organizationId: string, payload: OutboundPayload): Promise<SendWhatsAppResult> {
+  const credentials = await getWhatsAppCredentials(organizationId);
   if (!credentials.ok) {
     return { ok: false, code: credentials.code, message: credentials.message };
   }
@@ -48,7 +54,7 @@ export async function sendWhatsAppMessage(params: { organizationId: string; to: 
     response = await fetch(`${WHATSAPP_GRAPH_API_BASE}/${credentials.credentials.phoneNumberId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${credentials.credentials.accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: params.body } }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(20_000),
     });
   } catch (cause) {
@@ -92,4 +98,61 @@ export async function sendWhatsAppMessage(params: { organizationId: string; to: 
   }
 
   return { ok: true, messageId };
+}
+
+/**
+ * Sends exactly one WhatsApp text message through the organization's
+ * connected number. Never returns ok:true unless Meta's API itself
+ * returned a message id — every failure mode is a distinct, honestly
+ * reported code, matching gmail/send.ts's contract exactly.
+ *
+ * Only valid within Meta's 24-hour customer service window (see
+ * OUTSIDE_WINDOW_ERROR_CODE above) — i.e. only ever a reply to a lead who
+ * has messaged this business recently. For a lead who has never messaged
+ * at all, use sendWhatsAppTemplateMessage instead.
+ */
+export async function sendWhatsAppMessage(params: { organizationId: string; to: string; body: string }): Promise<SendWhatsAppResult> {
+  if (!isValidWhatsAppNumber(params.to)) {
+    return { ok: false, code: "invalid_recipient", message: `"${params.to}" doesn't look like a valid phone number.` };
+  }
+  const to = normalizePhoneNumber(params.to);
+  return postToWhatsAppApi(params.organizationId, { messaging_product: "whatsapp", to, type: "text", text: { body: params.body } });
+}
+
+/**
+ * Sends a pre-approved WhatsApp message template — the only way to message a
+ * lead who has never messaged this business before (see the module doc
+ * comment on OUTSIDE_WINDOW_ERROR_CODE: free-form text always fails outside
+ * the 24h window, which is every brand-new lead by definition). This
+ * deployment has no way to create or get a template approved on an
+ * organization's behalf — Meta reviews templates manually, outside this
+ * codebase — so this only works once an org has entered the name of an
+ * already-approved template in Settings (see whatsapp/tokens.ts).
+ *
+ * Supports the single most common real template shape: zero or one body
+ * variable. When bodyText is given, it is sent as that template's first
+ * (and only supported) {{1}} body parameter — if the org's actual approved
+ * template does not have exactly one body variable in that position, Meta
+ * rejects the request with a real, honest component/parameter-count error
+ * (mapped to invalid_recipient/send_failed below, same as any other
+ * rejection), never silently mismatched or fabricated.
+ */
+export async function sendWhatsAppTemplateMessage(params: {
+  organizationId: string;
+  to: string;
+  templateName: string;
+  templateLanguage: string;
+  bodyText?: string;
+}): Promise<SendWhatsAppResult> {
+  if (!isValidWhatsAppNumber(params.to)) {
+    return { ok: false, code: "invalid_recipient", message: `"${params.to}" doesn't look like a valid phone number.` };
+  }
+  const to = normalizePhoneNumber(params.to);
+  const components = params.bodyText ? [{ type: "body" as const, parameters: [{ type: "text" as const, text: params.bodyText }] }] : undefined;
+  return postToWhatsAppApi(params.organizationId, {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: { name: params.templateName, language: { code: params.templateLanguage }, components },
+  });
 }

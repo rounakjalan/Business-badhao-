@@ -13,7 +13,7 @@ export default async function CampaignDetailPage({ params }: { params: Promise<{
   const supabase = await createClient();
   const { data: campaign } = await supabase
     .from("campaigns")
-    .select("id, name, objective, description, target_audience, status, created_at, ideal_customer_profile_id")
+    .select("id, name, objective, description, target_audience, status, created_at, ideal_customer_profile_id, whatsapp_auto_outreach_enabled")
     .eq("id", id)
     .eq("organization_id", currentOrg.organizationId)
     .maybeSingle();
