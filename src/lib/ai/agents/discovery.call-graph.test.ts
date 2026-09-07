@@ -413,8 +413,16 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     // genuine fallback — was asked for its OWN configured model, never
     // for Nemotron's model id (which Groq doesn't have and would 404 on).
     expect(openRouterCalls[0].body.model).toBe(DEFAULT_OPENROUTER_MODEL);
+    // The real request also carries the corrected reasoning effort —
+    // "medium", not OpenRouterProvider's own default "low", which this
+    // exact model's published spec doesn't support.
+    expect(openRouterCalls[0].body.reasoning).toEqual({ effort: "medium" });
     expect(groqCalls[0].body.model).toBe("openai/gpt-oss-120b");
     expect(groqCalls[0].body.model).not.toBe(DEFAULT_OPENROUTER_MODEL);
+    // Groq's own request is a completely different provider's wire format —
+    // this reasoning-effort field is OpenRouter-specific and must never
+    // leak into a Groq request body.
+    expect(groqCalls[0].body.reasoning).toBeUndefined();
 
     // agent_runs.output for the query-generation stage must distinguish
     // what was requested (Nemotron, on openrouter) from what actually

@@ -375,6 +375,15 @@ async function generateDiscoveryQueries(
     // hermes-service.ts). Recorded honestly either way via
     // requestedProvider/requestedModel on agent_runs.output.
     modelByProvider: { openrouter: NEMOTRON_MODEL },
+    // NEMOTRON_MODEL's own published spec (openrouter.ai/api/v1/models)
+    // lists supported_efforts: ["medium", "high"] — "low" (OpenRouterProvider's
+    // own default) isn't one of them, so it was being silently ignored and
+    // this model reasoned at its own default ("high") instead, taking long
+    // enough to routinely miss this call's timeout and fall back to Groq —
+    // confirmed via agent_runs telemetry (2026-09) showing requestedModel
+    // staying Nemotron while the actual served model was Groq's every time.
+    // "medium" is the lowest level this specific model actually honors.
+    reasoningEffort: "medium",
     // Both LEAD_DISCOVERY calls run on reasoning models (OpenRouter's
     // Nemotron, Groq's gpt-oss), which spend part of the completion budget
     // on reasoning before emitting any JSON. In JSON mode Groq rejects the
@@ -784,9 +793,11 @@ async function extractProspectsFromResults(
     taskType: "LEAD_DISCOVERY",
     systemPrompt: EXTRACTION_SYSTEM_PROMPT,
     userPrompt,
-    // Same explicit Nemotron-on-openrouter-only routing as query generation
-    // above — see that call site's comment.
+    // Same explicit Nemotron-on-openrouter-only routing, and the same
+    // "medium" reasoning-effort correction, as query generation above —
+    // see that call site's comments for why.
     modelByProvider: { openrouter: NEMOTRON_MODEL },
+    reasoningEffort: "medium",
     // Balances the two opposite failures seen in production: too low and a
     // reasoning model runs out mid-JSON (Groq HTTP 400 json_validate_failed);
     // too high and prompt + reserved completion tokens blow the 8k TPM

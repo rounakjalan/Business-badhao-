@@ -1253,6 +1253,16 @@ describe("lead discovery", () => {
       expect(Math.ceil(promptChars / 4) + (extractionCall.maxTokens ?? 0)).toBeLessThan(8000);
     });
 
+    it("requests reasoning effort 'medium' on both Nemotron-designated calls — 'low' (the OpenRouter default) is not one of NEMOTRON_MODEL's own published supported_efforts, which was causing it to silently reason at its own default ('high') and miss this call's timeout", async () => {
+      await runExtraction(JSON.stringify(EXTRACTION_RESPONSE));
+
+      const queryGenerationCall = vi.mocked(runHermesCompletion).mock.calls[0][0];
+      const extractionCall = vi.mocked(runHermesCompletion).mock.calls[1][0];
+
+      expect(queryGenerationCall.reasoningEffort).toBe("medium");
+      expect(extractionCall.reasoningEffort).toBe("medium");
+    });
+
     it("caps how many search results are sent, taking a slice from every query rather than only the first", async () => {
       const manyHits = (prefix: string) =>
         Array.from({ length: 30 }, (_, i) => ({

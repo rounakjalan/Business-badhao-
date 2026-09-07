@@ -73,6 +73,16 @@ describe("OpenRouterProvider", () => {
     expect(sentBody.reasoning).toEqual({ effort: "low" });
   });
 
+  it("respects a caller's explicit reasoningEffort override instead of the default 'low' — needed for a model whose published spec doesn't support 'low' (e.g. NVIDIA Nemotron 3 Ultra, which only supports 'medium'/'high')", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { choices: [{ message: { content: "hi there" } }] }));
+
+    await new OpenRouterProvider().complete({ ...baseRequest, reasoningEffort: "medium" });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const sentBody = JSON.parse((init as RequestInit).body as string);
+    expect(sentBody.reasoning).toEqual({ effort: "medium" });
+  });
+
   it("respects an explicit OPENROUTER_MODEL override", async () => {
     process.env.OPENROUTER_MODEL = "nousresearch/hermes-3-llama-3.1-70b";
     vi.mocked(fetch).mockResolvedValueOnce(

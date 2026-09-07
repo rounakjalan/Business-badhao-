@@ -113,6 +113,15 @@ export type HermesRequest = {
    * this unset and gets the normal platform-wide timeout, unchanged.
    */
   timeoutMs?: number;
+  /**
+   * OpenRouter-specific reasoning-effort cap, passed straight through to
+   * AiCompletionRequest.reasoningEffort (see its own doc comment) — ignored
+   * by every other provider. Only OpenRouterProvider reads this, so it's
+   * safe to pass unconditionally regardless of which provider ends up
+   * serving the call. Every other caller leaves this unset and gets
+   * OpenRouterProvider's own default ("low"), unchanged.
+   */
+  reasoningEffort?: "low" | "medium" | "high";
   /** Set to "json" for agents that parse the result with src/lib/ai/schema.ts. */
   responseFormat?: "text" | "json";
   /**
@@ -210,6 +219,7 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
         maxTokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
         timeoutMs: request.timeoutMs ?? config.timeoutMs,
+        reasoningEffort: request.reasoningEffort,
         responseFormat: request.responseFormat,
       };
 

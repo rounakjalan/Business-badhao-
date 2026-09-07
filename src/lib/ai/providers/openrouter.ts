@@ -46,12 +46,18 @@ export class OpenRouterProvider implements AiProvider {
         apiKey,
         defaultModel: this.model,
         extraHeaders: { "X-Title": "Business Badhao" },
-        // Caps reasoning-token spend on reasoning models (e.g. the default
-        // Nemotron 3 Ultra) to a fraction of maxTokens instead of letting
-        // reasoning consume the entire budget and leave nothing for the
-        // actual content — which is what was producing empty completions
-        // (malformed_response). See OpenRouter's unified reasoning API.
-        extraBody: { reasoning: { effort: "low" } },
+        // Caps reasoning-token spend on reasoning models to a fraction of
+        // maxTokens instead of letting reasoning consume the entire budget
+        // and leave nothing for the actual content — which is what was
+        // producing empty completions (malformed_response). See
+        // OpenRouter's unified reasoning API. Defaults to "low", but a
+        // caller can request a different level via request.reasoningEffort
+        // — needed because "low" is not universally supported: the default
+        // Nemotron 3 Ultra's own published spec lists only
+        // supported_efforts: ["medium", "high"], so it silently ignores
+        // "low" and reasons at its own default ("high") instead, which is
+        // what was causing it to run past this app's request timeout.
+        extraBody: { reasoning: { effort: request.reasoningEffort ?? "low" } },
       },
       request
     );

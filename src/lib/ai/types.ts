@@ -36,6 +36,18 @@ export type AiCompletionRequest = {
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
+  /**
+   * OpenRouter-specific reasoning-effort cap (ignored by every other
+   * provider). Defaults to "low" in OpenRouterProvider when unset — see
+   * that default's own doc comment for why. Exists because "low" is not a
+   * universally supported value: some reasoning models (e.g. NVIDIA's
+   * Nemotron 3 Ultra, whose own published spec lists only
+   * supported_efforts: ["medium", "high"]) silently ignore an unsupported
+   * effort and fall back to their own default instead, so a caller whose
+   * intended model doesn't support "low" needs to ask for a level that
+   * model actually honors.
+   */
+  reasoningEffort?: "low" | "medium" | "high";
   tools?: AiToolDefinition[];
   /**
    * Request the model constrain output to a single JSON object. Support
