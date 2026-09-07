@@ -294,6 +294,72 @@ describe("runHermesCompletion", () => {
     expect(createProvider).toHaveBeenCalledWith("openrouter");
   });
 
+  it("modelByProvider requests an explicit model only on the named provider — a genuine fallback to another provider still requests THAT provider's own default, never the named model's id", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+
+    const failingPrimary = fakeProvider({
+      name: "openrouter",
+      complete: vi.fn().mockRejectedValue(new AiError({ code: "provider_unavailable", provider: "openrouter", message: "down" })),
+    });
+    const workingFallback = fakeProvider({
+      name: "groq",
+      complete: vi.fn().mockResolvedValue(fakeResponse({ provider: "groq", model: "openai/gpt-oss-120b" })),
+    });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "openrouter" ? failingPrimary : workingFallback));
+
+    const result = await runHermesCompletion({
+      ...baseRequest,
+      modelByProvider: { openrouter: "nvidia/nemotron-3-ultra-550b-a55b:free" },
+    });
+
+    expect(result).toEqual({ ok: true, text: "a real suggestion", provider: "groq", model: "openai/gpt-oss-120b" });
+    // OpenRouter was asked for the named model...
+    expect(vi.mocked(failingPrimary.complete).mock.calls[0][0].model).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+    // ...but Groq — the genuine fallback, not named in modelByProvider — was
+    // asked for nothing at all, so it requests its own configured default,
+    // never OpenRouter's model id (which it doesn't have and would 404 on).
+    expect(vi.mocked(workingFallback.complete).mock.calls[0][0].model).toBeUndefined();
+  });
+
+  it("honestly records requestedProvider/requestedModel distinct from the actual serving provider/model when a fallback occurs — this is the fix for the Nemotron/Groq routing divergence", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+
+    const failingPrimary = fakeProvider({
+      name: "openrouter",
+      complete: vi.fn().mockRejectedValue(new AiError({ code: "provider_unavailable", provider: "openrouter", message: "down" })),
+    });
+    const workingFallback = fakeProvider({
+      name: "groq",
+      complete: vi.fn().mockResolvedValue(fakeResponse({ provider: "groq", model: "openai/gpt-oss-120b" })),
+    });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "openrouter" ? failingPrimary : workingFallback));
+
+    await runHermesCompletion({
+      ...baseRequest,
+      modelByProvider: { openrouter: "nvidia/nemotron-3-ultra-550b-a55b:free" },
+    });
+
+    const completionUpdate = updateSpy.mock.calls.find(([payload]) => (payload as { status?: string }).status === "completed");
+    expect(completionUpdate?.[0]).toMatchObject({
+      output: expect.objectContaining({
+        requestedProvider: "openrouter",
+        requestedModel: "nvidia/nemotron-3-ultra-550b-a55b:free",
+        provider: "groq",
+        model: "openai/gpt-oss-120b",
+        usedFallback: true,
+      }),
+    });
+  });
+
+  it("records requestedModel as null when no call site names an explicit model — nothing to compare a served model against, honestly", async () => {
+    vi.mocked(createProvider).mockReturnValue(fakeProvider());
+
+    await runHermesCompletion(baseRequest);
+
+    const completionUpdate = updateSpy.mock.calls.find(([payload]) => (payload as { status?: string }).status === "completed");
+    expect(completionUpdate?.[0]).toMatchObject({ output: expect.objectContaining({ requestedModel: null }) });
+  });
+
   it("accurately records the actual provider and model that served a modelProviders-restricted request", async () => {
     const completeSpy = vi.fn().mockResolvedValue(fakeResponse({ provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" }));
     vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));

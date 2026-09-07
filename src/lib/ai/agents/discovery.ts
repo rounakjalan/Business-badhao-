@@ -1,8 +1,27 @@
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
 import { runHermesCompletion, type HermesResult } from "@/lib/ai/hermes/hermes-service";
+import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
+
+/**
+ * The intended model for both Nemotron-designated stages below (query
+ * generation and extraction) — reused directly from OpenRouterProvider's own
+ * configured default rather than a second, independent literal, so the two
+ * can never silently drift apart. Named and passed explicitly (via
+ * modelByProvider, see below) instead of left for OpenRouterProvider to
+ * apply implicitly: a production audit (2026-09) found that without an
+ * explicit name, there was nothing to check a request against — only the
+ * model that happened to answer was ever recorded, never what was actually
+ * intended, which is exactly what let 100% of extraction and 78% of query
+ * generation runs go to Groq's fallback model for days without that being
+ * visible as a divergence from what these stages are supposed to run on.
+ * This does not change which model actually gets requested when OpenRouter
+ * serves the call — it is the same string OpenRouterProvider already
+ * defaults to — it only makes the intent explicit and inspectable.
+ */
+const NEMOTRON_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 // Lead Discovery: ICP + campaign -> real search queries -> a real search
 // provider -> AI extraction constrained to what the search actually
@@ -27,52 +46,53 @@ import type { BusinessContext } from "@/lib/business-context";
 // "Hermes" in this codebase means exactly one thing — runHermesCompletion,
 // the orchestration/routing function everything calls through — not a
 // model of its own. What model actually answers depends on what that call
-// is routed to and, now, on an explicit per-call override (see Step 4):
+// is routed to and on each stage's own explicit routing decision below:
 //
 //   Business Badhao (campaigns/actions.ts / scheduled-pipeline.ts)
-//     -> Hermes Planner (runHermesCompletion, no model override) routes
-//        LEAD_DISCOVERY to the "openrouter" provider first, whose
-//        configured model defaults to Nemotron 3 Ultra
-//        (DEFAULT_OPENROUTER_MODEL in providers/openrouter.ts) — "Nemotron
-//        Reasoner"/"Nemotron Analyst" below name the INTENDED model for
-//        these two stages, not a guarantee. When openrouter's free-tier
-//        Nemotron endpoint is unavailable, Hermes falls through to
-//        config.fallbackProvider (AI_FALLBACK_PROVIDER) honestly and
-//        automatically — recorded per call as response.provider/
-//        response.model on model_usage and as usedFallback on
-//        agent_runs.output (see runHermesCompletion in hermes-service.ts)
-//        — never silently and never mislabeled as Nemotron in what gets
-//        stored. A live production audit (2026-09) found the fallback
-//        firing on 60-90% of real Reasoner/Analyst calls on this
-//        deployment's free-tier OpenRouter quota; that is this stage
-//        genuinely running on whatever config.fallbackProvider is set to
-//        (Groq's openai/gpt-oss-120b in that deployment) rather than
-//        Nemotron, honestly recorded as such — not a bug in the fallback
-//        mechanism, but worth knowing before reading "Nemotron" below as
-//        a claim about what actually answered a specific call. Check
-//        model_usage for the ground truth for any real run.
+//     -> Hermes Planner: routes LEAD_DISCOVERY to the "openrouter"
+//        provider first, explicitly requesting NEMOTRON_MODEL there via
+//        modelByProvider (generateDiscoveryQueries below) — not left to
+//        OpenRouterProvider's own implicit default, so what this call
+//        intends is a named, checkable fact rather than an assumption.
+//        When openrouter's free-tier Nemotron endpoint is unavailable,
+//        Hermes falls through to config.fallbackProvider
+//        (AI_FALLBACK_PROVIDER) honestly and automatically — that
+//        provider gets NO model override (modelByProvider names only
+//        "openrouter"), so it requests its own configured default rather
+//        than being asked for a Nemotron model id it doesn't have. Every
+//        call records both what was requested (requestedProvider/
+//        requestedModel) and what actually served it (provider/model) on
+//        agent_runs.output, plus usedFallback — never silently and never
+//        mislabeled as Nemotron in what gets stored. A live production
+//        audit (2026-09) found the fallback firing on 60-90% of real
+//        Reasoner/Analyst calls on this deployment's free-tier OpenRouter
+//        quota — genuinely running on whatever config.fallbackProvider is
+//        set to (Groq's openai/gpt-oss-120b in that deployment) rather
+//        than Nemotron, honestly recorded as such. Check agent_runs for
+//        the requested/actual ground truth for any real run.
 //     -> Nemotron Reasoner: that call is generateDiscoveryQueries below,
 //        turning the campaign/ICP into real search queries
 //     -> Tavily, Exa on Tavily failure (searchWithFallback) — real HTTP
 //        search, never an AI call
-//     -> Nemotron Analyst: a second Hermes-routed call, same default
-//        model (extractProspectsFromResults below), this time reasoning
-//        over the actual SearchHit[] text, not the original prompt,
-//        returning its raw candidates un-graded
+//     -> Nemotron Analyst: a second Hermes-routed call, same explicit
+//        NEMOTRON_MODEL routing (extractProspectsFromResults below), this
+//        time reasoning over the actual SearchHit[] text, not the
+//        original prompt, returning its raw candidates un-graded
 //     -> Independent Hermes Reviewer (runFinalHermesValidation below) —
 //        a THIRD Hermes-routed call, but this one passes an explicit
 //        model override (INDEPENDENT_REVIEWER_MODEL) that forces a
-//        genuinely different model — NousResearch's Hermes 4 70B, not
-//        Nvidia's Nemotron — reviewing the Analyst's own candidates
-//        against that same real evidence and returning only the ones its
-//        own independent reading judges are actually supported
+//        genuinely different model — NousResearch's Hermes, not Nvidia's
+//        Nemotron — reviewing the Analyst's own candidates against that
+//        same real evidence and returning only the ones its own
+//        independent reading judges are actually supported
 //     -> Deterministic Validator: finalizeDiscoveryResult below is the
 //        safety net that runs on whatever the Reviewer accepted:
 //        grounding/anti-fabrication/non-business/competitor filtering
 //        (independent of, not replaced by, either AI stage above it),
 //        dedup, the run cap, and assembling the DiscoveryResult — because
 //        this codebase never trusts a model's own claim that it stayed
-//        grounded, whichever model made that claim
+//        grounded, whichever model made that claim. Pure TypeScript, no
+//        AI call and no external search — never anything else in between.
 //     -> back to Business Badhao as this module's DiscoveryResult.
 // Proven end-to-end (not just asserted) by discovery.call-graph.test.ts,
 // which mocks only fetch and Supabase — never runHermesCompletion — so a
@@ -349,6 +369,12 @@ async function generateDiscoveryQueries(
     taskType: "LEAD_DISCOVERY",
     systemPrompt: QUERY_SYSTEM_PROMPT,
     userPrompt,
+    // Explicit Nemotron routing on openrouter only — a genuine fallback to
+    // config.fallbackProvider still requests THAT provider's own default
+    // model, never this one's id (see modelByProvider's doc comment in
+    // hermes-service.ts). Recorded honestly either way via
+    // requestedProvider/requestedModel on agent_runs.output.
+    modelByProvider: { openrouter: NEMOTRON_MODEL },
     // Both LEAD_DISCOVERY calls run on reasoning models (OpenRouter's
     // Nemotron, Groq's gpt-oss), which spend part of the completion budget
     // on reasoning before emitting any JSON. In JSON mode Groq rejects the
@@ -758,6 +784,9 @@ async function extractProspectsFromResults(
     taskType: "LEAD_DISCOVERY",
     systemPrompt: EXTRACTION_SYSTEM_PROMPT,
     userPrompt,
+    // Same explicit Nemotron-on-openrouter-only routing as query generation
+    // above — see that call site's comment.
+    modelByProvider: { openrouter: NEMOTRON_MODEL },
     // Balances the two opposite failures seen in production: too low and a
     // reasoning model runs out mid-JSON (Groq HTTP 400 json_validate_failed);
     // too high and prompt + reserved completion tokens blow the 8k TPM
@@ -782,11 +811,13 @@ async function extractProspectsFromResults(
 // Step 4 (AI, GENUINELY INDEPENDENT of the Nemotron calls above): the
 // Independent Hermes Reviewer. This is not "Hermes" as a label on another
 // Nemotron call — it is a real, different model. The two calls above this
-// one (generateDiscoveryQueries, extractProspectsFromResults) both go
-// through runHermesCompletion's default LEAD_DISCOVERY routing, which
-// resolves to OpenRouter's configured model — Nemotron 3 Ultra, unless
-// overridden. This call passes an explicit model override
-// (INDEPENDENT_REVIEWER_MODEL, below) all the way down to the real HTTP
+// one (generateDiscoveryQueries, extractProspectsFromResults) each request
+// NEMOTRON_MODEL explicitly, but only ON OPENROUTER — via modelByProvider
+// (hermes-service.ts), which lets a genuine cross-provider fallback still
+// request that OTHER provider's own default model rather than being asked
+// for Nemotron's id. This call is different in kind, not just degree: it
+// passes an explicit model override (INDEPENDENT_REVIEWER_MODEL, below) —
+// via `model`, not `modelByProvider` — all the way down to the real HTTP
 // request body, so it runs on a NousResearch model — a different company's
 // model, different weights, different training — reachable through the
 // same already-configured OpenRouter credentials (no new service, no
@@ -802,7 +833,13 @@ async function extractProspectsFromResults(
 // of an actual fallback. Restricting to OpenRouter, and falling back to a
 // second, different OpenRouter-hosted Hermes model instead (see
 // runFinalHermesValidation), is what makes this a real, deterministic
-// fallback chain rather than a doomed retry.
+// fallback chain rather than a doomed retry. This is why the Reviewer uses
+// `model`+`modelProviders` (an all-or-nothing restriction: only these
+// provider(s), only this model, no cross-provider substitution at all)
+// rather than `modelByProvider` (the Nemotron calls' mechanism: an explicit
+// model on named provider(s), with any other provider in the chain still
+// free to fall back to its own default) — the two stages have genuinely
+// different fallback needs, not an inconsistency between them.
 //
 // Its output is still not trusted blindly: finalizeDiscoveryResult runs
 // unchanged immediately afterward, re-checking every candidate this stage

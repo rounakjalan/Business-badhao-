@@ -89,6 +89,20 @@ export type HermesRequest = {
    * providerOrder, completely unchanged.
    */
   modelProviders?: AiProviderName[];
+  /**
+   * Names an explicit model for specific provider(s) in the routing chain,
+   * without touching what any other provider in that same chain requests.
+   * Unlike `model` (passed to every provider the chain tries, which is why
+   * a forced model also needs `modelProviders` to stop a doomed retry
+   * against a provider that never had it — see above), a provider with no
+   * entry here keeps using its own configured default. Exists for a stage
+   * whose intended model lives on only one particular provider (e.g.
+   * Nemotron, OpenRouter's own configured default) but that should still
+   * get an honest, automatic fallback to whatever the next configured
+   * provider's own default model is — never silently asked for the first
+   * provider's model id and guaranteed to fail there too.
+   */
+  modelByProvider?: Partial<Record<AiProviderName, string>>;
   maxTokens?: number;
   temperature?: number;
   /**
@@ -156,6 +170,11 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
   // chain from retrying a provider-specific model id against a provider that never had it.
   const providerOrder = request.model && request.modelProviders?.length ? request.modelProviders : routed.providerOrder;
   const preferredProvider = request.model && request.modelProviders?.length ? request.modelProviders[0] : routed.preferredProvider;
+  // What this call actually intends to ask the preferred provider for —
+  // recorded on agent_runs regardless of which provider (or model) ends up
+  // really serving it, so a fallback is never indistinguishable from the
+  // thing it stood in for (see modelByProvider's own doc comment above).
+  const requestedModel = request.modelByProvider?.[preferredProvider] ?? request.model ?? null;
 
   const messages: AiMessage[] = [
     { role: "system", content: request.systemPrompt },
@@ -180,9 +199,14 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
     }
 
     try {
+      // A provider named in modelByProvider gets that explicit model; any
+      // other provider in the chain (a genuine fallback) keeps no override
+      // at all, so it requests its own configured default rather than the
+      // first provider's model id, which it may not have.
+      const modelForThisProvider = request.modelByProvider?.[providerName] ?? request.model;
       const completionRequest: AiCompletionRequest = {
         messages,
-        model: request.model,
+        model: modelForThisProvider,
         maxTokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
         timeoutMs: request.timeoutMs ?? config.timeoutMs,
@@ -204,12 +228,18 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
       });
 
       if (!response.text) {
-        await completeAgentRun(agentRun, "failed", { code: "malformed_response" });
+        await completeAgentRun(agentRun, "failed", {
+          code: "malformed_response",
+          requestedProvider: preferredProvider,
+          requestedModel,
+        });
         return { ok: false, code: "malformed_response", message: USER_SAFE_MESSAGES.malformed_response };
       }
 
       await completeAgentRun(agentRun, "completed", {
         taskType: request.taskType,
+        requestedProvider: preferredProvider,
+        requestedModel,
         provider: response.provider,
         model: response.model,
         finishReason: response.finishReason,
@@ -232,6 +262,8 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
   const code = lastError?.code ?? "unknown";
   await completeAgentRun(agentRun, "failed", {
     taskType: request.taskType,
+    requestedProvider: preferredProvider,
+    requestedModel,
     code,
     message: lastError?.message ?? "no provider produced a result",
   });

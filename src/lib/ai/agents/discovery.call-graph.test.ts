@@ -70,7 +70,9 @@ function openRouterResponse(body: unknown, model = DEFAULT_OPENROUTER_MODEL) {
   );
 }
 
-const ENV_KEYS = ["TAVILY_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "AI_PROVIDER", "AI_FALLBACK_PROVIDER", "GROQ_API_KEY", "HUGGINGFACE_API_KEY"] as const;
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
+const ENV_KEYS = ["TAVILY_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "AI_PROVIDER", "AI_FALLBACK_PROVIDER", "GROQ_API_KEY", "GROQ_MODEL", "HUGGINGFACE_API_KEY"] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
 describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavily/Exa -> Nemotron -> Hermes -> Business Badhao", () => {
@@ -367,5 +369,68 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     expect(result.code).toBe("provider_error");
     // Confirms discover() does not silently fall back to the second call's
     // un-reviewed candidates when the third call itself fails.
+  });
+
+  it("Nemotron routing divergence, fixed: an OpenRouter (Nemotron) outage on query generation genuinely falls back to Groq's OWN configured model — never retried against Groq using Nemotron's model id — and agent_runs honestly records requested=Nemotron/openrouter distinct from actual=Groq's real model", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+    process.env.GROQ_API_KEY = "test-groq-key";
+    process.env.GROQ_MODEL = "openai/gpt-oss-120b";
+
+    const openRouterCalls: { url: string; body: Record<string, unknown> }[] = [];
+    const groqCalls: { url: string; body: Record<string, unknown> }[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+
+        if (url === OPENROUTER_URL) {
+          openRouterCalls.push({ url, body });
+          // Simulates the real free-tier Nemotron outage this test
+          // reproduces — OpenRouter itself is down for every call.
+          return new Response("internal server error", { status: 500 });
+        }
+        if (url === GROQ_URL) {
+          groqCalls.push({ url, body });
+          const userPrompt = String(body.messages?.[1]?.content ?? "");
+          if (userPrompt.includes("CANDIDATE PROSPECTS TO REVIEW")) return openRouterResponse({ accepted: [] }, "openai/gpt-oss-120b");
+          if (userPrompt.includes("REAL SEARCH RESULTS")) return openRouterResponse({ prospects: [] }, "openai/gpt-oss-120b");
+          // Groq's own real response echoes back its own served model — the
+          // whole point being tested here is that this is NOT Nemotron's id.
+          return openRouterResponse({ queries: ["retail store owners in Jaipur"] }, "openai/gpt-oss-120b");
+        }
+        if (url === TAVILY_URL) return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+        throw new Error(`unexpected fetch url in Nemotron-routing test: ${url}`);
+      })
+    );
+
+    const result = await new TavilyDiscoveryProvider().discover(criteria);
+
+    expect(result.ok).toBe(true);
+
+    // The real request bodies actually sent to each provider: OpenRouter
+    // was asked for Nemotron (it just never answered), and Groq — the
+    // genuine fallback — was asked for its OWN configured model, never
+    // for Nemotron's model id (which Groq doesn't have and would 404 on).
+    expect(openRouterCalls[0].body.model).toBe(DEFAULT_OPENROUTER_MODEL);
+    expect(groqCalls[0].body.model).toBe("openai/gpt-oss-120b");
+    expect(groqCalls[0].body.model).not.toBe(DEFAULT_OPENROUTER_MODEL);
+
+    // agent_runs.output for the query-generation stage must distinguish
+    // what was requested (Nemotron, on openrouter) from what actually
+    // served it (Groq's real model) — never merge or mislabel the two.
+    const queryGenUpdate = updateSpy.mock.calls.find(
+      ([, payload]) => (payload as { status?: string; output?: { taskType?: string } }).output?.taskType === "LEAD_DISCOVERY" &&
+        (payload as { status?: string }).status === "completed"
+    );
+    expect(queryGenUpdate?.[1]).toMatchObject({
+      output: expect.objectContaining({
+        requestedProvider: "openrouter",
+        requestedModel: DEFAULT_OPENROUTER_MODEL,
+        provider: "groq",
+        model: "openai/gpt-oss-120b",
+        usedFallback: true,
+      }),
+    });
   });
 });
