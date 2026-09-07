@@ -808,7 +808,15 @@ function LeadDiscoveryTab({
                 </>
               )}
               {schedule.state === "failed" && schedule.lastError ? (
-                <p className="mt-2 text-xs text-bb-amber">Last run failed: {schedule.lastError} It will be retried.</p>
+                // The failure's own message is shown once, in the "Last run"
+                // card below (discovery.lastRun) when there is one — this
+                // only adds what that card doesn't say: that the schedule
+                // itself will retry it. Falls back to the full message here
+                // on the rare chance the two ever get out of sync.
+                <p className="mt-2 text-xs text-bb-amber">
+                  {discovery.lastRun ? "Last run failed — see details below." : `Last run failed: ${schedule.lastError}`} It will be
+                  retried automatically.
+                </p>
               ) : null}
             </div>
             <DashButton variant="outline" disabled={schedulePending} onClick={isStopped ? onResume : onStop}>
