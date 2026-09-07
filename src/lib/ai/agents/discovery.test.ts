@@ -871,6 +871,18 @@ describe("lead discovery", () => {
       }
     });
 
+    it("both attempts request a longer timeout than the platform default — reproduces the fix for a real production incident where both Reviewer models aborted around the 20s platform default while still generating, which then surfaced as a misleading malformed_response instead of a timeout", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "timeout", message: "The AI provider took too long to respond. Try again." })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ accepted: [] }), provider: "openrouter", model: "nousresearch/hermes-4-405b" });
+
+      await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      for (const call of vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0])) {
+        expect(call.timeoutMs).toBeGreaterThan(20_000);
+      }
+    });
+
     it("never retries more than once — a fallback failure ends the attempt instead of looping", async () => {
       vi.mocked(runHermesCompletion)
         .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "primary down" })

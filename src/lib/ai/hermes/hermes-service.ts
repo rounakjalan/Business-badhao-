@@ -91,6 +91,14 @@ export type HermesRequest = {
   modelProviders?: AiProviderName[];
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Overrides config.timeoutMs (the platform default, 20s) for this call
+   * only. Exists for callers forcing a specific, larger/slower model (see
+   * `model` above) that legitimately needs more wall-clock time to finish
+   * generating than the default is sized for — every other caller leaves
+   * this unset and gets the normal platform-wide timeout, unchanged.
+   */
+  timeoutMs?: number;
   /** Set to "json" for agents that parse the result with src/lib/ai/schema.ts. */
   responseFormat?: "text" | "json";
   /**
@@ -177,7 +185,7 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
         model: request.model,
         maxTokens: request.maxTokens ?? 200,
         temperature: request.temperature ?? 0.6,
-        timeoutMs: config.timeoutMs,
+        timeoutMs: request.timeoutMs ?? config.timeoutMs,
         responseFormat: request.responseFormat,
       };
 

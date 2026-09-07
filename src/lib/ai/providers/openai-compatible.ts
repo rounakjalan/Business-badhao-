@@ -132,10 +132,34 @@ function mapHttpErrorToAiError(provider: AiProviderName, status: number, bodyTex
   return mapErrorCodeToAiError(provider, status, message);
 }
 
-async function safeReadText(response: Response): Promise<string> {
+/**
+ * Reads the response body as text exactly once. The same AbortSignal that
+ * guards the initial fetch() call keeps governing the response afterward —
+ * it can still fire while we're reading a body that's slow to fully arrive
+ * (e.g. a large/reasoning model still generating), even though fetch()
+ * itself already resolved with a 200 and real headers. That aborted read
+ * previously fell through to a bare catch-and-return-"", which is
+ * indistinguishable from a genuinely empty body: JSON.parse("") then throws
+ * and the caller reports "malformed_response ... (empty)" — a real timeout
+ * misreported as a different failure, with a body snippet that's a lie
+ * (empty because the read was cut off, not because the response was empty).
+ * Detected here and re-thrown as the same `timeout` AiError the pre-body
+ * abort path already produces, so telemetry names the real cause. Any other
+ * read failure (e.g. a connection reset mid-body) still degrades to "" —
+ * there's nothing more specific to report for that.
+ */
+async function readResponseBody(response: Response, provider: AiProviderName, timeoutMs: number): Promise<string> {
   try {
     return await response.text();
-  } catch {
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === "TimeoutError") {
+      throw new AiError({
+        code: "timeout",
+        provider,
+        message: `${provider} request timed out after ${timeoutMs}ms while reading the response body`,
+        cause,
+      });
+    }
     return "";
   }
 }
@@ -196,7 +220,7 @@ export async function callOpenAiCompatibleChat(
   // diagnosis; the console.error calls below additionally put the same
   // evidence in Vercel's runtime logs.
   const contentType = response.headers.get("content-type") ?? "unknown";
-  const rawBody = await safeReadText(response);
+  const rawBody = await readResponseBody(response, cfg.providerName, timeoutMs);
   const bodySnippet = rawBody.slice(0, 1000) || "(empty)";
   const diagnostics = `HTTP ${response.status}, content-type: ${contentType}, model requested: ${model}. Raw body (first 1000 chars): ${bodySnippet}`;
 

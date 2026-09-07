@@ -852,6 +852,19 @@ const INDEPENDENT_REVIEWER_MODEL = "nousresearch/hermes-3-llama-3.1-70b";
  */
 const INDEPENDENT_REVIEWER_FALLBACK_MODEL = "nousresearch/hermes-4-405b";
 
+/**
+ * The Reviewer's models are much larger than most Hermes-routed calls (up to
+ * 405B) and this call's own maxTokens budget is 4000 — comfortably past the
+ * platform-wide 20s default (config.timeoutMs) under real generation load. A
+ * production run (2026-09-07) showed both attempts aborting right around
+ * 20s, which — because the abort landed mid body-read rather than on the
+ * initial request — surfaced as a misleading "malformed_response ... raw
+ * body (empty)" instead of the real "timeout" (see the body-read fix in
+ * src/lib/ai/providers/openai-compatible.ts). This override doesn't change
+ * the platform default for any other Hermes-routed call.
+ */
+const INDEPENDENT_REVIEWER_TIMEOUT_MS = 40_000;
+
 const FinalValidationSchema = z.object({ accepted: z.array(ExtractedProspectSchema) });
 
 const FINAL_VALIDATION_SYSTEM_PROMPT = `You are an independent reviewer auditing candidate prospect businesses before they are saved. A separate AI system already extracted these candidates from real web search results — you did not produce them and you are not that system. Your job is to independently verify each candidate against the same real evidence, as a genuine second opinion, not a formality.
@@ -913,6 +926,7 @@ async function callIndependentReviewer(
     maxTokens: FINAL_VALIDATION_MAX_TOKENS,
     temperature: 0.1,
     responseFormat: "json",
+    timeoutMs: INDEPENDENT_REVIEWER_TIMEOUT_MS,
   });
   if (primary.ok) return primary;
 
@@ -927,6 +941,7 @@ async function callIndependentReviewer(
     maxTokens: FINAL_VALIDATION_MAX_TOKENS,
     temperature: 0.1,
     responseFormat: "json",
+    timeoutMs: INDEPENDENT_REVIEWER_TIMEOUT_MS,
   });
 }
 

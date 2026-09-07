@@ -115,6 +115,26 @@ describe("OpenRouterProvider", () => {
     await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toMatchObject({ code: "timeout" });
   });
 
+  it("maps a body read aborted after headers arrive to a timeout error, not malformed_response", async () => {
+    // Reproduces a real production failure: fetch() resolves with a 200 and
+    // real headers before the AbortSignal fires, but reading the body then
+    // aborts because the model was still generating. Previously this fell
+    // through a bare catch to "", making JSON.parse("") throw and the whole
+    // thing get reported as "malformed_response ... Raw body: (empty)" — a
+    // real timeout disguised as a different failure with a fabricated body.
+    const timeoutError = new Error("The operation was aborted due to timeout");
+    timeoutError.name = "TimeoutError";
+    const abortedBodyResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: vi.fn().mockRejectedValue(timeoutError),
+    } as unknown as Response;
+    vi.mocked(fetch).mockResolvedValueOnce(abortedBodyResponse);
+
+    await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toMatchObject({ code: "timeout" });
+  });
+
   it("treats an empty completion as a malformed response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { choices: [{ message: { content: "" } }] }));
     await expect(new OpenRouterProvider().complete(baseRequest)).rejects.toMatchObject({ code: "malformed_response" });
