@@ -76,6 +76,19 @@ export type HermesRequest = {
    * being reviewed would defeat the point.
    */
   model?: string;
+  /**
+   * When `model` is set, restricts which provider(s) may be asked to serve
+   * it, tried in the given order — ignored when `model` is not set. A
+   * forced model id is usually only valid on the one provider whose
+   * catalog actually contains it (an OpenRouter-hosted model id is
+   * meaningless to Groq's own catalog, say), so without this the normal
+   * task-routing fallback chain would retry the *same* model string
+   * against a provider that was never going to have it, guaranteeing a
+   * second, wasted failure instead of a genuine fallback. Every other
+   * caller leaves this unset and gets the normal routing-driven
+   * providerOrder, completely unchanged.
+   */
+  modelProviders?: AiProviderName[];
   maxTokens?: number;
   temperature?: number;
   /** Set to "json" for agents that parse the result with src/lib/ai/schema.ts. */
@@ -129,7 +142,12 @@ const USER_SAFE_MESSAGES: Record<AiErrorCode, string> = {
  */
 export async function runHermesCompletion(request: HermesRequest): Promise<HermesResult> {
   const config = getAiConfig();
-  const { providerOrder, preferredProvider } = resolveRouting(request.taskType, config);
+  const routed = resolveRouting(request.taskType, config);
+  // A caller-restricted provider list for a forced model (see HermesRequest.modelProviders)
+  // replaces the normal task-routing chain entirely — it exists specifically to stop that
+  // chain from retrying a provider-specific model id against a provider that never had it.
+  const providerOrder = request.model && request.modelProviders?.length ? request.modelProviders : routed.providerOrder;
+  const preferredProvider = request.model && request.modelProviders?.length ? request.modelProviders[0] : routed.preferredProvider;
 
   const messages: AiMessage[] = [
     { role: "system", content: request.systemPrompt },

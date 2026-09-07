@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
-import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
+import { runHermesCompletion, type HermesResult } from "@/lib/ai/hermes/hermes-service";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
 
@@ -787,12 +787,22 @@ async function extractProspectsFromResults(
 // resolves to OpenRouter's configured model — Nemotron 3 Ultra, unless
 // overridden. This call passes an explicit model override
 // (INDEPENDENT_REVIEWER_MODEL, below) all the way down to the real HTTP
-// request body, so it runs on NousResearch's Hermes 4 70B — a different
-// company's model, different weights, different training — reachable
-// through the same already-configured OpenRouter credentials (no new
-// service, no invented API, no new credential: OPENROUTER_API_KEY is what
-// authorizes this call too). Confirmed live on OpenRouter's own model
-// catalog at implementation time; see the accompanying report for how.
+// request body, so it runs on a NousResearch model — a different company's
+// model, different weights, different training — reachable through the
+// same already-configured OpenRouter credentials (no new service, no
+// invented API, no new credential: OPENROUTER_API_KEY is what authorizes
+// this call too).
+//
+// modelProviders: ["openrouter"] (passed at both call sites below) is
+// deliberate, not incidental: a production incident (see
+// INDEPENDENT_REVIEWER_MODEL's own comment) showed that without it, Hermes
+// service's normal LEAD_DISCOVERY routing chain would retry this same
+// OpenRouter-only model id against Groq next — which has no such model at
+// all — turning one real outage into a guaranteed second failure instead
+// of an actual fallback. Restricting to OpenRouter, and falling back to a
+// second, different OpenRouter-hosted Hermes model instead (see
+// runFinalHermesValidation), is what makes this a real, deterministic
+// fallback chain rather than a doomed retry.
 //
 // Its output is still not trusted blindly: finalizeDiscoveryResult runs
 // unchanged immediately afterward, re-checking every candidate this stage
@@ -807,15 +817,40 @@ async function extractProspectsFromResults(
 // ---------------------------------------------------------------------------
 
 /**
- * NousResearch's Hermes 4 70B on OpenRouter — a real, distinct, currently-
- * listed model (openrouter.ai/models), unrelated to Nvidia's Nemotron.
+ * NousResearch's Hermes 3 (Llama-3.1 70B) on OpenRouter — a real, distinct,
+ * currently-listed model (openrouter.ai/models), unrelated to Nvidia's
+ * Nemotron and to whatever Groq model LEAD_DISCOVERY's own fallback may be
+ * serving elsewhere in this same run.
+ *
+ * Was "nousresearch/hermes-4-70b" until a live production incident: that
+ * model id is still listed in OpenRouter's catalog, but its one serving
+ * endpoint (Nebius) was confirmed, via OpenRouter's own public
+ * /api/v1/models/{id}/endpoints response, to have 0% uptime over the
+ * preceding 24h — not a renamed/deprecated model id, a dead backend behind
+ * a still-valid id. That silently starved every discovery run of a working
+ * Reviewer for several days (agent_runs/model_usage show zero successful
+ * lead_discovery_hermes_review calls and zero new leads across that
+ * window). Replaced with this model after confirming, the same way, that
+ * its endpoint (DeepInfra) was reporting 100% uptime over both the
+ * preceding 24h and the preceding 30 minutes.
+ *
  * Deliberately hardcoded rather than left to OPENROUTER_MODEL/the routing
  * table: this stage's entire purpose is model independence from whatever
  * the rest of LEAD_DISCOVERY is configured to use, so it must not silently
  * become the same model as the calls it's reviewing just because an env
  * var changed.
  */
-const INDEPENDENT_REVIEWER_MODEL = "nousresearch/hermes-4-70b";
+const INDEPENDENT_REVIEWER_MODEL = "nousresearch/hermes-3-llama-3.1-70b";
+
+/**
+ * Deterministic, explicit second attempt if the primary Reviewer model's
+ * own endpoint is ever down the same way — a second real, distinct,
+ * OpenRouter-hosted Hermes model (confirmed 100% uptime alongside the
+ * primary above), never the Analyst's own model or a different provider.
+ * Tried at most once; if this also fails, runFinalHermesValidation fails
+ * honestly (see its own doc comment) rather than fabricating a review.
+ */
+const INDEPENDENT_REVIEWER_FALLBACK_MODEL = "nousresearch/hermes-4-405b";
 
 const FinalValidationSchema = z.object({ accepted: z.array(ExtractedProspectSchema) });
 
@@ -846,6 +881,56 @@ If none of the candidates hold up under your own independent review, return { "a
 const FINAL_VALIDATION_MAX_TOKENS = EXTRACTION_MAX_TOKENS;
 
 /**
+ * Calls the Independent Reviewer, trying INDEPENDENT_REVIEWER_MODEL first
+ * and INDEPENDENT_REVIEWER_FALLBACK_MODEL exactly once if that fails — a
+ * fixed, two-entry chain, never an open-ended retry, and never a provider
+ * or model this stage doesn't explicitly name. modelProviders: ["openrouter"]
+ * on both attempts is what makes this a real fallback rather than the
+ * production incident this replaced: neither model id exists on any other
+ * configured provider, so letting the normal routing chain retry them
+ * elsewhere would only spend a call on a guaranteed second failure.
+ *
+ * Both attempts are real, separately tracked runHermesCompletion calls —
+ * each gets its own honestly-recorded agent_runs/model_usage row (actual
+ * provider, actual model, actual outcome) via the exact same tracking every
+ * other Hermes call already goes through; nothing here is fabricated or
+ * merged after the fact. If both fail, the caller (runFinalHermesValidation)
+ * fails the same way a single failed attempt always did.
+ */
+async function callIndependentReviewer(
+  organizationId: string | null,
+  systemPrompt: string,
+  userPrompt: string
+): Promise<HermesResult> {
+  const primary = await runHermesCompletion({
+    organizationId,
+    agentType: "lead_discovery_hermes_review",
+    taskType: "LEAD_DISCOVERY",
+    model: INDEPENDENT_REVIEWER_MODEL,
+    modelProviders: ["openrouter"],
+    systemPrompt,
+    userPrompt,
+    maxTokens: FINAL_VALIDATION_MAX_TOKENS,
+    temperature: 0.1,
+    responseFormat: "json",
+  });
+  if (primary.ok) return primary;
+
+  return runHermesCompletion({
+    organizationId,
+    agentType: "lead_discovery_hermes_review",
+    taskType: "LEAD_DISCOVERY",
+    model: INDEPENDENT_REVIEWER_FALLBACK_MODEL,
+    modelProviders: ["openrouter"],
+    systemPrompt,
+    userPrompt,
+    maxTokens: FINAL_VALIDATION_MAX_TOKENS,
+    temperature: 0.1,
+    responseFormat: "json",
+  });
+}
+
+/**
  * The Independent Hermes Reviewer: a real call to a genuinely different
  * model (see INDEPENDENT_REVIEWER_MODEL above) than the Nemotron calls
  * above it, reviewing those calls' own extracted candidates against the
@@ -855,6 +940,12 @@ const FINAL_VALIDATION_MAX_TOKENS = EXTRACTION_MAX_TOKENS;
  * spend budget to learn nothing, the same reasoning already applied to
  * skipping extraction when a search returns zero hits (see discover()
  * below).
+ *
+ * Never fabricates a review: a failure at either the completion call
+ * (both attempts, see callIndependentReviewer) or JSON parsing returns
+ * ok:false here, which discover() below already treats as a failed
+ * discovery run — this stage cannot silently mark discovery successful
+ * without a real reviewed result to show for it.
  */
 export async function runFinalHermesValidation(
   criteria: DiscoveryCriteria,
@@ -881,17 +972,7 @@ export async function runFinalHermesValidation(
     JSON.stringify(candidates),
   ].join("\n");
 
-  const result = await runHermesCompletion({
-    organizationId: criteria.organizationId,
-    agentType: "lead_discovery_hermes_review",
-    taskType: "LEAD_DISCOVERY",
-    model: INDEPENDENT_REVIEWER_MODEL,
-    systemPrompt: FINAL_VALIDATION_SYSTEM_PROMPT,
-    userPrompt,
-    maxTokens: FINAL_VALIDATION_MAX_TOKENS,
-    temperature: 0.1,
-    responseFormat: "json",
-  });
+  const result = await callIndependentReviewer(criteria.organizationId, FINAL_VALIDATION_SYSTEM_PROMPT, userPrompt);
 
   if (!result.ok) return { ok: false, message: result.message };
 

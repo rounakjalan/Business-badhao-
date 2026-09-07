@@ -225,7 +225,7 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     // OpenRouter for the third call names a genuinely different model than
     // the first two calls did. Not a different agentType, not a different
     // function name: the literal `model` field of a real network request.
-    expect(openRouterCalls[2].body.model).toBe("nousresearch/hermes-4-70b");
+    expect(openRouterCalls[2].body.model).toBe("nousresearch/hermes-3-llama-3.1-70b");
     expect(openRouterCalls[2].body.model).not.toBe(DEFAULT_OPENROUTER_MODEL);
     expect(openRouterCalls[2].body.model).not.toBe(openRouterCalls[0].body.model);
     expect(openRouterCalls[2].body.model).not.toBe(openRouterCalls[1].body.model);
@@ -304,7 +304,7 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     // and it still requests a genuinely different model even when the
     // evidence came from Exa rather than Tavily.
     expect(openRouterCalls).toHaveLength(3);
-    expect(openRouterCalls[2].body.model).toBe("nousresearch/hermes-4-70b");
+    expect(openRouterCalls[2].body.model).toBe("nousresearch/hermes-3-llama-3.1-70b");
     expect(openRouterCalls[2].body.model).not.toBe(openRouterCalls[1].body.model);
     const finalValidationPrompt = String((openRouterCalls[2].body.messages as { content: string }[])[1].content);
     expect(finalValidationPrompt).toContain(exaHit.url);

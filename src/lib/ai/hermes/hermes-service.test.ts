@@ -258,6 +258,59 @@ describe("runHermesCompletion", () => {
     expect(groqProvider.complete).not.toHaveBeenCalled();
   });
 
+  it("modelProviders restricts a forced-model request to exactly the given provider(s) — never the normal fallback chain, even when AI_FALLBACK_PROVIDER is configured", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+
+    const failingOpenRouter = fakeProvider({
+      name: "openrouter",
+      complete: vi.fn().mockRejectedValue(new AiError({ code: "model_not_found", provider: "openrouter", message: "model not found" })),
+    });
+    const groqProvider = fakeProvider({ name: "groq", complete: vi.fn() });
+    vi.mocked(createProvider).mockImplementation((name) => (name === "openrouter" ? failingOpenRouter : groqProvider));
+
+    const result = await runHermesCompletion({
+      ...baseRequest,
+      model: "nousresearch/hermes-3-llama-3.1-70b",
+      modelProviders: ["openrouter"],
+    });
+
+    // This is the exact production incident: a model id that only exists on
+    // OpenRouter must never be retried against Groq's catalog just because
+    // Groq is configured as this deployment's general fallback provider.
+    expect(result).toEqual({ ok: false, code: "model_not_found", message: expect.any(String) });
+    expect(createProvider).toHaveBeenCalledTimes(1);
+    expect(createProvider).toHaveBeenCalledWith("openrouter");
+    expect(groqProvider.complete).not.toHaveBeenCalled();
+  });
+
+  it("modelProviders is ignored when no model override is set — a caller can't accidentally restrict normal routing by passing it alone", async () => {
+    process.env.AI_FALLBACK_PROVIDER = "groq";
+    const openRouterProvider = fakeProvider({ complete: vi.fn().mockResolvedValue(fakeResponse()) });
+    vi.mocked(createProvider).mockReturnValue(openRouterProvider);
+
+    const result = await runHermesCompletion({ ...baseRequest, modelProviders: ["groq"] });
+
+    expect(result.ok).toBe(true);
+    expect(createProvider).toHaveBeenCalledWith("openrouter");
+  });
+
+  it("accurately records the actual provider and model that served a modelProviders-restricted request", async () => {
+    const completeSpy = vi.fn().mockResolvedValue(fakeResponse({ provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" }));
+    vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));
+
+    const result = await runHermesCompletion({
+      ...baseRequest,
+      model: "nousresearch/hermes-3-llama-3.1-70b",
+      modelProviders: ["openrouter"],
+    });
+
+    expect(result).toEqual({ ok: true, text: "a real suggestion", provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" });
+    const completionUpdate = updateSpy.mock.calls.find(([payload]) => (payload as { status?: string }).status === "completed");
+    expect(completionUpdate?.[0]).toMatchObject({
+      output: expect.objectContaining({ provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b", usedFallback: false }),
+    });
+  });
+
   it("records the task type and routing decision on the agent_runs row", async () => {
     vi.mocked(createProvider).mockReturnValue(fakeProvider());
 

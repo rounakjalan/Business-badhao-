@@ -128,7 +128,7 @@ function passThroughFinalValidation(request: { userPrompt: string }) {
     ok: true as const,
     text: JSON.stringify({ accepted: JSON.parse(candidatesJson) }),
     provider: "openrouter" as const,
-    model: "nousresearch/hermes-4-70b",
+    model: "nousresearch/hermes-3-llama-3.1-70b",
   });
 }
 
@@ -738,12 +738,16 @@ describe("lead discovery", () => {
         ok: true,
         text: JSON.stringify({ accepted: [candidate()] }),
         provider: "openrouter",
-        model: "nousresearch/hermes-4-70b",
+        model: "nousresearch/hermes-3-llama-3.1-70b",
       });
 
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
       expect(result).toEqual({ ok: true, candidates: [candidate()] });
+      // Exactly once: the primary Reviewer model answered, so the
+      // deterministic fallback attempt is never made — a real second
+      // request only ever happens after a real failure (see the fallback
+      // describe block below).
       expect(runHermesCompletion).toHaveBeenCalledTimes(1);
       const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
       // Independence proof (not just a naming convention): this call
@@ -751,8 +755,9 @@ describe("lead discovery", () => {
       // other two calls get by default — see the model-independence
       // describe block below for the direct A/B comparison against the
       // Nemotron model string.
-      expect(call.model).toBe("nousresearch/hermes-4-70b");
+      expect(call.model).toBe("nousresearch/hermes-3-llama-3.1-70b");
       expect(call.model).not.toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+      expect(call.modelProviders).toEqual(["openrouter"]);
       expect(call.agentType).toBe("lead_discovery_hermes_review");
       expect(call.userPrompt).toContain(realHit.url);
       expect(call.userPrompt).toContain(realHit.content);
@@ -774,7 +779,7 @@ describe("lead discovery", () => {
         ok: true,
         text: JSON.stringify({ accepted: [kept] }),
         provider: "openrouter",
-        model: "nousresearch/hermes-4-70b",
+        model: "nousresearch/hermes-3-llama-3.1-70b",
       });
 
       const telemetry = newTelemetry();
@@ -785,20 +790,125 @@ describe("lead discovery", () => {
       expect(telemetry.finalValidationAccepted).toBe(1);
     });
 
-    it("propagates a Hermes-level failure honestly, never fabricating an accepted list", async () => {
-      vi.mocked(runHermesCompletion).mockResolvedValueOnce({ ok: false, code: "provider_unavailable", message: "The AI provider is temporarily unavailable." });
+    it("propagates a failure of BOTH Reviewer attempts honestly, never fabricating an accepted list", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "The configured AI model is unavailable." })
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "The configured AI model is unavailable." });
+
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      expect(result.ok).toBe(false);
+      // Never silently marks discovery successful without a real reviewed
+      // result — this is exactly the production incident this fix
+      // addresses, reproduced: both attempts fail, so validation fails.
+      expect(runHermesCompletion).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns an honest failure (not a fabricated accept) on a malformed model response", async () => {
+      vi.mocked(runHermesCompletion).mockResolvedValueOnce({ ok: true, text: "not json", provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" });
 
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
       expect(result.ok).toBe(false);
     });
+  });
 
-    it("returns an honest failure (not a fabricated accept) on a malformed model response", async () => {
-      vi.mocked(runHermesCompletion).mockResolvedValueOnce({ ok: true, text: "not json", provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+  describe("Independent Reviewer deterministic fallback (reproduces the production incident and its fix)", () => {
+    const realHit = { title: "Sharma Boutique — Jaipur", url: "https://sharmaboutique.example/about", content: "Sharma Boutique is a family-run clothing store in Jaipur." };
+    const groundingMap = () => new Map([["sharmaboutique.example/about", realHit]]);
+
+    function candidate(overrides: Partial<DiscoveredProspect> = {}): DiscoveredProspect {
+      return {
+        companyName: "Sharma Boutique",
+        website: "sharmaboutique.example",
+        location: "Jaipur",
+        industry: "Retail",
+        businessType: "Boutique",
+        email: null,
+        phone: null,
+        matchedIcpCriteria: ["location: Jaipur"],
+        evidenceSnippet: "Sharma Boutique is a family-run clothing store in Jaipur.",
+        sourceUrl: realHit.url,
+        searchQuery: "retail store owners in Jaipur",
+        ...overrides,
+      };
+    }
+
+    it("a 404/model-not-found on the primary Reviewer model falls through to the named fallback model — and succeeds", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "The configured AI model is unavailable." })
+        .mockResolvedValueOnce({
+          ok: true,
+          text: JSON.stringify({ accepted: [candidate()] }),
+          provider: "openrouter",
+          model: "nousresearch/hermes-4-405b",
+        });
+
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      expect(result).toEqual({ ok: true, candidates: [candidate()] });
+      expect(runHermesCompletion).toHaveBeenCalledTimes(2);
+
+      const [firstCall, secondCall] = vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0]);
+      expect(firstCall.model).toBe("nousresearch/hermes-3-llama-3.1-70b");
+      expect(secondCall.model).toBe("nousresearch/hermes-4-405b");
+      // The fallback must never become the Analyst's own model, and must
+      // never repeat the primary's model either — a real second, distinct
+      // attempt, not a retry of the same doomed request.
+      expect(secondCall.model).not.toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+      expect(secondCall.model).not.toBe(firstCall.model);
+    });
+
+    it("both attempts are restricted to modelProviders: [openrouter] — this is what stops the exact production incident (a forced model retried against a provider whose catalog never had it) from recurring", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "unavailable" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ accepted: [] }), provider: "openrouter", model: "nousresearch/hermes-4-405b" });
+
+      await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+
+      for (const call of vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0])) {
+        expect(call.modelProviders).toEqual(["openrouter"]);
+      }
+    });
+
+    it("never retries more than once — a fallback failure ends the attempt instead of looping", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "primary down" })
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "fallback down too" });
 
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
       expect(result.ok).toBe(false);
+      expect(runHermesCompletion).toHaveBeenCalledTimes(2);
+    });
+
+    it("a successful fallback result reaches the Deterministic Validator exactly like a successful primary result would", async () => {
+      const kept = candidate();
+      const rejectedByEvidence = candidate({ companyName: "Fake Co", sourceUrl: "https://not-a-real-evidence-url.example" });
+
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "primary down" })
+        .mockResolvedValueOnce({
+          ok: true,
+          text: JSON.stringify({ accepted: [kept, rejectedByEvidence] }),
+          provider: "openrouter",
+          model: "nousresearch/hermes-4-405b",
+        });
+
+      const reviewResult = await runFinalHermesValidation(baseCriteria, [kept, rejectedByEvidence], groundingMap(), newTelemetry());
+      expect(reviewResult.ok).toBe(true);
+      if (!reviewResult.ok) return;
+
+      // finalizeDiscoveryResult is the Deterministic Validator — it must
+      // still independently re-check the Reviewer's own output against
+      // real evidence, exactly as it would for a primary-model result.
+      // rejectedByEvidence cites a URL that was never in the real evidence
+      // map, so the Validator must drop it even though the (fallback)
+      // Reviewer accepted it.
+      const finalized = finalizeDiscoveryResult(baseCriteria, reviewResult.candidates, groundingMap(), [], [], newTelemetry());
+      expect(finalized.ok).toBe(true);
+      if (!finalized.ok) return;
+      expect(finalized.prospects.map((p) => p.companyName)).toEqual([kept.companyName]);
     });
   });
 
@@ -809,7 +919,7 @@ describe("lead discovery", () => {
       vi.mocked(runHermesCompletion)
         .mockResolvedValueOnce({ ok: true, text: JSON.stringify(QUERIES_RESPONSE), provider: "openrouter", model: "nvidia/nemotron-3-ultra-550b-a55b:free" })
         .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "openrouter", model: "nvidia/nemotron-3-ultra-550b-a55b:free" })
-        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ accepted: EXTRACTION_RESPONSE.prospects }), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ accepted: EXTRACTION_RESPONSE.prospects }), provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" });
 
       vi.stubGlobal("fetch", mockFetchOk({ [QUERIES_RESPONSE.queries[0]]: SEARCH_HITS }));
 
@@ -826,7 +936,10 @@ describe("lead discovery", () => {
       // The Reviewer: an explicit, different model — not inferred from a
       // function name or an agentType string, but the literal field this
       // request will send to the provider layer as its actual model.
-      expect(calls[2].model).toBe("nousresearch/hermes-4-70b");
+      expect(calls[2].model).toBe("nousresearch/hermes-3-llama-3.1-70b");
+      // And it can never accidentally become the Analyst's own model.
+      expect(calls[2].model).not.toBe(calls[0].model);
+      expect(calls[2].model).not.toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
     });
   });
 
