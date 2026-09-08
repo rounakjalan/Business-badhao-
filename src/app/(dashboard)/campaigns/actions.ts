@@ -16,7 +16,7 @@ import {
   type CampaignDiscoverySchedule,
 } from "@/lib/pipeline/discovery-schedule";
 import { runBatchedDiscovery, type BatchDiscoveryStopReason, type DiscoveredProspectSummary } from "@/lib/pipeline/discovery-batch";
-import { finishPendingLeads, type OutreachSweepSummary } from "@/lib/pipeline/scheduled-pipeline";
+import { createLeadWorkerPool, type OutreachSweepSummary } from "@/lib/pipeline/lead-worker-pool";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json, TablesUpdate } from "@/types/database.types";
@@ -260,22 +260,28 @@ export async function updateCampaign(
 // Lead Discovery orchestration. Discovery's own job (src/lib/ai/agents/discovery.ts)
 // ends at a list of DiscoveredProspect for ONE search pass — runBatchedDiscovery
 // (discovery-batch.ts) calls it as many times as it takes to reach a real
-// target, persisting each batch's valid prospects/leads immediately. Research
-// and qualification for newly discovered leads then reuse finishPendingLeads
-// (scheduled-pipeline.ts) — the exact same mechanism the hourly cron sweep
-// already uses — instead of a bespoke synchronous loop:
+// target, persisting each batch's valid prospects/leads immediately.
 //
-//   batched discovery -> persist prospects/leads -> finishPendingLeads
-//     (Lead Research -> Qualification -> automatic WhatsApp outreach)
+// Research starts the moment a lead is persisted, not after the whole
+// discovery run finishes: a bounded worker pool (lead-worker-pool.ts) is
+// created before discovery even begins, discovery's own onLeadPersisted
+// callback feeds it leads live, and it runs concurrently with whatever
+// batch discovery calls next.
 //
-// Qualification never runs on discovery evidence alone. finishPendingLeads
-// calls the exact same shared per-lead functions
-// (researchLead/qualifyLead, lib/pipeline/lead-pipeline.ts) that back the
-// manual "Run AI Research"/"Run Qualification" buttons, so a newly
-// discovered lead is scored only once real research evidence exists for it.
-// A lead this run's own time budget doesn't reach stays "pending" — not lost,
-// not silently dropped — and the next hourly cron tick (or a human opening
-// the lead) finishes it, exactly like any other pending lead.
+//   batched discovery ──┬─→ persist lead A ─→ pool.enqueue(A) ─┐
+//                        ├─→ persist lead B ─→ pool.enqueue(B) ─┤ concurrent
+//                        └─→ persist lead C ─→ pool.enqueue(C) ─┘ (bounded)
+//                                                                    ↓
+//                              Research → Qualification → automatic outreach
+//
+// Qualification never runs on discovery evidence alone. The pool calls the
+// exact same shared per-lead functions (researchLead/qualifyLead,
+// lib/pipeline/lead-pipeline.ts) that back the manual "Run AI Research"/
+// "Run Qualification" buttons, so a newly discovered lead is scored only
+// once real research evidence exists for it. A lead this run's own shared
+// time budget doesn't reach stays "pending" — not lost, not silently
+// dropped — and the next hourly cron tick (or a human opening the lead)
+// finishes it, exactly like any other pending lead.
 // ---------------------------------------------------------------------------
 
 export type { DiscoveredProspectSummary };
@@ -297,11 +303,11 @@ export type LeadDiscoveryActionResult =
   | { ok: false; code: "unauthorized" | "no_icp" | "already_running" | "not_configured" | "provider_error"; message: string };
 
 export type DiscoveryResearchSummary = {
-  /** Leads this run actually finished researching + attempting qualification for (finishPendingLeads' own "finished" count). */
+  /** Leads this run actually finished researching + attempting qualification for (the worker pool's own "finished" count). */
   finished: number;
   /** Leads this run genuinely attempted and failed — recorded, not retried automatically; see the lead's own research_error. */
   failed: number;
-  /** Still "pending" after this run — some just discovered, possibly some older — picked up automatically by the next hourly cron tick, or by opening the lead. */
+  /** Still "pending"/"researching" once this run's own shared time budget ran out — some just discovered, possibly some older — picked up automatically by the next hourly cron tick, or by opening the lead. */
   stillPending: number;
   outreach: OutreachSweepSummary;
 };
@@ -392,6 +398,26 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
 
   const businessContext = await getBusinessContext(currentOrg.organizationId);
 
+  // Bounded worker pool, created before discovery even starts — see
+  // lead-worker-pool.ts. Discovery's own onLeadPersisted callback feeds it
+  // leads live as each one is saved, so research on lead A is already
+  // running while discovery is still out fetching/persisting lead B/C, not
+  // queued up to be worked through only after the whole run finishes.
+  // Seeded with this campaign's existing backlog too (leads an earlier run's
+  // own budget didn't reach), so a fresh Start Discovery press also makes
+  // progress on those, not just what it discovers this time.
+  const pool = createLeadWorkerPool({ supabase, organizationId: currentOrg.organizationId, startedAtMs, budgetMs: TOTAL_REQUEST_BUDGET_MS });
+  const { data: backlogLeads } = await supabase
+    .from("leads")
+    .select("id")
+    .eq("organization_id", currentOrg.organizationId)
+    .eq("campaign_id", campaignId)
+    .eq("qualification_status", "pending")
+    .neq("research_status", "failed")
+    .neq("research_status", "researching")
+    .order("created_at", { ascending: true });
+  for (const lead of backlogLeads ?? []) pool.enqueue(lead.id);
+
   // Batched (see discovery-batch.ts): keeps calling discover() — each time
   // asking Nemotron/Groq to avoid the queries already tried — until it hits
   // a real target, runs out of its own time slice, or two batches in a row
@@ -400,7 +426,10 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   // passed through here (unlike the scheduled path) — this call already runs
   // inside a real signed-in session, so the default cookie-based client
   // already satisfies RLS for every AI stage's own telemetry.
-  const discoveryBudgetMs = Math.min(TOTAL_REQUEST_BUDGET_MS * 0.55, TOTAL_REQUEST_BUDGET_MS - 30_000);
+  //
+  // Discovery and research now share one clock/budget rather than splitting
+  // it into two sequential phases — they are concurrent workloads against
+  // one shared deadline, not competitors for separate slices of it.
   const result = await runBatchedDiscovery({
     supabase,
     organizationId: currentOrg.organizationId,
@@ -410,9 +439,16 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     icpCriteria,
     businessContext: selectDiscoveryContext(businessContext),
     startedAtMs,
-    budgetMs: discoveryBudgetMs,
+    budgetMs: TOTAL_REQUEST_BUDGET_MS,
     agentRun,
+    onLeadPersisted: (leadId) => pool.enqueue(leadId),
   });
+
+  // Whatever the pool couldn't start or finish within the shared budget is
+  // left exactly as researchLead/qualifyLead left it (or untouched, if
+  // never reached) — not lost, picked up automatically by the next hourly
+  // cron tick, or by opening the lead.
+  await pool.drain();
 
   if (!result.ok) {
     await completeAgentRun(agentRun, "failed", { code: result.code, message: result.message } as unknown as Json);
@@ -420,21 +456,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     return { ok: false, code: result.code, message: result.message };
   }
 
-  // Whatever time the batching phase didn't use goes to actually researching
-  // and qualifying what it found — reusing finishPendingLeads, the exact
-  // same mechanism the hourly cron sweep already relies on, instead of a
-  // second, bespoke synchronous loop. No per-campaign lead cap here (unlike
-  // the cron's own conservative default) — the real backstop is the time
-  // budget inside finishPendingLeads itself; whatever it doesn't reach stays
-  // "pending" and is picked up automatically by the next hourly cron tick.
-  const research = await finishPendingLeads(
-    supabase,
-    currentOrg.organizationId,
-    campaignId,
-    startedAtMs,
-    TOTAL_REQUEST_BUDGET_MS,
-    Number.MAX_SAFE_INTEGER
-  );
+  const research = { finished: pool.summary.finished, failed: pool.summary.failed, outreach: pool.summary.outreach };
 
   const { count: stillPending } = await supabase
     .from("leads")

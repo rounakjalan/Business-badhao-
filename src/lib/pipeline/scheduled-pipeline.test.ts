@@ -76,9 +76,15 @@ function createFakeSupabase(tables: Tables) {
         return inserted;
       }
       if (pendingUpdate) {
+        // Matches (the WHERE clause) are decided once against pre-update
+        // row state, exactly like a real UPDATE ... RETURNING — not
+        // re-evaluated against the just-written values, which would hide
+        // an update whose own new value no longer satisfies its own WHERE
+        // (e.g. UPDATE ... SET status = 'x' WHERE status != 'x').
         const update = pendingUpdate;
+        const matched = tables[table].filter((row) => filters.every((f) => f(row)));
         tables[table] = tables[table].map((row) => (filters.every((f) => f(row)) ? { ...row, ...update } : row));
-        return tables[table].filter((row) => filters.every((f) => f(row)));
+        return matched.map((row) => ({ ...row, ...update }));
       }
       let rows = tables[table].filter((row) => filters.every((f) => f(row)));
       if (orderSpec) {
@@ -657,7 +663,11 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     expect(goodLead.qualification_status).toBe("qualifying");
   });
 
-  it("scheduled discovery (runDiscoveryForCampaign) followed by finishPendingLeads — exactly what the cron route does in one sweep — automatically researches the newly discovered leads with no button pressed", async () => {
+  it("runDiscoveryForCampaign itself already researches and qualifies the leads it just discovered — via its own concurrent worker pool, not deferred to a later finishPendingLeads pass", async () => {
+    // stubRealPipeline already answers every stage's real system prompt —
+    // discovery's own queries/extraction/review AND researchLead's/
+    // qualifyLead's — because the pool now runs those DURING this call,
+    // concurrently with discovery's own batches, not only afterward.
     stubRealPipeline();
     const tables = seedTables();
     const supabase = createFakeSupabase(tables);
@@ -665,14 +675,20 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     const discovered = await runDiscoveryForCampaign(supabase, "org-1", "campaign-1", Date.now(), 240_000);
     expect(discovered.newLeads).toBe(2);
 
-    // Same call the cron route's pass 3 makes right after discovery, for
-    // the same campaign, in the same sweep.
+    // Already researched and qualified — no separate call needed.
+    const leads = tables.leads as (Row & { research_status: string; qualification_status: string })[];
+    expect(leads).toHaveLength(2);
+    expect(leads.every((l) => l.research_status === "completed")).toBe(true);
+    expect(leads.every((l) => l.qualification_status !== "pending")).toBe(true);
+    expect(tables.lead_research).toHaveLength(2);
+
+    // The cron route's pass 3 (finishPendingLeads, right after discovery in
+    // the same sweep) correctly finds nothing left to do — the pool inside
+    // runDiscoveryForCampaign already reached both leads within the shared
+    // budget, not merely started them.
     stubResearchAndQualification();
     const finished = await finishPendingLeads(supabase, "org-1", "campaign-1", Date.now(), 60_000);
-
-    expect(finished).toEqual({ finished: 2, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
-    const leads = tables.leads as (Row & { research_status: string })[];
-    expect(leads.every((l) => l.research_status === "completed")).toBe(true);
+    expect(finished).toEqual({ finished: 0, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     expect(tables.lead_research).toHaveLength(2);
   });
 

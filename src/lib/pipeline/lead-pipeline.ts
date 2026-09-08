@@ -111,12 +111,27 @@ export async function researchLead(
   const context = await loadLeadContext(supabase, leadId, organizationId);
   if (!context) return { ok: false, message: "Lead not found." };
 
-  // Marks the lead as actively being researched before the (potentially
-  // slow) AI call, so a page load mid-run — or the automatic pipeline
-  // crashing between here and the write below — shows "Researching" rather
-  // than the stale prior state. Best-effort: a tracking write failing here
-  // must never block the research itself.
-  await supabase.from("leads").update({ research_status: "researching" }).eq("id", leadId).eq("organization_id", organizationId);
+  // Atomic claim: this both marks the lead as actively being researched
+  // (so a page load mid-run shows "Researching" rather than stale prior
+  // state) AND is the sole guard against two callers researching the same
+  // lead at once — a worker-pool job and a concurrent manual "Run AI
+  // Research" click, or two overlapping automatic sweeps. Postgres
+  // serializes concurrent UPDATEs to the same row, so of two simultaneous
+  // callers only one ever gets a row back here; the other sees the row
+  // already flipped to "researching" by the time its own WHERE clause is
+  // evaluated and correctly claims nothing.
+  const { data: claimed } = await supabase
+    .from("leads")
+    .update({ research_status: "researching" })
+    .eq("id", leadId)
+    .eq("organization_id", organizationId)
+    .neq("research_status", "researching")
+    .select("id")
+    .maybeSingle();
+
+  if (!claimed) {
+    return { ok: false, message: "This lead is already being researched.", code: "already_in_progress" };
+  }
 
   const businessContext = await getBusinessContext(organizationId, supabase);
 

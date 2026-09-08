@@ -4,8 +4,10 @@ import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
 import { isDiscoveryDue, markDiscoveryFinished, markDiscoveryRunning } from "@/lib/pipeline/discovery-schedule";
 import { runBatchedDiscovery } from "@/lib/pipeline/discovery-batch";
-import { qualifyLead, researchLead, sendAutomaticWhatsAppOutreach } from "@/lib/pipeline/lead-pipeline";
+import { createLeadWorkerPool, type OutreachSweepSummary } from "@/lib/pipeline/lead-worker-pool";
 import type { Database, Json } from "@/types/database.types";
+
+export { emptyOutreachSummary, addOutreachSummary, type OutreachSweepSummary } from "@/lib/pipeline/lead-worker-pool";
 
 type Client = SupabaseClient<Database>;
 
@@ -21,34 +23,6 @@ export type PipelineRunSummary = {
   skipped: { campaignId: string; reason: string }[];
   outreach: OutreachSweepSummary;
 };
-
-/**
- * Tallies what selectOutreachChannel/sendAutomaticWhatsAppOutreach actually
- * did across every qualified lead this run touched — never a claim that a
- * message was delivered, only what this deployment attempted and what Meta
- * (or the eligibility check) actually reported back. gmailManualPending
- * counts leads left for a human to send Gmail outreach to manually (this
- * automatic sweep never sends email itself); noChannelAvailable counts
- * leads with no usable channel at all right now (e.g. no phone, no
- * connected account) — never silently dropped, always one of these buckets.
- */
-export type OutreachSweepSummary = {
-  whatsappSent: number;
-  whatsappFailed: number;
-  gmailManualPending: number;
-  noChannelAvailable: number;
-};
-
-export function emptyOutreachSummary(): OutreachSweepSummary {
-  return { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 };
-}
-
-export function addOutreachSummary(into: OutreachSweepSummary, from: OutreachSweepSummary) {
-  into.whatsappSent += from.whatsappSent;
-  into.whatsappFailed += from.whatsappFailed;
-  into.gmailManualPending += from.gmailManualPending;
-  into.noChannelAvailable += from.noChannelAvailable;
-}
 
 /**
  * Don't re-discover a campaign that was searched minutes ago — a manual run
@@ -173,6 +147,14 @@ function outOfTime(startedAtMs: number, budgetMs: number, reserveMs = 55_000) {
  * available, WhatsApp rejected the send, generation failed) never counts
  * against `failed` here — qualification itself succeeded; outreach's own
  * outcome is tallied separately in the returned outreach summary.
+ *
+ * Runs the fetched leads through a bounded worker pool (lead-worker-pool.ts)
+ * rather than one at a time, so this sweep gets through several times as
+ * many leads in the same time budget. A lead already 'researching' — a
+ * worker-pool job from this very run's own runDiscoveryForCampaign call
+ * (see below) that is still in flight — is excluded from the query
+ * entirely, so this never starts a second, wasted attempt at it; researchLead's
+ * own atomic claim is the backstop if one somehow slips through anyway.
  */
 export async function finishPendingLeads(
   supabase: Client,
@@ -185,62 +167,27 @@ export async function finishPendingLeads(
    * cron's own conservative ceiling; a caller with a bigger, one-off budget
    * right now (the manual "Start Discovery" press, see
    * startLeadDiscoveryAction) can raise this — the real backstop against
-   * running long either way is the outOfTime check in the loop below, not
-   * this count.
+   * running long either way is the pool's own time budget, not this count.
    */
-  maxLeads: number = MAX_LEADS_FINISHED_PER_CAMPAIGN
+  maxLeads: number = MAX_LEADS_FINISHED_PER_CAMPAIGN,
+  concurrency?: number
 ): Promise<{ finished: number; failed: number; outreach: OutreachSweepSummary }> {
   const { data: pending } = await supabase
     .from("leads")
-    .select("id, research_status")
+    .select("id")
     .eq("organization_id", organizationId)
     .eq("campaign_id", campaignId)
     .eq("qualification_status", "pending")
     .neq("research_status", "failed")
+    .neq("research_status", "researching")
     .order("created_at", { ascending: true })
     .limit(maxLeads);
 
-  let finished = 0;
-  let failed = 0;
-  const outreach = emptyOutreachSummary();
+  const pool = createLeadWorkerPool({ supabase, organizationId, startedAtMs, budgetMs, concurrency });
+  for (const lead of pending ?? []) pool.enqueue(lead.id);
+  await pool.drain();
 
-  for (const lead of pending ?? []) {
-    if (outOfTime(startedAtMs, budgetMs)) break;
-
-    if (lead.research_status !== "completed") {
-      const research = await researchLead(supabase, organizationId, lead.id);
-      if (!research.ok) {
-        failed += 1;
-        continue;
-      }
-    }
-
-    const qualification = await qualifyLead(supabase, organizationId, lead.id);
-    if (!qualification.ok) {
-      failed += 1;
-      continue;
-    }
-    finished += 1;
-
-    if (qualification.qualification.recommendedStatus !== "qualified") continue;
-
-    const outcome = await sendAutomaticWhatsAppOutreach(supabase, organizationId, lead.id);
-    if (outcome.attempted) {
-      if (outcome.ok) outreach.whatsappSent += 1;
-      else outreach.whatsappFailed += 1;
-    } else if (outcome.channel === "gmail_manual") {
-      outreach.gmailManualPending += 1;
-    } else if (outcome.reason !== "already_contacted" && outcome.reason !== "already_sent" && outcome.reason !== "not_found") {
-      // Every other skip reason (no phone, WhatsApp not connected/no
-      // template, campaign opted out, max attempts reached, generation
-      // failed) means this lead genuinely has no automatic channel right
-      // now — worth surfacing. A lead already contacted/already sent isn't
-      // a gap to report; it's this function correctly doing nothing again.
-      outreach.noChannelAvailable += 1;
-    }
-  }
-
-  return { finished, failed, outreach };
+  return { finished: pool.summary.finished, failed: pool.summary.failed, outreach: pool.summary.outreach };
 }
 
 /**
@@ -249,10 +196,14 @@ export async function finishPendingLeads(
  * same cross-run deduplication, same agent-run record — so a scheduled run
  * is indistinguishable from a manual one in the campaign's history.
  *
- * Newly created leads are deliberately left at "pending" rather than
- * researched inline. The next scheduled pass picks them up through
- * finishPendingLeads, which keeps any single invocation inside the
- * platform's function time limit however many leads a search turns up.
+ * Each newly created lead starts real research the moment it is persisted
+ * (see runBatchedDiscovery's onLeadPersisted), via a bounded worker pool
+ * that runs concurrently with whatever batch discovery calls next — not
+ * queued up and worked through only after this whole function returns.
+ * Whatever the pool's own time budget doesn't reach by the time this
+ * function is ready to return stays "pending"/"researching" exactly as
+ * before, for finishPendingLeads (called separately, see the cron route) to
+ * pick up on the very next pass.
  */
 export async function runDiscoveryForCampaign(
   supabase: Client,
@@ -315,6 +266,15 @@ export async function runDiscoveryForCampaign(
   // client; without threading it further, everything under it (query
   // generation, extraction, the Independent Reviewer) previously did not.
   //
+  // Bounded worker pool, created before discovery even starts: discovery's
+  // own onLeadPersisted callback feeds it leads live, so research on lead A
+  // is already running while discovery is still out fetching lead B/C — see
+  // lead-worker-pool.ts. Shares this same clock/budget rather than a
+  // separate slice of it: the two are no longer sequential phases
+  // competing for one budget, but concurrent workloads against one shared
+  // deadline.
+  const pool = createLeadWorkerPool({ supabase, organizationId, startedAtMs, budgetMs });
+
   // Batched (see discovery-batch.ts): keeps calling discover() — each time
   // asking Nemotron/Groq to avoid the queries already tried — until it hits
   // a real target, runs out of its own time slice, or two batches in a row
@@ -332,7 +292,13 @@ export async function runDiscoveryForCampaign(
     budgetMs,
     agentRun,
     trackingClient: supabase,
+    onLeadPersisted: (leadId) => pool.enqueue(leadId),
   });
+
+  // Whatever the pool couldn't start or finish within the shared budget is
+  // left exactly as researchLead/qualifyLead left it (or untouched, if
+  // never reached) for finishPendingLeads to pick up on the next pass.
+  await pool.drain();
 
   if (!result.ok) {
     await completeAgentRun(
@@ -360,6 +326,7 @@ export async function runDiscoveryForCampaign(
       duplicatesSkipped: result.duplicatesSkipped,
       queriesRun: result.queriesRun,
       queriesFailed: result.queriesFailed,
+      research: { finished: pool.summary.finished, failed: pool.summary.failed, outreach: pool.summary.outreach },
       telemetry: result.batchTelemetry,
     } as unknown as Json,
     supabase

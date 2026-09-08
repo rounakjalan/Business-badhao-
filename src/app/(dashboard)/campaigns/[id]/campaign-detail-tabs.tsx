@@ -712,8 +712,10 @@ function DiscoveryRunSummaryView({
           </div>
           {research.stillPending > 0 ? (
             <p className="mt-2 text-xs text-bb-amber">
-              {research.stillPending} {research.stillPending === 1 ? "lead is" : "leads are"} still waiting for research —
-              picked up automatically within the hour, or open the lead now and use Run Research.
+              Research starts on each lead the moment it&apos;s discovered — {research.stillPending}{" "}
+              {research.stillPending === 1 ? "lead" : "leads"} simply didn&apos;t finish within this run&apos;s own time budget.
+              Still actively queued for research; if it stays pending, the next automatic sweep (within the hour) or opening the
+              lead and using Run Research will pick it up.
             </p>
           ) : null}
           {research.failed > 0 ? (

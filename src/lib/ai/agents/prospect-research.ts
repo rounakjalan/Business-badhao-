@@ -40,7 +40,11 @@ export type DiscoveryEvidence = {
 
 export type ProspectResearchResult =
   | { ok: true; research: ProspectResearch }
-  | { ok: false; message: string };
+  // code is set only for the specific, expected "someone else is already
+  // researching this lead right now" case (see researchLead's own atomic
+  // claim in lead-pipeline.ts) — never for a genuine research failure, so a
+  // caller can tell the two apart without string-matching `message`.
+  | { ok: false; message: string; code?: "already_in_progress" };
 
 const SYSTEM_PROMPT = `You are the AI research agent inside Business Badhao, a customer-acquisition CRM. You are given whatever information is already on file about a lead — which may include real DISCOVERY EVIDENCE: an actual excerpt from the web page that surfaced this prospect, its source URL, and which Ideal Customer Profile criteria it was judged to match — plus this business's own Business Knowledge (its real profile, products/services, and differentiators). You have NO web access of your own and cannot look anything up beyond what's given.
 

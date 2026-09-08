@@ -190,6 +190,16 @@ export type BatchDiscoveryParams = {
    */
   agentRun: AgentRunHandle | null;
   trackingClient?: Client;
+  /**
+   * Called synchronously right after a prospect is successfully persisted
+   * as a real lead — before the next prospect in this same batch is even
+   * persisted, let alone the next batch's discover() call. This is what
+   * lets research start the moment a lead exists rather than waiting for
+   * the whole run to finish: the caller passes a bounded worker pool's own
+   * enqueue (see lead-worker-pool.ts), which returns immediately without
+   * awaiting the research itself, so this loop is never slowed down by it.
+   */
+  onLeadPersisted?: (leadId: string) => void;
 };
 
 /**
@@ -204,10 +214,13 @@ export type BatchDiscoveryParams = {
  * (DiscoveryCriteria.excludeQueries) so a second/third batch searches
  * genuinely different ground instead of re-running the same 3-5 queries.
  *
- * This function owns discovery + persistence only. It does not research or
- * qualify anything — that is finishPendingLeads' job, called separately by
- * the caller with whatever budget remains (see campaigns/actions.ts and
- * scheduled-pipeline.ts), exactly as it already was before batching existed.
+ * This function owns discovery + persistence only — it never calls
+ * researchLead/qualifyLead itself. Research is triggered via the optional
+ * onLeadPersisted callback (see BatchDiscoveryParams), which the caller
+ * wires to a bounded worker pool's enqueue (lead-worker-pool.ts) so that a
+ * lead starts real research the moment it exists, running concurrently
+ * with whatever batch this function calls next, rather than waiting for
+ * this entire function to return first.
  */
 export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise<BatchDiscoveryResult> {
   const {
@@ -224,6 +237,7 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
     maxBatches = DEFAULT_MAX_BATCHES,
     agentRun,
     trackingClient,
+    onLeadPersisted,
   } = params;
 
   const provider: DiscoveryProvider = getDiscoveryProvider();
@@ -327,6 +341,16 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
         createdProspects.push(persisted.summary);
         newLeadsCreated += 1;
         newLeadsThisBatch += 1;
+        // Fired immediately, before the next prospect in this batch is even
+        // persisted — see onLeadPersisted's own doc comment above. Wrapped
+        // defensively: a bug in whatever this triggers (a worker pool's own
+        // enqueue) must never abort discovery or lose a lead this function
+        // already persisted — the one thing discovery genuinely owns.
+        try {
+          onLeadPersisted?.(persisted.leadId);
+        } catch (error) {
+          console.error("[discovery-batch] onLeadPersisted threw unexpectedly — continuing discovery regardless", error);
+        }
 
         if (newLeadsCreated >= targetNewLeads) break;
       }

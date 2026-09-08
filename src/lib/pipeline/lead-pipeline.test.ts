@@ -45,9 +45,15 @@ function createFakeSupabase(tables: Tables, leadUpdateLog: Record<string, unknow
       }
       if (pendingUpdate) {
         if (table === "leads") leadUpdateLog.push(pendingUpdate);
+        // Matches (the WHERE clause) are decided once against pre-update
+        // row state, exactly like a real UPDATE ... RETURNING — not
+        // re-evaluated against the just-written values, which would hide
+        // an update whose own new value no longer satisfies its own WHERE
+        // (e.g. UPDATE ... SET status = 'x' WHERE status != 'x').
         const update = pendingUpdate;
+        const matched = tables[table].filter((row) => filters.every((f) => f(row)));
         tables[table] = tables[table].map((row) => (filters.every((f) => f(row)) ? { ...row, ...update } : row));
-        return tables[table].filter((row) => filters.every((f) => f(row)));
+        return matched.map((row) => ({ ...row, ...update }));
       }
       let rows = tables[table].filter((row) => filters.every((f) => f(row)));
       if (orderSpec) {
@@ -76,6 +82,10 @@ function createFakeSupabase(tables: Tables, leadUpdateLog: Record<string, unknow
       },
       eq(column: string, value: unknown) {
         filters.push((row) => row[column] === value);
+        return api;
+      },
+      neq(column: string, value: unknown) {
+        filters.push((row) => row[column] !== value);
         return api;
       },
       order(column: string, opts?: { ascending?: boolean }) {
@@ -322,5 +332,27 @@ describe("researchLead — automatic-research status tracking", () => {
     const lead = (tables.leads as (Row & { research_status: string; research_error: string | null })[])[0];
     expect(lead.research_status).toBe("completed");
     expect(lead.research_error).toBeNull();
+  });
+
+  it("a lead already 'researching' (a concurrent worker-pool job, or an overlapping sweep) is never claimed a second time — no second real AI call, no second write", async () => {
+    const fetchMock = vi.fn(async () => openRouterResponse(VALID_RESEARCH));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tables = seedTables({ research_status: "researching" });
+    const supabase = createFakeSupabase(tables);
+
+    const result = await researchLead(supabase, "org-1", "lead-1");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("already_in_progress");
+    // No AI call was made at all — the atomic claim fails before
+    // runProspectResearch is ever reached.
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The lead is left exactly as found — still "researching", not flipped
+    // to "failed" by this rejected second attempt.
+    const lead = (tables.leads as (Row & { research_status: string })[])[0];
+    expect(lead.research_status).toBe("researching");
+    expect(tables.lead_research ?? []).toHaveLength(0);
   });
 });

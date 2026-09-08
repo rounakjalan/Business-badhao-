@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Proves the manual "Start Discovery" action (startLeadDiscoveryAction)
-// automatically researches every newly discovered lead — via
-// finishPendingLeads (scheduled-pipeline.ts), the exact same mechanism the
-// hourly cron sweep already relies on — without anyone opening a lead or
-// pressing "Run AI Research". This is the manual counterpart to
-// scheduled-pipeline.test.ts's proof for the hourly cron path; both go
-// through the one real researchLead (lead-pipeline.ts), which is what
-// tracks research_status/research_error.
+// automatically researches every newly discovered lead — via the bounded
+// worker pool (lead-worker-pool.ts) discovery's own onLeadPersisted callback
+// feeds live, the same mechanism the hourly cron sweep's finishPendingLeads
+// now shares — without anyone opening a lead or pressing "Run AI Research".
+// This is the manual counterpart to scheduled-pipeline.test.ts's proof for
+// the hourly cron path; both go through the one real researchLead
+// (lead-pipeline.ts), which is what tracks research_status/research_error.
 
 vi.mock("@/lib/organizations", () => ({ getCurrentOrg: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
@@ -47,9 +47,15 @@ function createFakeSupabase(tables: Tables) {
         return inserted;
       }
       if (pendingUpdate) {
+        // Matches (the WHERE clause) are decided once against pre-update
+        // row state, exactly like a real UPDATE ... RETURNING — not
+        // re-evaluated against the just-written values, which would hide
+        // an update whose own new value no longer satisfies its own WHERE
+        // (e.g. UPDATE ... SET status = 'x' WHERE status != 'x').
         const update = pendingUpdate;
+        const matched = tables[table].filter((row) => filters.every((f) => f(row)));
         tables[table] = tables[table].map((row) => (filters.every((f) => f(row)) ? { ...row, ...update } : row));
-        return tables[table].filter((row) => filters.every((f) => f(row)));
+        return matched.map((row) => ({ ...row, ...update }));
       }
       let rows = tables[table].filter((row) => filters.every((f) => f(row)));
       if (orderSpec) {

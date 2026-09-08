@@ -153,6 +153,55 @@ describe("runBatchedDiscovery", () => {
     expect((tables.leads ?? []).length).toBe(5);
   });
 
+  it("fires onLeadPersisted the instant each lead is persisted — before the next batch's own discover() call, not batched up until the whole run ends", async () => {
+    const events: string[] = [];
+    const discoverMock = vi.fn().mockImplementation(async () => {
+      const callNumber = events.filter((e) => e === "discover() called").length + 1;
+      events.push("discover() called");
+      return callNumber === 1 ? okResult([prospect({ companyName: "Alpha" }), prospect({ companyName: "Beta" })]) : okResult([]);
+    });
+
+    const { params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 2 });
+    await runBatchedDiscovery({
+      ...params,
+      onLeadPersisted: (leadId) => events.push(`persisted:${leadId}`),
+    });
+
+    // Both leads from batch 1 are persisted (and the callback fires for
+    // each) strictly before batch 2's own discover() call — proving
+    // research can start on them while discovery is still going, not only
+    // after runBatchedDiscovery itself returns.
+    const discoverIndices = events.flatMap((e, i) => (e === "discover() called" ? [i] : []));
+    const persistedIndices = events.flatMap((e, i) => (e.startsWith("persisted:") ? [i] : []));
+    expect(discoverIndices).toHaveLength(2);
+    expect(persistedIndices).toHaveLength(2);
+    expect(Math.max(...persistedIndices)).toBeLessThan(discoverIndices[1]);
+  });
+
+  it("a research-side failure in onLeadPersisted (e.g. the worker pool's own job throwing) never aborts discovery or loses a batch's already-persisted leads", async () => {
+    const discoverMock = vi
+      .fn()
+      .mockResolvedValueOnce(okResult([prospect({ companyName: "Alpha" }), prospect({ companyName: "Beta" })]))
+      .mockResolvedValueOnce(okResult([prospect({ companyName: "Gamma" })]))
+      .mockResolvedValue(okResult([]));
+
+    const { tables, params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 3 });
+    const result = await runBatchedDiscovery({
+      ...params,
+      // Simulates a worker pool whose enqueue synchronously throws (a bug
+      // in the pool, or a caller not wrapping it) — discovery must still
+      // finish normally and keep every lead it already persisted.
+      onLeadPersisted: () => {
+        throw new Error("simulated pool failure");
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.newLeadsCreated).toBe(3);
+    expect((tables.leads ?? []).length).toBe(3);
+  });
+
   it("stops after two consecutive empty batches (no_more_results), never discarding what an earlier batch already found", async () => {
     // Batch 2 and 3 return the exact same two prospects as batch 1 — once
     // cross-batch dedup has already seen them, these batches are genuinely
