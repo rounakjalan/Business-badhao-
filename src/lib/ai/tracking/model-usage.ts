@@ -1,4 +1,6 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import type { Database } from "@/types/database.types";
 
 /**
  * Records real token usage for a completed AI call. Best-effort: a
@@ -18,11 +20,21 @@ export async function recordModelUsage(params: {
   model: string;
   inputTokens: number | null;
   outputTokens: number | null;
+  /**
+   * Scheduled work has no signed-in user, so the default cookie-based
+   * client's insert is silently rejected by RLS (model_usage's INSERT
+   * policy requires role:authenticated + is_org_member) — every AI call
+   * still succeeds, only its own usage row goes missing. Callers running
+   * outside a request with a real session (the cron pipeline) must pass
+   * their own service-role client here, the same one createAgentRun
+   * already accepts for the same reason.
+   */
+  client?: SupabaseClient<Database>;
 }): Promise<void> {
   if (!params.organizationId) return;
 
   try {
-    const supabase = await createClient();
+    const supabase = params.client ?? (await createClient());
     const { error } = await supabase.from("model_usage").insert({
       organization_id: params.organizationId,
       agent_run_id: params.agentRunId,

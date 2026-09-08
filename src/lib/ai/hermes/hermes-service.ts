@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getAiConfig } from "@/lib/ai/config";
 import { AiError, type AiErrorCode } from "@/lib/ai/errors";
 import type { AiProvider } from "@/lib/ai/providers/provider";
@@ -9,6 +10,7 @@ import { executeTool, HERMES_TOOL_DEFINITIONS } from "@/lib/ai/tools/registry";
 import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
 import { recordModelUsage } from "@/lib/ai/tracking/model-usage";
 import type { AiCompletionRequest, AiCompletionResponse, AiMessage, AiProviderName } from "@/lib/ai/types";
+import type { Database } from "@/types/database.types";
 
 /** Hard cap on tool-augmented follow-up calls per Hermes invocation (bounds both latency and provider cost). */
 const MAX_TOOL_ROUNDS = 2;
@@ -61,6 +63,20 @@ export type HermesRequest = {
   organizationId: string | null;
   /** Free-form label for agent_runs.agent_type, e.g. "ask_ai_sidekick". */
   agentType: string;
+  /**
+   * Supabase client used to write this call's agent_runs/model_usage
+   * telemetry. Omit for any request made inside a real user session (the
+   * default cookie-based client — createClient() — satisfies RLS via that
+   * session automatically, exactly as before). Scheduled/cron work has no
+   * signed-in user, so its default client's telemetry writes are silently
+   * rejected by RLS (agent_runs/model_usage both require role:authenticated
+   * + is_org_member) — the AI call itself still succeeds, only its own
+   * telemetry row goes missing. A caller running outside a request with a
+   * real session (the cron pipeline) must pass its own service-role client
+   * here, the same one it already passes to createAgentRun for the parent
+   * lead_discovery row.
+   */
+  client?: SupabaseClient<Database>;
   /** Drives provider/model selection via the Model Router — see src/lib/ai/router. */
   taskType: AiTaskType;
   systemPrompt: string;
@@ -190,12 +206,17 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
     { role: "user", content: request.userPrompt },
   ];
 
-  const agentRun = await createAgentRun(request.organizationId, request.agentType, {
-    taskType: request.taskType,
-    preferredProvider,
-    providerOrder,
-    fallbackProvider: config.fallbackProvider,
-  });
+  const agentRun = await createAgentRun(
+    request.organizationId,
+    request.agentType,
+    {
+      taskType: request.taskType,
+      preferredProvider,
+      providerOrder,
+      fallbackProvider: config.fallbackProvider,
+    },
+    request.client
+  );
 
   let lastError: AiError | null = null;
 
@@ -235,27 +256,38 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
         model: response.model,
         inputTokens: response.usage.inputTokens,
         outputTokens: response.usage.outputTokens,
+        client: request.client,
       });
 
       if (!response.text) {
-        await completeAgentRun(agentRun, "failed", {
-          code: "malformed_response",
-          requestedProvider: preferredProvider,
-          requestedModel,
-        });
+        await completeAgentRun(
+          agentRun,
+          "failed",
+          {
+            code: "malformed_response",
+            requestedProvider: preferredProvider,
+            requestedModel,
+          },
+          request.client
+        );
         return { ok: false, code: "malformed_response", message: USER_SAFE_MESSAGES.malformed_response };
       }
 
-      await completeAgentRun(agentRun, "completed", {
-        taskType: request.taskType,
-        requestedProvider: preferredProvider,
-        requestedModel,
-        provider: response.provider,
-        model: response.model,
-        finishReason: response.finishReason,
-        latencyMs: response.latencyMs,
-        usedFallback: response.provider !== preferredProvider,
-      });
+      await completeAgentRun(
+        agentRun,
+        "completed",
+        {
+          taskType: request.taskType,
+          requestedProvider: preferredProvider,
+          requestedModel,
+          provider: response.provider,
+          model: response.model,
+          finishReason: response.finishReason,
+          latencyMs: response.latencyMs,
+          usedFallback: response.provider !== preferredProvider,
+        },
+        request.client
+      );
 
       return { ok: true, text: response.text, provider: response.provider, model: response.model };
     } catch (error) {
@@ -270,13 +302,18 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
   }
 
   const code = lastError?.code ?? "unknown";
-  await completeAgentRun(agentRun, "failed", {
-    taskType: request.taskType,
-    requestedProvider: preferredProvider,
-    requestedModel,
-    code,
-    message: lastError?.message ?? "no provider produced a result",
-  });
+  await completeAgentRun(
+    agentRun,
+    "failed",
+    {
+      taskType: request.taskType,
+      requestedProvider: preferredProvider,
+      requestedModel,
+      code,
+      message: lastError?.message ?? "no provider produced a result",
+    },
+    request.client
+  );
 
   return { ok: false, code, message: USER_SAFE_MESSAGES[code] };
 }

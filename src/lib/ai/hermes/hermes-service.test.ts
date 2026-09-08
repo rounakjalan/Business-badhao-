@@ -360,6 +360,37 @@ describe("runHermesCompletion", () => {
     expect(completionUpdate?.[0]).toMatchObject({ output: expect.objectContaining({ requestedModel: null }) });
   });
 
+  it("uses an explicitly passed client for its own agent_runs/model_usage telemetry instead of the default cookie-based one — this is what lets a scheduled/cron call (no signed-in user) actually persist telemetry, since that default client's writes are otherwise silently rejected by RLS", async () => {
+    vi.mocked(createProvider).mockReturnValue(fakeProvider());
+
+    const explicitInsertSpy = vi.fn();
+    const explicitUpdateSpy = vi.fn();
+    const explicitClient = {
+      from: () => ({
+        insert: (payload: unknown) => {
+          explicitInsertSpy(payload);
+          return { select: () => ({ single: async () => ({ data: { id: "explicit-run-1" }, error: null }) }) };
+        },
+        update: (payload: unknown) => {
+          explicitUpdateSpy(payload);
+          return { eq: async () => ({ error: null }) };
+        },
+      }),
+    } as unknown as Parameters<typeof runHermesCompletion>[0]["client"];
+
+    const result = await runHermesCompletion({ ...baseRequest, client: explicitClient });
+
+    expect(result.ok).toBe(true);
+    // Both agent_runs (createAgentRun/completeAgentRun) and model_usage
+    // (recordModelUsage) writes went through the explicitly passed client...
+    expect(explicitInsertSpy).toHaveBeenCalled();
+    expect(explicitUpdateSpy).toHaveBeenCalledWith(expect.objectContaining({ status: "completed" }));
+    // ...and NOT through the default cookie-based client's own spies —
+    // proving this call never fell back to createClient() at all.
+    expect(insertSpy).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
   it("accurately records the actual provider and model that served a modelProviders-restricted request", async () => {
     const completeSpy = vi.fn().mockResolvedValue(fakeResponse({ provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" }));
     vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));

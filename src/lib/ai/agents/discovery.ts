@@ -1,9 +1,22 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
 import { runHermesCompletion, type HermesResult } from "@/lib/ai/hermes/hermes-service";
 import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
+import type { Database } from "@/types/database.types";
+
+/**
+ * Supabase client for this run's own agent_runs/model_usage telemetry —
+ * threaded optionally through every AI call below down to
+ * runHermesCompletion (see HermesRequest.client's own doc comment for why:
+ * scheduled work has no signed-in user, so the default cookie-based client
+ * can't write telemetry past RLS). Omit for a call made inside a real user
+ * session; the manual "Start Discovery" action never passes one and is
+ * unaffected by this.
+ */
+type TrackingClient = SupabaseClient<Database>;
 
 /**
  * The intended model for both Nemotron-designated stages below (query
@@ -172,7 +185,8 @@ export type DiscoveryResult =
 export interface DiscoveryProvider {
   readonly name: string;
   isConfigured(): boolean;
-  discover(criteria: DiscoveryCriteria): Promise<DiscoveryResult>;
+  /** trackingClient: see TrackingClient's own doc comment above. */
+  discover(criteria: DiscoveryCriteria, trackingClient?: TrackingClient): Promise<DiscoveryResult>;
 }
 
 /**
@@ -349,7 +363,8 @@ function icpDerivedQuery(icpCriteria: Record<string, unknown>): string | null {
 }
 
 async function generateDiscoveryQueries(
-  criteria: DiscoveryCriteria
+  criteria: DiscoveryCriteria,
+  trackingClient?: TrackingClient
 ): Promise<{ ok: true; queries: string[] } | { ok: false; message: string }> {
   const businessKnowledgeText = criteria.businessContext ? formatBusinessContext(criteria.businessContext) : null;
 
@@ -395,6 +410,7 @@ async function generateDiscoveryQueries(
     maxTokens: 1200,
     temperature: 0.4,
     responseFormat: "json",
+    client: trackingClient,
   });
 
   if (!result.ok) return { ok: false, message: result.message };
@@ -731,7 +747,8 @@ function canonicalizeUrl(url: string): string | null {
 async function extractProspectsFromResults(
   criteria: DiscoveryCriteria,
   searchesByQuery: { query: string; results: SearchHit[] }[],
-  telemetry?: ProviderTelemetry
+  telemetry?: ProviderTelemetry,
+  trackingClient?: TrackingClient
 ): Promise<
   { ok: true; candidates: DiscoveredProspect[]; realHitByCanonicalUrl: Map<string, SearchHit> } | { ok: false; message: string }
 > {
@@ -806,6 +823,7 @@ async function extractProspectsFromResults(
     maxTokens: EXTRACTION_MAX_TOKENS,
     temperature: 0.2,
     responseFormat: "json",
+    client: trackingClient,
   });
 
   if (!result.ok) return { ok: false, message: result.message };
@@ -961,7 +979,8 @@ const FINAL_VALIDATION_MAX_TOKENS = EXTRACTION_MAX_TOKENS;
 async function callIndependentReviewer(
   organizationId: string | null,
   systemPrompt: string,
-  userPrompt: string
+  userPrompt: string,
+  trackingClient?: TrackingClient
 ): Promise<HermesResult> {
   const primary = await runHermesCompletion({
     organizationId,
@@ -975,6 +994,7 @@ async function callIndependentReviewer(
     temperature: 0.1,
     responseFormat: "json",
     timeoutMs: INDEPENDENT_REVIEWER_TIMEOUT_MS,
+    client: trackingClient,
   });
   if (primary.ok) return primary;
 
@@ -990,6 +1010,7 @@ async function callIndependentReviewer(
     temperature: 0.1,
     responseFormat: "json",
     timeoutMs: INDEPENDENT_REVIEWER_TIMEOUT_MS,
+    client: trackingClient,
   });
 }
 
@@ -1014,7 +1035,8 @@ export async function runFinalHermesValidation(
   criteria: DiscoveryCriteria,
   candidates: DiscoveredProspect[],
   realHitByCanonicalUrl: Map<string, SearchHit>,
-  telemetry?: ProviderTelemetry
+  telemetry?: ProviderTelemetry,
+  trackingClient?: TrackingClient
 ): Promise<{ ok: true; candidates: DiscoveredProspect[] } | { ok: false; message: string }> {
   if (candidates.length === 0) return { ok: true, candidates: [] };
 
@@ -1035,7 +1057,7 @@ export async function runFinalHermesValidation(
     JSON.stringify(candidates),
   ].join("\n");
 
-  const result = await callIndependentReviewer(criteria.organizationId, FINAL_VALIDATION_SYSTEM_PROMPT, userPrompt);
+  const result = await callIndependentReviewer(criteria.organizationId, FINAL_VALIDATION_SYSTEM_PROMPT, userPrompt, trackingClient);
 
   if (!result.ok) return { ok: false, message: result.message };
 
@@ -1178,7 +1200,7 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     return Boolean(this.apiKey);
   }
 
-  async discover(criteria: DiscoveryCriteria): Promise<DiscoveryResult> {
+  async discover(criteria: DiscoveryCriteria, trackingClient?: TrackingClient): Promise<DiscoveryResult> {
     const apiKey = this.apiKey;
     if (!apiKey) {
       return {
@@ -1191,7 +1213,7 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     const exaApiKey = this.exaApiKey;
     const telemetry = newTelemetry();
 
-    const queriesResult = await generateDiscoveryQueries(criteria);
+    const queriesResult = await generateDiscoveryQueries(criteria, trackingClient);
     if (!queriesResult.ok) {
       return { ok: false, code: "provider_error", message: queriesResult.message };
     }
@@ -1220,13 +1242,20 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     const extraction = await extractProspectsFromResults(
       criteria,
       succeeded.map((o) => ({ query: o.query, results: o.result.results })),
-      telemetry
+      telemetry,
+      trackingClient
     );
     if (!extraction.ok) {
       return { ok: false, code: "provider_error", message: extraction.message, telemetry };
     }
 
-    const finalValidation = await runFinalHermesValidation(criteria, extraction.candidates, extraction.realHitByCanonicalUrl, telemetry);
+    const finalValidation = await runFinalHermesValidation(
+      criteria,
+      extraction.candidates,
+      extraction.realHitByCanonicalUrl,
+      telemetry,
+      trackingClient
+    );
     if (!finalValidation.ok) {
       return { ok: false, code: "provider_error", message: finalValidation.message, telemetry };
     }

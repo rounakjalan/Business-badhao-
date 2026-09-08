@@ -300,13 +300,23 @@ export async function runDiscoveryForCampaign(
   const businessContext = await getBusinessContext(organizationId, supabase);
 
   const provider = getDiscoveryProvider();
-  const result = await provider.discover({
-    organizationId,
-    campaignName: campaign.name,
-    campaignObjective: campaign.objective,
-    icpCriteria,
-    businessContext: selectDiscoveryContext(businessContext),
-  });
+  // Same reason as getBusinessContext above: this scheduled run has no
+  // signed-in user, so every AI call discover() makes needs this same
+  // explicit client passed all the way down, or its own agent_runs/
+  // model_usage telemetry rows are silently rejected by RLS while the AI
+  // call itself still succeeds — the top-level row above already gets this
+  // client; without threading it further, everything under it (query
+  // generation, extraction, the Independent Reviewer) previously did not.
+  const result = await provider.discover(
+    {
+      organizationId,
+      campaignName: campaign.name,
+      campaignObjective: campaign.objective,
+      icpCriteria,
+      businessContext: selectDiscoveryContext(businessContext),
+    },
+    supabase
+  );
 
   if (!result.ok) {
     await completeAgentRun(

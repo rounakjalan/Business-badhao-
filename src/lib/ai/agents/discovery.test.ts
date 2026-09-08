@@ -1263,6 +1263,34 @@ describe("lead discovery", () => {
       expect(extractionCall.reasoningEffort).toBe("medium");
     });
 
+    it("threads an explicit tracking client through every AI call — this is what lets a scheduled/cron run (no signed-in user) persist agent_runs/model_usage the same way a manual run does, instead of silently losing it to RLS", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(SINGLE_QUERY_RESPONSE), provider: "openrouter", model: "m" })
+        .mockResolvedValueOnce({ ok: true, text: JSON.stringify(EXTRACTION_RESPONSE), provider: "groq", model: "openai/gpt-oss-120b" });
+      vi.stubGlobal("fetch", mockFetchRouter({ tavily: async () => new Response(JSON.stringify({ results: SEARCH_HITS }), { status: 200 }) }));
+
+      const fakeAdminClient = { from: vi.fn() } as unknown as Parameters<typeof runHermesCompletion>[0]["client"];
+
+      const result = await new TavilyDiscoveryProvider().discover(baseCriteria, fakeAdminClient);
+
+      expect(result.ok).toBe(true);
+      // Query generation, extraction, AND the Independent Reviewer (the
+      // fallback base mock's third call) must all receive the same client —
+      // no stage silently drops back to the default cookie-based one.
+      expect(vi.mocked(runHermesCompletion).mock.calls.length).toBeGreaterThanOrEqual(3);
+      for (const call of vi.mocked(runHermesCompletion).mock.calls) {
+        expect(call[0].client).toBe(fakeAdminClient);
+      }
+    });
+
+    it("omits the tracking client entirely when the caller doesn't pass one — the manual Start Discovery path is unaffected and keeps using the default cookie-based client", async () => {
+      await runExtraction(JSON.stringify(EXTRACTION_RESPONSE));
+
+      for (const call of vi.mocked(runHermesCompletion).mock.calls) {
+        expect(call[0].client).toBeUndefined();
+      }
+    });
+
     it("caps how many search results are sent, taking a slice from every query rather than only the first", async () => {
       const manyHits = (prefix: string) =>
         Array.from({ length: 30 }, (_, i) => ({

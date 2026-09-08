@@ -357,6 +357,54 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     expect(new Set(leads.map((l) => l.prospect_id))).toEqual(new Set([brightPixel.id, triverse.id]));
   });
 
+  it("a real scheduled discovery run persists per-stage AI telemetry (query generation, extraction, Independent Reviewer) into the SAME client it was given — reproduces and fixes the cron telemetry gap: previously only the parent lead_discovery row was written, because runHermesCompletion's own tracking always fell back to the cookie-based client, which has no session under cron and is silently rejected by RLS", async () => {
+    stubRealPipeline();
+    const tables = seedTables();
+    const supabase = createFakeSupabase(tables);
+
+    const result = await runDiscoveryForCampaign(supabase, "org-1", "campaign-1", Date.now(), 240_000);
+
+    expect(result.ran).toBe(true);
+
+    const agentRuns = tables.agent_runs as (Row & { agent_type: string; status: string; output: Record<string, unknown> })[];
+    const byType = (agentType: string) => agentRuns.filter((r) => r.agent_type === agentType);
+
+    // Parent row — this one already worked before the fix, since
+    // runDiscoveryForCampaign passes its own client to createAgentRun
+    // directly. It's the baseline every other row below is compared against.
+    const parentRuns = byType("lead_discovery");
+    expect(parentRuns).toHaveLength(1);
+    expect(parentRuns[0].status).toBe("completed");
+
+    // The three AI stages inside discover() — before this fix these never
+    // appeared in the caller's own client/tables at all under a
+    // no-session/cron-style invocation, because runHermesCompletion had no
+    // way to receive the client runDiscoveryForCampaign already holds.
+    const queryGenRuns = byType("lead_discovery_query_generation");
+    const extractionRuns = byType("lead_discovery_extraction");
+    const reviewerRuns = byType("lead_discovery_hermes_review");
+    expect(queryGenRuns).toHaveLength(1);
+    expect(extractionRuns).toHaveLength(1);
+    expect(reviewerRuns).toHaveLength(1);
+    expect(queryGenRuns[0].status).toBe("completed");
+    expect(extractionRuns[0].status).toBe("completed");
+    expect(reviewerRuns[0].status).toBe("completed");
+
+    // Every AI telemetry row must separate what was requested from what
+    // actually served it — never silently equate the two.
+    for (const run of [...queryGenRuns, ...extractionRuns]) {
+      expect(run.output).toMatchObject({ requestedProvider: "openrouter", requestedModel: DEFAULT_OPENROUTER_MODEL });
+    }
+    expect(reviewerRuns[0].output).toMatchObject({ requestedProvider: "openrouter", requestedModel: "nousresearch/hermes-3-llama-3.1-70b" });
+
+    // Search + the Deterministic Validator's own result live inside the
+    // parent row's telemetry (they are not separate AI calls) — real
+    // Tavily activity and real accept/reject counts, not zeros.
+    const telemetry = parentRuns[0].output.telemetry as Record<string, { requests?: number }> | undefined;
+    expect((telemetry?.tavily as { requests?: number; succeeded?: number })?.requests).toBeGreaterThan(0);
+    expect(parentRuns[0].output).toMatchObject({ prospectsFound: expect.any(Number) });
+  });
+
   it("existing leads are never re-enriched by a later scheduled run — only genuinely new prospects reach contact discovery", async () => {
     stubRealPipeline();
     const tables = seedTables();
