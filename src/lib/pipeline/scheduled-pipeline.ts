@@ -1,10 +1,9 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discovery";
-import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
+import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
 import { isDiscoveryDue, markDiscoveryFinished, markDiscoveryRunning } from "@/lib/pipeline/discovery-schedule";
-import { discoverProspectContacts, mergeContactIntoRawData, type ContactDiscoveryOutcome } from "@/lib/discovery/contact-enrichment";
+import { runBatchedDiscovery } from "@/lib/pipeline/discovery-batch";
 import { qualifyLead, researchLead, sendAutomaticWhatsAppOutreach } from "@/lib/pipeline/lead-pipeline";
 import type { Database, Json } from "@/types/database.types";
 
@@ -180,7 +179,16 @@ export async function finishPendingLeads(
   organizationId: string,
   campaignId: string,
   startedAtMs: number,
-  budgetMs: number
+  budgetMs: number,
+  /**
+   * How many pending leads one call may pick up. Defaults to the hourly
+   * cron's own conservative ceiling; a caller with a bigger, one-off budget
+   * right now (the manual "Start Discovery" press, see
+   * startLeadDiscoveryAction) can raise this — the real backstop against
+   * running long either way is the outOfTime check in the loop below, not
+   * this count.
+   */
+  maxLeads: number = MAX_LEADS_FINISHED_PER_CAMPAIGN
 ): Promise<{ finished: number; failed: number; outreach: OutreachSweepSummary }> {
   const { data: pending } = await supabase
     .from("leads")
@@ -190,7 +198,7 @@ export async function finishPendingLeads(
     .eq("qualification_status", "pending")
     .neq("research_status", "failed")
     .order("created_at", { ascending: true })
-    .limit(MAX_LEADS_FINISHED_PER_CAMPAIGN);
+    .limit(maxLeads);
 
   let finished = 0;
   let failed = 0;
@@ -299,7 +307,6 @@ export async function runDiscoveryForCampaign(
   // row-level security, silently ungrounding the whole run.
   const businessContext = await getBusinessContext(organizationId, supabase);
 
-  const provider = getDiscoveryProvider();
   // Same reason as getBusinessContext above: this scheduled run has no
   // signed-in user, so every AI call discover() makes needs this same
   // explicit client passed all the way down, or its own agent_runs/
@@ -307,22 +314,31 @@ export async function runDiscoveryForCampaign(
   // call itself still succeeds — the top-level row above already gets this
   // client; without threading it further, everything under it (query
   // generation, extraction, the Independent Reviewer) previously did not.
-  const result = await provider.discover(
-    {
-      organizationId,
-      campaignName: campaign.name,
-      campaignObjective: campaign.objective,
-      icpCriteria,
-      businessContext: selectDiscoveryContext(businessContext),
-    },
-    supabase
-  );
+  //
+  // Batched (see discovery-batch.ts): keeps calling discover() — each time
+  // asking Nemotron/Groq to avoid the queries already tried — until it hits
+  // a real target, runs out of its own time slice, or two batches in a row
+  // turn up nothing genuinely new. A single batch's own provider error
+  // never throws away an earlier batch's already-persisted leads.
+  const result = await runBatchedDiscovery({
+    supabase,
+    organizationId,
+    campaignId,
+    campaignName: campaign.name,
+    campaignObjective: campaign.objective,
+    icpCriteria,
+    businessContext: selectDiscoveryContext(businessContext),
+    startedAtMs,
+    budgetMs,
+    agentRun,
+    trackingClient: supabase,
+  });
 
   if (!result.ok) {
     await completeAgentRun(
       agentRun,
       "failed",
-      { code: result.code, message: result.message, telemetry: result.telemetry ?? null, scheduled: true } as unknown as Json,
+      { code: result.code, message: result.message, scheduled: true } as unknown as Json,
       supabase
     );
     // A failed run still books its next attempt — one slot, the same single
@@ -332,134 +348,19 @@ export async function runDiscoveryForCampaign(
     return { ran: true, newLeads: 0, reason: result.code };
   }
 
-  const { data: existingProspects } = await supabase
-    .from("prospects")
-    .select("website, company_name")
-    .eq("organization_id", organizationId);
-
-  const existingKeys = new Set(
-    (existingProspects ?? []).map((p) => prospectDedupeKey({ website: p.website, companyName: p.company_name ?? "" }))
-  );
-
-  const newProspects = result.prospects.filter((p) => !existingKeys.has(prospectDedupeKey(p)));
-  const duplicatesSkipped = result.prospects.length - newProspects.length;
-
-  let leadSourceId: string | null = null;
-  if (newProspects.length > 0) {
-    const { data: existingSource } = await supabase
-      .from("lead_sources")
-      .select("id")
-      .eq("organization_id", organizationId)
-      .eq("type", "ai_discovery")
-      .maybeSingle();
-
-    leadSourceId = existingSource?.id ?? null;
-    if (!leadSourceId) {
-      const { data: createdSource } = await supabase
-        .from("lead_sources")
-        .insert({ organization_id: organizationId, name: "AI Lead Discovery", type: "ai_discovery" })
-        .select("id")
-        .single();
-      leadSourceId = createdSource?.id ?? null;
-    }
-  }
-
-  let newLeadsCreated = 0;
-  for (const prospect of newProspects) {
-    // Reads the business's own site for publicly listed contact channels,
-    // falling back to bounded search evidence when there is no website or
-    // the site said nothing — see discoverProspectContacts. Every field it
-    // returns carries the URL it was actually read from, and nothing is
-    // inferred.
-    //
-    // Every internal path here already degrades to null on a real failure
-    // (a broken site, a Tavily outage) rather than throwing — this catch is
-    // the hard guarantee on top of that: a genuinely unexpected error in
-    // enrichment must never lose the lead itself, or abort every remaining
-    // prospect in this batch, which an uncaught throw inside a for-loop
-    // would otherwise do.
-    let contactOutcome: ContactDiscoveryOutcome;
-    try {
-      contactOutcome = await discoverProspectContacts({
-        companyName: prospect.companyName,
-        website: prospect.website,
-        location: prospect.location,
-      });
-    } catch (error) {
-      console.error("[scheduled-pipeline] contact discovery threw unexpectedly — proceeding without it", error);
-      contactOutcome = { contacts: null, status: "not_found" };
-    }
-
-    const { data: prospectRow } = await supabase
-      .from("prospects")
-      .insert({
-        organization_id: organizationId,
-        campaign_id: campaignId,
-        lead_source_id: leadSourceId,
-        company_name: prospect.companyName,
-        email: prospect.email ?? contactOutcome.contacts?.email?.value ?? null,
-        phone: prospect.phone ?? contactOutcome.contacts?.phone?.value ?? null,
-        website: prospect.website,
-        raw_data: mergeContactIntoRawData(
-          {
-            location: prospect.location,
-            industry: prospect.industry,
-            businessType: prospect.businessType,
-            matchedIcpCriteria: prospect.matchedIcpCriteria,
-            evidenceSnippet: prospect.evidenceSnippet,
-            sourceUrl: prospect.sourceUrl,
-            searchQuery: prospect.searchQuery,
-            discoverySource: provider.name,
-            discoveredAt: new Date().toISOString(),
-          },
-          contactOutcome
-        ) as unknown as Json,
-      })
-      .select("id")
-      .single();
-
-    if (!prospectRow) continue;
-
-    const { data: leadRow } = await supabase
-      .from("leads")
-      .insert({
-        organization_id: organizationId,
-        prospect_id: prospectRow.id,
-        campaign_id: campaignId,
-        lead_source_id: leadSourceId,
-        status: "new",
-        qualification_status: "pending",
-      })
-      .select("id")
-      .single();
-
-    if (!leadRow) continue;
-    newLeadsCreated += 1;
-
-    if (agentRun) {
-      await recordAgentAction({
-        organizationId,
-        agentRunId: agentRun.id,
-        actionType: "lead_discovered",
-        targetEntityType: "lead",
-        targetEntityId: leadRow.id,
-        payload: { companyName: prospect.companyName, sourceUrl: prospect.sourceUrl } as unknown as Json,
-        client: supabase,
-      });
-    }
-  }
-
   await completeAgentRun(
     agentRun,
     result.queriesFailed.length > 0 ? "partially_completed" : "completed",
     {
       scheduled: true,
-      prospectsFound: result.prospects.length,
-      newLeadsCreated,
-      duplicatesSkipped,
+      batchesRun: result.batchesRun,
+      stoppedReason: result.stoppedReason,
+      prospectsFound: result.prospectsFound,
+      newLeadsCreated: result.newLeadsCreated,
+      duplicatesSkipped: result.duplicatesSkipped,
       queriesRun: result.queriesRun,
       queriesFailed: result.queriesFailed,
-      telemetry: result.telemetry ?? null,
+      telemetry: result.batchTelemetry,
     } as unknown as Json,
     supabase
   );
@@ -467,9 +368,9 @@ export async function runDiscoveryForCampaign(
   // Book the next run in this campaign's single schedule slot. This is what
   // makes discovery recurring: the run stops at its existing budget, and the
   // campaign comes back about an hour later looking for prospects it has not
-  // already found (existingKeys above is rebuilt from the database each run,
-  // so everything discovered so far is excluded).
+  // already found (runBatchedDiscovery's own dedup is rebuilt from the
+  // database each run, so everything discovered so far is excluded).
   await markDiscoveryFinished(supabase, campaignId, organizationId, { ok: true });
 
-  return { ran: true, newLeads: newLeadsCreated };
+  return { ran: true, newLeads: result.newLeadsCreated };
 }

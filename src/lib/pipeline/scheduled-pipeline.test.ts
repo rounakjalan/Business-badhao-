@@ -380,28 +380,40 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     // appeared in the caller's own client/tables at all under a
     // no-session/cron-style invocation, because runHermesCompletion had no
     // way to receive the client runDiscoveryForCampaign already holds.
+    //
+    // Batched discovery (discovery-batch.ts) calls discover() more than once
+    // when a later batch keeps turning up the same, now-duplicate prospects
+    // — this mock always returns the same two — so exactly how many rows
+    // exist depends on how many batches ran before the "no more results"
+    // stop condition tripped; never hardcode to 1. What must hold regardless
+    // is the actual fix under test: one row per stage per batch, all landing
+    // in the SAME client/tables this test owns.
     const queryGenRuns = byType("lead_discovery_query_generation");
     const extractionRuns = byType("lead_discovery_extraction");
     const reviewerRuns = byType("lead_discovery_hermes_review");
-    expect(queryGenRuns).toHaveLength(1);
-    expect(extractionRuns).toHaveLength(1);
-    expect(reviewerRuns).toHaveLength(1);
-    expect(queryGenRuns[0].status).toBe("completed");
-    expect(extractionRuns[0].status).toBe("completed");
-    expect(reviewerRuns[0].status).toBe("completed");
+    expect(queryGenRuns.length).toBeGreaterThan(0);
+    expect(extractionRuns.length).toBe(queryGenRuns.length);
+    expect(reviewerRuns.length).toBe(queryGenRuns.length);
+    for (const run of [...queryGenRuns, ...extractionRuns, ...reviewerRuns]) {
+      expect(run.status).toBe("completed");
+    }
 
     // Every AI telemetry row must separate what was requested from what
     // actually served it — never silently equate the two.
     for (const run of [...queryGenRuns, ...extractionRuns]) {
       expect(run.output).toMatchObject({ requestedProvider: "openrouter", requestedModel: DEFAULT_OPENROUTER_MODEL });
     }
-    expect(reviewerRuns[0].output).toMatchObject({ requestedProvider: "openrouter", requestedModel: "nousresearch/hermes-3-llama-3.1-70b" });
+    for (const run of reviewerRuns) {
+      expect(run.output).toMatchObject({ requestedProvider: "openrouter", requestedModel: "nousresearch/hermes-3-llama-3.1-70b" });
+    }
 
     // Search + the Deterministic Validator's own result live inside the
-    // parent row's telemetry (they are not separate AI calls) — real
-    // Tavily activity and real accept/reject counts, not zeros.
-    const telemetry = parentRuns[0].output.telemetry as Record<string, { requests?: number }> | undefined;
-    expect((telemetry?.tavily as { requests?: number; succeeded?: number })?.requests).toBeGreaterThan(0);
+    // parent row's telemetry — one entry per batch this run made (they are
+    // not separate AI calls) — real Tavily activity and real accept/reject
+    // counts, not zeros.
+    const telemetry = parentRuns[0].output.telemetry as { tavily?: { requests?: number } }[] | undefined;
+    const totalTavilyRequests = (telemetry ?? []).reduce((sum, batch) => sum + (batch.tavily?.requests ?? 0), 0);
+    expect(totalTavilyRequests).toBeGreaterThan(0);
     expect(parentRuns[0].output).toMatchObject({ prospectsFound: expect.any(Number) });
   });
 

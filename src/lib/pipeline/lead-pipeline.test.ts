@@ -173,6 +173,74 @@ describe("researchLead — automatic-research status tracking", () => {
     vi.unstubAllGlobals();
   });
 
+  it("overrides the model's own self-reported confidence with a deterministic classification computed from the real discovery evidence — never trusts the model's claim at face value", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        openRouterResponse({
+          ...VALID_RESEARCH,
+          // The model claims "low" itself — this must be overridden, since
+          // the actual evidence on file (below) supports much more than that.
+          confidence: "low",
+          verifiedInformation: ["Company: Bright Pixel", "Located in Pune"],
+          businessFactsReferenced: ["Website design service"],
+          inferredInformation: ["Likely wants ongoing maintenance"],
+          unavailableInformation: [],
+        })
+      )
+    );
+
+    const tables = seedTables();
+    tables.prospects = [
+      {
+        id: "prospect-1",
+        company_name: "Bright Pixel",
+        website: "brightpixel.in",
+        title: null,
+        raw_data: {
+          location: "Pune",
+          industry: "Web Design",
+          businessType: "Agency",
+          matchedIcpCriteria: ["location: Pune", "industry: Web Design"],
+          evidenceSnippet: "Bright Pixel is a web design studio based in Pune serving local businesses.",
+          sourceUrl: "https://directory.example/pune-web-agencies",
+          searchQuery: "web design clients Pune",
+          discoverySource: "tavily",
+          discoveredAt: new Date().toISOString(),
+          contact: { contactStatus: "found", email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/", confidence: "high" } },
+        },
+      },
+    ];
+    const supabase = createFakeSupabase(tables);
+
+    const result = await researchLead(supabase, "org-1", "lead-1");
+    expect(result.ok).toBe(true);
+
+    const research = tables.lead_research as (Row & { findings: { confidence: string } })[];
+    expect(research).toHaveLength(1);
+    expect(research[0].findings.confidence).toBe("high");
+    // The result returned to the caller (and whatever it does next) is the
+    // same overridden value, not the model's original "low".
+    if (result.ok) expect(result.research.confidence).toBe("high");
+  });
+
+  it("classifies a lead with no discovery evidence at all (e.g. added manually) as low confidence, regardless of what the model itself claims", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => openRouterResponse({ ...VALID_RESEARCH, confidence: "high" }))
+    );
+
+    const tables = seedTables();
+    tables.prospects = [{ id: "prospect-1", company_name: "Bright Pixel", website: null, title: null }];
+    const supabase = createFakeSupabase(tables);
+
+    const result = await researchLead(supabase, "org-1", "lead-1");
+    expect(result.ok).toBe(true);
+
+    const research = tables.lead_research as (Row & { findings: { confidence: string } })[];
+    expect(research[0].findings.confidence).toBe("low");
+  });
+
   it("a successful run marks the lead completed, clears any prior error, and writes exactly one real lead_research row", async () => {
     vi.stubGlobal(
       "fetch",

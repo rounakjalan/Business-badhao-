@@ -137,6 +137,15 @@ export type DiscoveryCriteria = {
   icpCriteria: Record<string, unknown>;
   /** Minimal, discovery-relevant Business Knowledge (see selectDiscoveryContext in src/lib/business-context.ts) — not the full dataset. */
   businessContext: BusinessContext | null;
+  /**
+   * Search queries already tried in an earlier batch of the SAME discovery
+   * run (see runBatchedDiscovery, discovery-batch.ts) — asks the Reasoner
+   * for genuinely different search angles instead of re-asking the same
+   * handful of queries and re-finding the same (already cross-run-deduped)
+   * businesses. Empty/unset for a normal single-pass call — the prompt is
+   * unchanged in that case.
+   */
+  excludeQueries?: string[];
 };
 
 /**
@@ -376,6 +385,14 @@ async function generateDiscoveryQueries(
     "",
     "=== IDEAL CUSTOMER PROFILE — the BUYER to find (the search target) ===",
     JSON.stringify(criteria.icpCriteria),
+    ...(criteria.excludeQueries && criteria.excludeQueries.length > 0
+      ? [
+          "",
+          "=== QUERIES ALREADY TRIED — do not repeat these or near-duplicates of them ===",
+          "This is a later batch of the same discovery run. The queries below already ran; produce genuinely different search angles (different source types, different concrete sub-industries or areas within the ICP, different phrasing) rather than rewording one of these.",
+          ...criteria.excludeQueries.map((q) => `- ${q}`),
+        ]
+      : []),
   ].join("\n");
 
   const result = await runHermesCompletion({

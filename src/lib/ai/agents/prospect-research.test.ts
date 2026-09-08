@@ -4,7 +4,7 @@ import type { BusinessContext } from "@/lib/business-context";
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
-import { runProspectResearch } from "@/lib/ai/agents/prospect-research";
+import { runProspectResearch, type DiscoveryEvidence } from "@/lib/ai/agents/prospect-research";
 
 const VALID_RESEARCH = {
   companySummary: "A local retail store with an online presence.",
@@ -30,6 +30,17 @@ const baseInput = {
   campaignName: "Q1 Push",
   campaignObjective: "Book demo calls",
   businessContext: null,
+  discoveryEvidence: null,
+};
+
+const REAL_DISCOVERY_EVIDENCE: DiscoveryEvidence = {
+  location: "Jaipur",
+  industry: "Retail",
+  businessType: "Boutique",
+  matchedIcpCriteria: ["location: Jaipur"],
+  evidenceSnippet: "Sharma Retailers is a family-run clothing store in Jaipur serving customers since 2010.",
+  sourceUrl: "https://directory.example/jaipur-retail",
+  hasVerifiedContact: true,
 };
 
 const RESEARCH_BUSINESS_CONTEXT: BusinessContext = {
@@ -92,5 +103,25 @@ describe("runProspectResearch", () => {
     const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
     expect(prompt).toContain("Social Media Ad Management");
     expect(prompt).toContain("10 years running local campaigns");
+  });
+
+  it("feeds the real discovery evidence (the search excerpt, source, ICP match) into the actual request when it's on file — this is what gives research something concrete to verify against instead of reasoning almost blind", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_RESEARCH), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await runProspectResearch({ ...baseInput, discoveryEvidence: REAL_DISCOVERY_EVIDENCE });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("Sharma Retailers is a family-run clothing store in Jaipur serving customers since 2010.");
+    expect(prompt).toContain("https://directory.example/jaipur-retail");
+    expect(prompt).toContain("location: Jaipur");
+  });
+
+  it("honestly tells the model there is no discovery evidence for a lead added without it, rather than silently omitting the section", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_RESEARCH), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await runProspectResearch({ ...baseInput, discoveryEvidence: null });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("No discovery evidence on file for this lead");
   });
 });

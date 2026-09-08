@@ -3,11 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { runCampaignPlanner, type CampaignPlan, type CampaignPlannerResult } from "@/lib/ai/agents/campaign-planner";
-import { getDiscoveryProvider, prospectDedupeKey } from "@/lib/ai/agents/discovery";
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
-import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
+import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
-import { discoverProspectContacts, mergeContactIntoRawData, type ContactDiscoveryOutcome } from "@/lib/discovery/contact-enrichment";
 import {
   getCampaignDiscoverySchedule,
   markDiscoveryFinished,
@@ -17,7 +15,8 @@ import {
   stopCampaignDiscovery,
   type CampaignDiscoverySchedule,
 } from "@/lib/pipeline/discovery-schedule";
-import { runLeadResearchAction, runLeadQualificationAction } from "@/app/(dashboard)/leads/actions";
+import { runBatchedDiscovery, type BatchDiscoveryStopReason, type DiscoveredProspectSummary } from "@/lib/pipeline/discovery-batch";
+import { finishPendingLeads, type OutreachSweepSummary } from "@/lib/pipeline/scheduled-pipeline";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import type { Json, TablesUpdate } from "@/types/database.types";
@@ -259,32 +258,27 @@ export async function updateCampaign(
 
 // ---------------------------------------------------------------------------
 // Lead Discovery orchestration. Discovery's own job (src/lib/ai/agents/discovery.ts)
-// ends at a list of DiscoveredProspect — this function persists them as real
-// prospects/leads, then runs each one through the rest of the pipeline in
-// order (see runResearchAndQualification below):
+// ends at a list of DiscoveredProspect for ONE search pass — runBatchedDiscovery
+// (discovery-batch.ts) calls it as many times as it takes to reach a real
+// target, persisting each batch's valid prospects/leads immediately. Research
+// and qualification for newly discovered leads then reuse finishPendingLeads
+// (scheduled-pipeline.ts) — the exact same mechanism the hourly cron sweep
+// already uses — instead of a bespoke synchronous loop:
 //
-//   discovery -> persist prospect/lead -> Lead Research -> Qualification
+//   batched discovery -> persist prospects/leads -> finishPendingLeads
+//     (Lead Research -> Qualification -> automatic WhatsApp outreach)
 //
-// Qualification never runs on discovery evidence alone. It reuses the exact
-// same per-lead actions a user triggers by hand from a lead's page
-// (runLeadResearchAction / runLeadQualificationAction, leads/actions.ts), so
-// a newly discovered lead is scored only once real research evidence exists
-// for it — runLeadQualification's own clampWithoutResearchEvidence guard
-// (qualification.ts) additionally refuses to finalize "qualified"/
-// "disqualified" without it. A lead whose research fails or is skipped
-// simply stays at "pending" for later, exactly as a lead created any other
-// way would.
+// Qualification never runs on discovery evidence alone. finishPendingLeads
+// calls the exact same shared per-lead functions
+// (researchLead/qualifyLead, lib/pipeline/lead-pipeline.ts) that back the
+// manual "Run AI Research"/"Run Qualification" buttons, so a newly
+// discovered lead is scored only once real research evidence exists for it.
+// A lead this run's own time budget doesn't reach stays "pending" — not lost,
+// not silently dropped — and the next hourly cron tick (or a human opening
+// the lead) finishes it, exactly like any other pending lead.
 // ---------------------------------------------------------------------------
 
-export type DiscoveredProspectSummary = {
-  companyName: string;
-  website: string | null;
-  location: string | null;
-  industry: string | null;
-  sourceUrl: string;
-  evidenceSnippet: string;
-  matchedIcpCriteria: string[];
-};
+export type { DiscoveredProspectSummary };
 
 export type LeadDiscoveryActionResult =
   | {
@@ -293,40 +287,31 @@ export type LeadDiscoveryActionResult =
       prospectsFound: number;
       newLeadsCreated: number;
       duplicatesSkipped: number;
+      batchesRun: number;
+      stoppedReason: BatchDiscoveryStopReason;
       queriesRun: string[];
       queriesFailed: string[];
       prospects: DiscoveredProspectSummary[];
-      followUp: DiscoveryFollowUpSummary;
+      research: DiscoveryResearchSummary;
     }
   | { ok: false; code: "unauthorized" | "no_icp" | "already_running" | "not_configured" | "provider_error"; message: string };
 
-export type DiscoveryFollowUpSummary = {
-  researchAttempted: number;
-  researchSucceeded: number;
-  researchFailed: number;
-  qualified: number;
-  disqualified: number;
-  /** Left "pending"/"qualifying" — research failed, or research succeeded but the evidence wasn't enough to finalize a verdict. */
-  qualifying: number;
-  /** Discovered and saved, but not researched in this run because it ran out of time budget. They stay "pending" and can be picked up per-lead. */
-  deferred: number;
+export type DiscoveryResearchSummary = {
+  /** Leads this run actually finished researching + attempting qualification for (finishPendingLeads' own "finished" count). */
+  finished: number;
+  /** Leads this run genuinely attempted and failed — recorded, not retried automatically; see the lead's own research_error. */
+  failed: number;
+  /** Still "pending" after this run — some just discovered, possibly some older — picked up automatically by the next hourly cron tick, or by opening the lead. */
+  stillPending: number;
+  outreach: OutreachSweepSummary;
 };
 
 /**
- * How much of the request to spend starting new leads.
- *
- * The platform kills a serverless function at 300s. Research plus
- * qualification for a single lead measured ~48s against the real providers,
- * so a run that discovers more than a handful of leads cannot finish them
- * all in one request — an 8-lead run needs ~430s. Left unbounded it dies at
- * the ceiling: the response is lost, the agent run is never closed out, and
- * the leads it never reached sit at "pending" with nothing recording why.
- *
- * So stop *starting* leads once this much of the request is gone and report
- * the rest as deferred. The worst case is one lead starting just under the
- * line and running long, which still lands well inside 300s.
+ * Total budget for the whole request. The platform kills a serverless
+ * function at 300s; this leaves real margin rather than assuming every
+ * millisecond of it is usable.
  */
-const FOLLOW_UP_BUDGET_MS = 225_000;
+const TOTAL_REQUEST_BUDGET_MS = 270_000;
 
 /**
  * How long a "running" discovery run can sit before the duplicate-run guard
@@ -335,58 +320,6 @@ const FOLLOW_UP_BUDGET_MS = 225_000;
  * one that died without writing a terminal status.
  */
 const STALE_RUN_AFTER_MS = 15 * 60 * 1000;
-
-/**
- * Runs Lead Research, then (only on success) Qualification, for each newly
- * discovered lead — the same two per-lead actions a user can trigger by
- * hand from a lead's page. A lead whose research fails is left exactly as
- * discovery created it ("pending"); qualification is never attempted for it
- * on discovery evidence alone.
- *
- * Never fails the discovery run: the prospects/leads are already saved and
- * real, so a per-lead research or qualification failure — or running out of
- * budget before reaching a lead — is reflected in the summary counts rather
- * than throwing away a good discovery run.
- */
-async function runResearchAndQualification(leadIds: string[], startedAtMs: number): Promise<DiscoveryFollowUpSummary> {
-  const summary: DiscoveryFollowUpSummary = {
-    researchAttempted: 0,
-    researchSucceeded: 0,
-    researchFailed: 0,
-    qualified: 0,
-    disqualified: 0,
-    qualifying: 0,
-    deferred: 0,
-  };
-
-  for (const [index, leadId] of leadIds.entries()) {
-    if (Date.now() - startedAtMs >= FOLLOW_UP_BUDGET_MS) {
-      // Out of budget. Everything from here stays "pending" — untouched and
-      // still qualifiable per-lead — rather than being cut off mid-request.
-      summary.deferred = leadIds.length - index;
-      break;
-    }
-
-    summary.researchAttempted += 1;
-
-    const researchResult = await runLeadResearchAction(leadId);
-    if (!researchResult.ok) {
-      summary.researchFailed += 1;
-      continue;
-    }
-    summary.researchSucceeded += 1;
-
-    const qualificationResult = await runLeadQualificationAction(leadId);
-    if (!qualificationResult.ok) continue;
-
-    const status = qualificationResult.qualification.recommendedStatus;
-    if (status === "qualified") summary.qualified += 1;
-    else if (status === "disqualified") summary.disqualified += 1;
-    else summary.qualifying += 1;
-  }
-
-  return summary;
-}
 
 export async function startLeadDiscoveryAction(campaignId: string): Promise<LeadDiscoveryActionResult> {
   // Budget the whole request, not just the follow-up loop — discovery and
@@ -459,169 +392,77 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
 
   const businessContext = await getBusinessContext(currentOrg.organizationId);
 
-  const provider = getDiscoveryProvider();
-  const result = await provider.discover({
+  // Batched (see discovery-batch.ts): keeps calling discover() — each time
+  // asking Nemotron/Groq to avoid the queries already tried — until it hits
+  // a real target, runs out of its own time slice, or two batches in a row
+  // turn up nothing genuinely new. A single batch's own provider error never
+  // throws away an earlier batch's already-persisted leads. No client is
+  // passed through here (unlike the scheduled path) — this call already runs
+  // inside a real signed-in session, so the default cookie-based client
+  // already satisfies RLS for every AI stage's own telemetry.
+  const discoveryBudgetMs = Math.min(TOTAL_REQUEST_BUDGET_MS * 0.55, TOTAL_REQUEST_BUDGET_MS - 30_000);
+  const result = await runBatchedDiscovery({
+    supabase,
     organizationId: currentOrg.organizationId,
+    campaignId,
     campaignName: campaign.name,
     campaignObjective: campaign.objective,
     icpCriteria,
     businessContext: selectDiscoveryContext(businessContext),
+    startedAtMs,
+    budgetMs: discoveryBudgetMs,
+    agentRun,
   });
 
   if (!result.ok) {
-    await completeAgentRun(agentRun, "failed", {
-      code: result.code,
-      message: result.message,
-      telemetry: result.telemetry ?? null,
-    } as unknown as Json);
+    await completeAgentRun(agentRun, "failed", { code: result.code, message: result.message } as unknown as Json);
     await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: false, error: result.message });
     return { ok: false, code: result.code, message: result.message };
   }
 
-  // Cross-run de-dup: skip anything already persisted for this org (any
-  // campaign) under the same canonical website/company name, so re-running
-  // discovery never creates duplicate prospects.
-  const { data: existingProspects } = await supabase
-    .from("prospects")
-    .select("website, company_name")
-    .eq("organization_id", currentOrg.organizationId);
-
-  const existingKeys = new Set(
-    (existingProspects ?? []).map((p) => prospectDedupeKey({ website: p.website, companyName: p.company_name ?? "" }))
+  // Whatever time the batching phase didn't use goes to actually researching
+  // and qualifying what it found — reusing finishPendingLeads, the exact
+  // same mechanism the hourly cron sweep already relies on, instead of a
+  // second, bespoke synchronous loop. No per-campaign lead cap here (unlike
+  // the cron's own conservative default) — the real backstop is the time
+  // budget inside finishPendingLeads itself; whatever it doesn't reach stays
+  // "pending" and is picked up automatically by the next hourly cron tick.
+  const research = await finishPendingLeads(
+    supabase,
+    currentOrg.organizationId,
+    campaignId,
+    startedAtMs,
+    TOTAL_REQUEST_BUDGET_MS,
+    Number.MAX_SAFE_INTEGER
   );
 
-  const newProspects = result.prospects.filter((p) => !existingKeys.has(prospectDedupeKey(p)));
-  const duplicatesSkipped = result.prospects.length - newProspects.length;
+  const { count: stillPending } = await supabase
+    .from("leads")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", currentOrg.organizationId)
+    .eq("campaign_id", campaignId)
+    .eq("qualification_status", "pending")
+    .neq("research_status", "failed");
 
-  let leadSourceId: string | null = null;
-  if (newProspects.length > 0) {
-    const { data: existingSource } = await supabase
-      .from("lead_sources")
-      .select("id")
-      .eq("organization_id", currentOrg.organizationId)
-      .eq("type", "ai_discovery")
-      .maybeSingle();
+  const researchSummary: DiscoveryResearchSummary = {
+    finished: research.finished,
+    failed: research.failed,
+    stillPending: stillPending ?? 0,
+    outreach: research.outreach,
+  };
 
-    leadSourceId = existingSource?.id ?? null;
-    if (!leadSourceId) {
-      const { data: createdSource } = await supabase
-        .from("lead_sources")
-        .insert({ organization_id: currentOrg.organizationId, name: "AI Lead Discovery", type: "ai_discovery" })
-        .select("id")
-        .single();
-      leadSourceId = createdSource?.id ?? null;
-    }
-  }
-
-  let newLeadsCreated = 0;
-  const createdProspects: DiscoveredProspectSummary[] = [];
-  const newLeadIds: string[] = [];
-
-  for (const prospect of newProspects) {
-    // A search result almost never states an email or phone, which is why
-    // prospects used to be saved with neither even when the business
-    // published both. Reads the business's own site first; when there is no
-    // website at all — a normal outcome of search-based discovery, not a
-    // failure — or the site said nothing, falls back to bounded, targeted
-    // search evidence. Every field comes back with the page it was read
-    // from either way.
-    //
-    // Every internal path already degrades to null on a real failure rather
-    // than throwing — this catch is the hard guarantee that a genuinely
-    // unexpected error in enrichment can never lose the lead itself or
-    // abort every remaining prospect in this run.
-    let contactOutcome: ContactDiscoveryOutcome;
-    try {
-      contactOutcome = await discoverProspectContacts({
-        companyName: prospect.companyName,
-        website: prospect.website,
-        location: prospect.location,
-      });
-    } catch (error) {
-      console.error("[campaigns/actions] contact discovery threw unexpectedly — proceeding without it", error);
-      contactOutcome = { contacts: null, status: "not_found" };
-    }
-
-    const { data: prospectRow } = await supabase
-      .from("prospects")
-      .insert({
-        organization_id: currentOrg.organizationId,
-        campaign_id: campaignId,
-        lead_source_id: leadSourceId,
-        company_name: prospect.companyName,
-        email: prospect.email ?? contactOutcome.contacts?.email?.value ?? null,
-        phone: prospect.phone ?? contactOutcome.contacts?.phone?.value ?? null,
-        website: prospect.website,
-        raw_data: mergeContactIntoRawData(
-          {
-            location: prospect.location,
-            industry: prospect.industry,
-            businessType: prospect.businessType,
-            matchedIcpCriteria: prospect.matchedIcpCriteria,
-            evidenceSnippet: prospect.evidenceSnippet,
-            sourceUrl: prospect.sourceUrl,
-            searchQuery: prospect.searchQuery,
-            discoverySource: provider.name,
-            discoveredAt: new Date().toISOString(),
-          },
-          contactOutcome
-        ) as unknown as Json,
-      })
-      .select("id")
-      .single();
-
-    if (!prospectRow) continue;
-
-    const { data: leadRow } = await supabase
-      .from("leads")
-      .insert({
-        organization_id: currentOrg.organizationId,
-        prospect_id: prospectRow.id,
-        campaign_id: campaignId,
-        lead_source_id: leadSourceId,
-        status: "new",
-        qualification_status: "pending",
-      })
-      .select("id")
-      .single();
-
-    if (!leadRow) continue;
-
-    newLeadsCreated += 1;
-    newLeadIds.push(leadRow.id);
-    createdProspects.push({
-      companyName: prospect.companyName,
-      website: prospect.website,
-      location: prospect.location,
-      industry: prospect.industry,
-      sourceUrl: prospect.sourceUrl,
-      evidenceSnippet: prospect.evidenceSnippet,
-      matchedIcpCriteria: prospect.matchedIcpCriteria,
-    });
-
-    if (agentRun) {
-      await recordAgentAction({
-        organizationId: currentOrg.organizationId,
-        agentRunId: agentRun.id,
-        actionType: "lead_discovered",
-        targetEntityType: "lead",
-        targetEntityId: leadRow.id,
-        payload: { companyName: prospect.companyName, sourceUrl: prospect.sourceUrl } as unknown as Json,
-      });
-    }
-  }
-
-  const followUpSummary = await runResearchAndQualification(newLeadIds, startedAtMs);
-
-  const finalStatus: "completed" | "partially_completed" = result.queriesFailed.length > 0 ? "partially_completed" : "completed";
+  const finalStatus: "completed" | "partially_completed" =
+    result.queriesFailed.length > 0 || result.stoppedReason === "provider_error" ? "partially_completed" : "completed";
   await completeAgentRun(agentRun, finalStatus, {
-    followUp: followUpSummary,
-    prospectsFound: result.prospects.length,
-    newLeadsCreated,
-    duplicatesSkipped,
+    batchesRun: result.batchesRun,
+    stoppedReason: result.stoppedReason,
+    research: researchSummary,
+    prospectsFound: result.prospectsFound,
+    newLeadsCreated: result.newLeadsCreated,
+    duplicatesSkipped: result.duplicatesSkipped,
     queriesRun: result.queriesRun,
     queriesFailed: result.queriesFailed,
-    telemetry: result.telemetry ?? null,
+    telemetry: result.batchTelemetry,
   } as unknown as Json);
 
   // Books the next run in this campaign's single schedule slot — see
@@ -634,13 +475,15 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   return {
     ok: true,
     status: finalStatus,
-    prospectsFound: result.prospects.length,
-    newLeadsCreated,
-    duplicatesSkipped,
+    prospectsFound: result.prospectsFound,
+    newLeadsCreated: result.newLeadsCreated,
+    duplicatesSkipped: result.duplicatesSkipped,
+    batchesRun: result.batchesRun,
+    stoppedReason: result.stoppedReason,
     queriesRun: result.queriesRun,
     queriesFailed: result.queriesFailed,
-    prospects: createdProspects,
-    followUp: followUpSummary,
+    prospects: result.createdProspects,
+    research: researchSummary,
   };
 }
 
@@ -747,15 +590,34 @@ export async function getDiscoveryScheduleAction(campaignId: string): Promise<Di
   return readSchedule(campaignId);
 }
 
+/** The last completed/failed run's own reported totals — written once, at the end of that run. */
+export type DiscoveryRunOutputSummary = {
+  prospectsFound: number;
+  newLeadsCreated: number;
+  duplicatesSkipped: number;
+  batchesRun: number;
+  stoppedReason: string;
+  research: DiscoveryResearchSummary | null;
+};
+
 export type DiscoveryProgress = {
   /** null when this campaign has never been run. */
   status: "running" | "completed" | "partially_completed" | "failed" | null;
   startedAt: string | null;
   completedAt: string | null;
+  /** Total leads on this campaign right now — grows live while a run is in flight, since leads are persisted as soon as each batch is discovered. */
   leadsCreated: number;
+  /** Currently being researched (research_status = "researching") — a live, moment-in-time count, not the finished run's own totals. */
+  researching: number;
+  /** Research finished successfully (research_status = "completed"). */
   researched: number;
+  /** Research genuinely failed and is not being silently retried (research_status = "failed"); see the lead's own research_error. */
+  researchFailed: number;
+  /** Discovered but not yet picked up for research — waiting for this run's own budget, or the next hourly cron tick. */
+  waitingForResearch: number;
   scored: number;
-  followUp: DiscoveryFollowUpSummary | null;
+  /** The most recent run's own reported totals, once it has a terminal status — null while still running or if it has none yet. */
+  discovery: DiscoveryRunOutputSummary | null;
   message: string | null;
   /** The recurring cycle's current state, polled alongside progress so Stop/Resume and "next run" stay live in every open tab. */
   schedule: DiscoveryScheduleView | null;
@@ -780,9 +642,12 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
     startedAt: null,
     completedAt: null,
     leadsCreated: 0,
+    researching: 0,
     researched: 0,
+    researchFailed: 0,
+    waitingForResearch: 0,
     scored: 0,
-    followUp: null,
+    discovery: null,
     message: null,
     schedule: null,
   };
@@ -804,7 +669,7 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
       .order("started_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
-    supabase.from("leads").select("id, qualification_status").eq("campaign_id", campaignId),
+    supabase.from("leads").select("id, qualification_status, research_status").eq("campaign_id", campaignId),
   ]);
 
   // A campaign with no run yet still has a schedule to report — that is how
@@ -812,22 +677,43 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
   if (!run.data) return { ...empty, schedule };
 
   const leads = leadRows.data ?? [];
-  const leadIds = leads.map((l) => l.id);
 
-  const { count: researchCount } = leadIds.length
-    ? await supabase.from("lead_research").select("id", { count: "exact", head: true }).in("lead_id", leadIds)
-    : { count: 0 };
+  const output = (run.data.output ?? null) as {
+    prospectsFound?: number;
+    newLeadsCreated?: number;
+    duplicatesSkipped?: number;
+    batchesRun?: number;
+    stoppedReason?: string;
+    research?: DiscoveryResearchSummary;
+    message?: string;
+  } | null;
 
-  const output = (run.data.output ?? null) as { followUp?: DiscoveryFollowUpSummary; message?: string } | null;
+  // batchesRun only appears on a run that reached the new batched-discovery
+  // path's own terminal write — never invented for a run still in flight or
+  // one that failed before getting there.
+  const discovery: DiscoveryRunOutputSummary | null =
+    output && output.batchesRun !== undefined
+      ? {
+          prospectsFound: output.prospectsFound ?? 0,
+          newLeadsCreated: output.newLeadsCreated ?? 0,
+          duplicatesSkipped: output.duplicatesSkipped ?? 0,
+          batchesRun: output.batchesRun,
+          stoppedReason: output.stoppedReason ?? "unknown",
+          research: output.research ?? null,
+        }
+      : null;
 
   return {
     status: run.data.status as DiscoveryProgress["status"],
     startedAt: run.data.started_at,
     completedAt: run.data.completed_at,
     leadsCreated: leads.length,
-    researched: researchCount ?? 0,
+    researching: leads.filter((l) => l.research_status === "researching").length,
+    researched: leads.filter((l) => l.research_status === "completed").length,
+    researchFailed: leads.filter((l) => l.research_status === "failed").length,
+    waitingForResearch: leads.filter((l) => l.research_status === "pending" || l.research_status === null).length,
     scored: leads.filter((l) => l.qualification_status !== "pending").length,
-    followUp: output?.followUp ?? null,
+    discovery,
     message: output?.message ?? null,
     schedule,
   };
@@ -836,6 +722,9 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
 export type DiscoveredLeadRow = {
   leadId: string;
   leadStatus: string;
+  /** "pending" / "researching" / "completed" / "failed" — see researchLead (lead-pipeline.ts). Drives the lifecycle badge: a lead that hasn't reached "completed" yet must never be shown with a confidence label. */
+  researchStatus: string;
+  qualificationStatus: string;
   companyName: string | null;
   website: string | null;
   location: string | null;
@@ -885,7 +774,7 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
   if (discoverySource.data) {
     const { data: leadRows } = await supabase
       .from("leads")
-      .select("id, status, prospect_id, created_at")
+      .select("id, status, research_status, qualification_status, prospect_id, created_at")
       .eq("organization_id", currentOrg.organizationId)
       .eq("campaign_id", campaignId)
       .eq("lead_source_id", discoverySource.data.id)
@@ -904,6 +793,8 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
       return {
         leadId: lead.id,
         leadStatus: lead.status,
+        researchStatus: lead.research_status,
+        qualificationStatus: lead.qualification_status,
         companyName: prospect?.company_name ?? null,
         website: prospect?.website ?? null,
         location: typeof rawData.location === "string" ? rawData.location : null,

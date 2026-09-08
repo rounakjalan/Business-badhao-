@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Proves the manual "Start Discovery" action (startLeadDiscoveryAction)
-// automatically researches every newly discovered lead — the exact same
-// runResearchAndQualification wiring this file already had — without
-// anyone opening a lead or pressing "Run AI Research". This is the manual
-// counterpart to scheduled-pipeline.test.ts's proof for the hourly cron
-// path; both go through the one real researchLead (lead-pipeline.ts),
-// which is what now also tracks research_status/research_error.
+// automatically researches every newly discovered lead — via
+// finishPendingLeads (scheduled-pipeline.ts), the exact same mechanism the
+// hourly cron sweep already relies on — without anyone opening a lead or
+// pressing "Run AI Research". This is the manual counterpart to
+// scheduled-pipeline.test.ts's proof for the hourly cron path; both go
+// through the one real researchLead (lead-pipeline.ts), which is what
+// tracks research_status/research_error.
 
 vi.mock("@/lib/organizations", () => ({ getCurrentOrg: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
@@ -252,10 +253,12 @@ describe("startLeadDiscoveryAction — automatic AI research on manual Start Dis
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.newLeadsCreated).toBe(1);
-    // The exact proof: research genuinely ran against the newly created
-    // lead, inside this same action call, before it ever returned.
-    expect(result.followUp.researchAttempted).toBe(1);
-    expect(result.followUp.researchSucceeded).toBe(1);
+    // The exact proof: research (and qualification) genuinely ran against
+    // the newly created lead, inside this same action call, before it ever
+    // returned — via finishPendingLeads, not a bespoke loop.
+    expect(result.research.finished).toBe(1);
+    expect(result.research.failed).toBe(0);
+    expect(result.research.stillPending).toBe(0);
 
     const leads = tables.leads as (Row & { research_status: string })[];
     expect(leads).toHaveLength(1);

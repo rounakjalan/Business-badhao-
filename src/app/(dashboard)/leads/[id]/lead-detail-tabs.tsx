@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, type ReactNode } from "react";
 import Link from "next/link";
 import {
   addContactForLead,
@@ -589,7 +589,7 @@ export function LeadDetailTabs({
                     : "No research recorded for this lead yet. New leads are researched automatically shortly after discovery."}
               </p>
             ) : (
-              research.map((r) => <ResearchCard key={r.id} research={r} />)
+              research.map((r) => <ResearchCard key={r.id} research={r} discovery={discovery} companyName={companyName} website={website} />)
             )}
           </div>
         ) : null}
@@ -816,40 +816,185 @@ function Row({ label, val }: { label: string; val: string }) {
   );
 }
 
-const CONFIDENCE_COLOR: Record<string, string> = { low: "text-bb-rose", medium: "text-bb-amber", high: "text-bb-emerald" };
+const CONFIDENCE_BADGE: Record<string, string> = {
+  low: "bg-bb-rose/15 text-bb-rose",
+  medium: "bg-bb-amber/15 text-bb-amber",
+  high: "bg-bb-emerald/15 text-bb-emerald",
+};
 
-function ResearchCard({ research: r }: { research: { id: string; summary: string | null; findings: unknown; source: string; created_at: string } }) {
+function ConfidenceBadge({ confidence }: { confidence: string }) {
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${CONFIDENCE_BADGE[confidence] ?? "bg-bb-navy-3 text-bb-text-3"}`}>
+      {confidence} confidence
+    </span>
+  );
+}
+
+/** One labeled section of the Research tab's A-F structure — a consistent header plus spacing, never one giant undifferentiated paragraph. */
+function ResearchSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="border-t border-bb-border pt-3 first:border-t-0 first:pt-0">
+      <div className="mb-1.5 text-xs font-medium tracking-wide text-bb-text-3">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The Research tab's per-run card, restructured into distinct sections
+ * (Summary / Verified Company Info / Evidence & Sources / Buying Signals /
+ * Missing Information / AI Recommendation) rather than one dense paragraph.
+ * confidence is whatever classifyResearchConfidence (research-confidence.ts)
+ * computed and stored at research time — never re-derived here — so this
+ * card only ever displays the same deterministic judgment already on file.
+ *
+ * Evidence & Sources deliberately never invents a source per verified-claim
+ * string: the model's verifiedInformation/businessFactsReferenced arrays
+ * carry no source link of their own, so they're shown attributed to the
+ * real, on-file evidence above them (the discovery snippet + each contact
+ * field's own source) rather than assigning them fabricated citations.
+ */
+function ResearchCard({
+  research: r,
+  discovery,
+  companyName,
+  website,
+}: {
+  research: { id: string; summary: string | null; findings: unknown; source: string; created_at: string };
+  discovery: ProspectRawData;
+  companyName: string | null;
+  website: string | null;
+}) {
   const parsed = ProspectResearchSchema.safeParse(r.findings);
   const findings = parsed.success ? parsed.data : null;
 
+  const verifiedClaims = findings ? [...findings.verifiedInformation, ...findings.businessFactsReferenced] : [];
+  const keyOpportunity = findings?.buyingSignals[0] ?? findings?.likelyNeeds[0] ?? null;
+
+  const companyRows = [
+    companyName ? { label: "Company", value: companyName } : null,
+    website ? { label: "Website", value: website } : null,
+    discovery.industry ? { label: "Industry", value: discovery.industry } : null,
+    discovery.location ? { label: "Location", value: discovery.location } : null,
+    discovery.businessType ? { label: "Business type", value: discovery.businessType } : null,
+    discovery.contact?.email ? { label: "Email (verified)", value: discovery.contact.email.value } : null,
+    discovery.contact?.phone ? { label: "Phone (verified)", value: discovery.contact.phone.value } : null,
+  ].filter((row): row is { label: string; value: string } => row !== null);
+
+  const sourceEntries: { label: string; found: string; sourceUrl: string | null }[] = [];
+  if (discovery.sourceUrl && discovery.evidenceSnippet) {
+    sourceEntries.push({ label: "How this lead was discovered", found: discovery.evidenceSnippet, sourceUrl: discovery.sourceUrl });
+  }
+  for (const [label, field] of [
+    ["Email", discovery.contact?.email ?? null],
+    ["Phone", discovery.contact?.phone ?? null],
+    ["WhatsApp", discovery.contact?.whatsapp ?? null],
+  ] as [string, ProspectContactField | null][]) {
+    if (field) sourceEntries.push({ label, found: field.value, sourceUrl: /^https?:\/\//.test(field.source) ? field.source : null });
+  }
+
   return (
-    <DarkCard className="p-4">
-      <div className="mb-1 flex items-center justify-between text-xs text-bb-text-3">
-        <span className="capitalize">{r.source}</span>
-        <div className="flex items-center gap-2">
-          {findings ? <span className={`font-medium capitalize ${CONFIDENCE_COLOR[findings.confidence] ?? "text-bb-text-3"}`}>{findings.confidence} confidence</span> : null}
-          <span>{formatDate(r.created_at)}</span>
-        </div>
+    <DarkCard className="space-y-4 p-5">
+      <div className="flex items-center justify-between text-xs text-bb-text-3">
+        <span className="capitalize">{r.source} research</span>
+        <span>{formatDate(r.created_at)}</span>
       </div>
-      <p className="text-sm text-bb-text-2">{r.summary ?? "No summary."}</p>
+
+      <ResearchSection title="RESEARCH SUMMARY">
+        {findings ? (
+          <div className="mb-2">
+            <ConfidenceBadge confidence={findings.confidence} />
+          </div>
+        ) : null}
+        <p className="text-sm text-bb-text-2">{r.summary ?? findings?.companySummary ?? "No summary."}</p>
+        {discovery.matchedIcpCriteria.length > 0 ? (
+          <p className="mt-2 text-xs text-bb-text-3">Matches this campaign&apos;s ICP on: {discovery.matchedIcpCriteria.join(", ")}</p>
+        ) : null}
+        {keyOpportunity ? <p className="mt-2 text-xs text-bb-emerald">Key opportunity: {keyOpportunity}</p> : null}
+      </ResearchSection>
+
+      {companyRows.length > 0 ? (
+        <ResearchSection title="VERIFIED COMPANY INFORMATION">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {companyRows.map((row) => (
+              <div key={row.label}>
+                <div className="text-xs text-bb-text-3">{row.label}</div>
+                <div className="text-sm text-bb-text-2">{row.value}</div>
+              </div>
+            ))}
+          </div>
+        </ResearchSection>
+      ) : null}
+
+      <ResearchSection title="EVIDENCE & SOURCES">
+        {sourceEntries.length > 0 ? (
+          <div className="space-y-1.5">
+            {sourceEntries.map((entry, i) => (
+              <p key={i} className="text-xs">
+                <span className="text-bb-text-2">{entry.label}: </span>
+                <span className="text-bb-text-3">{entry.found}</span>
+                {entry.sourceUrl ? (
+                  <>
+                    {" — "}
+                    <a href={entry.sourceUrl} target="_blank" rel="noreferrer" className="text-bb-indigo-2 hover:underline">
+                      source
+                    </a>
+                  </>
+                ) : null}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-bb-text-3">No sourced evidence on file for this lead yet.</p>
+        )}
+        {verifiedClaims.length > 0 ? (
+          <p className="mt-2 text-xs text-bb-emerald">
+            The AI confirmed, from the evidence above and any Business Knowledge on file: {verifiedClaims.join("; ")}
+          </p>
+        ) : null}
+        {findings && findings.inferredInformation.length > 0 ? (
+          <p className="mt-2 text-xs text-bb-text-3">Inferred, not directly verified: {findings.inferredInformation.join("; ")}</p>
+        ) : null}
+      </ResearchSection>
+
+      <ResearchSection title="BUYING / OPPORTUNITY SIGNALS">
+        {findings && findings.buyingSignals.length > 0 ? (
+          <ul className="list-disc space-y-1 pl-4 text-xs text-bb-text-2">
+            {findings.buyingSignals.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-bb-text-3">Not verified — no buying signal is supported by the evidence on file yet.</p>
+        )}
+      </ResearchSection>
+
+      <ResearchSection title="MISSING INFORMATION">
+        {findings && findings.unavailableInformation.length > 0 ? (
+          <p className="text-xs text-bb-amber">{findings.unavailableInformation.join("; ")}</p>
+        ) : (
+          <p className="text-xs text-bb-text-3">Nothing flagged as missing.</p>
+        )}
+      </ResearchSection>
 
       {findings ? (
-        <div className="mt-3 space-y-2 border-t border-bb-border pt-3 text-xs">
-          {findings.likelyNeeds.length > 0 ? <p className="text-bb-text-2">Likely needs: {findings.likelyNeeds.join("; ")}</p> : null}
-          {findings.possiblePainPoints.length > 0 ? <p className="text-bb-text-2">Possible pain points: {findings.possiblePainPoints.join("; ")}</p> : null}
-          {findings.buyingSignals.length > 0 ? <p className="text-bb-text-2">Buying signals: {findings.buyingSignals.join("; ")}</p> : null}
-          {(findings.verifiedInformation.length > 0 || findings.businessFactsReferenced.length > 0) ? (
-            <p className="text-bb-emerald">
-              Verified: {[...findings.verifiedInformation, ...findings.businessFactsReferenced].join("; ")}
-            </p>
-          ) : null}
-          {findings.inferredInformation.length > 0 ? (
-            <p className="text-bb-text-3">Inferred (not verified): {findings.inferredInformation.join("; ")}</p>
-          ) : null}
-          {findings.unavailableInformation.length > 0 ? (
-            <p className="text-bb-amber">Not available: {findings.unavailableInformation.join("; ")}</p>
-          ) : null}
-        </div>
+        <ResearchSection title="AI RECOMMENDATION">
+          <div className="space-y-1.5 text-xs">
+            {findings.likelyNeeds.length > 0 ? <p className="text-bb-text-2">Likely needs: {findings.likelyNeeds.join("; ")}</p> : null}
+            {findings.possiblePainPoints.length > 0 ? (
+              <p className="text-bb-text-2">Possible pain points: {findings.possiblePainPoints.join("; ")}</p>
+            ) : null}
+            {findings.relevantProductsOrServices.length > 0 ? (
+              <p className="text-bb-text-2">Relevant offering: {findings.relevantProductsOrServices.join("; ")}</p>
+            ) : null}
+            {findings.personalizationOpportunities.length > 0 ? (
+              <p className="text-bb-indigo-2">Suggested outreach angle: {findings.personalizationOpportunities.join("; ")}</p>
+            ) : null}
+            {findings.potentialObjections.length > 0 ? (
+              <p className="text-bb-text-3">Be ready for: {findings.potentialObjections.join("; ")}</p>
+            ) : null}
+          </div>
+        </ResearchSection>
       ) : null}
     </DarkCard>
   );

@@ -9,6 +9,8 @@ import { getConnectionStatus as getGmailConnectionStatus } from "@/lib/gmail/tok
 import { resolveLeadIdentity } from "@/lib/lead-names";
 import { selectOutreachChannel, type WhatsAppIneligibleReason } from "@/lib/outreach/channel-selection";
 import { ensureConversation } from "@/lib/outreach/conversation";
+import { parseProspectRawData } from "@/lib/prospects";
+import { classifyResearchConfidence } from "@/lib/research-confidence";
 import { normalizePhoneNumber } from "@/lib/whatsapp/phone";
 import { getWhatsAppAutomationConfig } from "@/lib/whatsapp/tokens";
 import { sendWhatsAppTemplateMessage } from "@/lib/whatsapp/send";
@@ -45,7 +47,7 @@ export async function loadLeadContext(supabase: Client, leadId: string, organiza
   const [contacts, prospect, campaign, latestResearch] = await Promise.all([
     supabase.from("contacts").select("full_name, is_primary").eq("lead_id", leadId),
     lead.prospect_id
-      ? supabase.from("prospects").select("company_name, website, title").eq("id", lead.prospect_id).maybeSingle()
+      ? supabase.from("prospects").select("company_name, website, title, raw_data").eq("id", lead.prospect_id).maybeSingle()
       : Promise.resolve({ data: null }),
     lead.campaign_id
       ? supabase.from("campaigns").select("name, objective, ideal_customer_profile_id").eq("id", lead.campaign_id).maybeSingle()
@@ -70,6 +72,12 @@ export async function loadLeadContext(supabase: Client, leadId: string, organiza
   }
 
   const primaryContact = contacts.data?.find((c) => c.is_primary) ?? contacts.data?.[0] ?? null;
+  // The real, grounded evidence Lead Discovery captured for this prospect —
+  // see prospects.ts's ProspectRawData. Without feeding this to the research
+  // agent it had almost nothing prospect-specific to reason over, which is
+  // why research confidence was effectively always low regardless of what
+  // Lead Discovery had actually found.
+  const rawData = prospect.data ? parseProspectRawData(prospect.data.raw_data) : null;
 
   return {
     lead,
@@ -81,6 +89,17 @@ export async function loadLeadContext(supabase: Client, leadId: string, organiza
     campaignObjective: campaign.data?.objective ?? null,
     icpCriteria,
     latestResearchSummary: latestResearch.data?.summary ?? null,
+    discoveryEvidence: rawData
+      ? {
+          location: rawData.location,
+          industry: rawData.industry,
+          businessType: rawData.businessType,
+          matchedIcpCriteria: rawData.matchedIcpCriteria,
+          evidenceSnippet: rawData.evidenceSnippet,
+          sourceUrl: rawData.sourceUrl,
+          hasVerifiedContact: rawData.contact?.contactStatus === "found",
+        }
+      : null,
   };
 }
 
@@ -110,9 +129,29 @@ export async function researchLead(
     campaignName: context.campaignName,
     campaignObjective: context.campaignObjective,
     businessContext: selectResearchContext(businessContext),
+    discoveryEvidence: context.discoveryEvidence,
   });
 
   if (result.ok) {
+    // The model's own "confidence" self-report is never trusted at face
+    // value — same reason the Deterministic Validator never trusts a
+    // discovery model's own claim of groundedness. Overwritten here with a
+    // classification computed from measurable evidence signals (see
+    // classifyResearchConfidence) before this ever reaches storage or the
+    // Research tab, so a lead can't read "High Confidence" just because the
+    // model said so with nothing real behind it.
+    const confidence = classifyResearchConfidence({
+      hasWebsite: Boolean(context.website),
+      hasEvidenceSnippet: Boolean(context.discoveryEvidence?.evidenceSnippet),
+      matchedIcpCriteriaCount: context.discoveryEvidence?.matchedIcpCriteria.length ?? 0,
+      hasVerifiedContact: context.discoveryEvidence?.hasVerifiedContact ?? false,
+      verifiedInformationCount: result.research.verifiedInformation.length,
+      businessFactsReferencedCount: result.research.businessFactsReferenced.length,
+      inferredInformationCount: result.research.inferredInformation.length,
+      unavailableInformationCount: result.research.unavailableInformation.length,
+    });
+    result.research.confidence = confidence;
+
     await supabase.from("lead_research").insert({
       organization_id: organizationId,
       lead_id: leadId,

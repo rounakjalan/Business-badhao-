@@ -15,6 +15,7 @@ import {
   type DiscoveryScheduleView,
   type DiscoveredLeadRow,
   type DiscoveredProspectSummary,
+  type DiscoveryResearchSummary,
   type LeadDiscoveryActionResult,
 } from "@/app/(dashboard)/campaigns/actions";
 import { IcpSchema, type Icp } from "@/lib/ai/agents/icp-schema";
@@ -180,9 +181,12 @@ export function CampaignDetailTabs({
       startedAt: new Date().toISOString(),
       completedAt: null,
       leadsCreated: p?.leadsCreated ?? 0,
+      researching: p?.researching ?? 0,
       researched: p?.researched ?? 0,
+      researchFailed: p?.researchFailed ?? 0,
+      waitingForResearch: p?.waitingForResearch ?? 0,
       scored: p?.scored ?? 0,
-      followUp: null,
+      discovery: null,
       message: null,
       schedule: p?.schedule ?? schedule,
     }));
@@ -606,9 +610,7 @@ function notifyDiscoveryFinished(progress: DiscoveryProgress) {
     if (Notification.permission !== "granted") return;
     if (typeof document !== "undefined" && document.visibilityState === "visible") return;
 
-    const leads = progress.followUp
-      ? (progress.followUp.researchSucceeded ?? 0)
-      : progress.scored;
+    const leads = progress.discovery?.research?.finished ?? progress.researched;
     new Notification("Lead discovery finished", {
       body:
         progress.status === "failed"
@@ -639,14 +641,14 @@ const DISCOVERY_ERROR_TITLES: Record<string, string> = {
   provider_error: "Discovery run failed",
 };
 
-type FollowUpSummary = {
-  researchAttempted?: number;
-  researchSucceeded?: number;
-  researchFailed?: number;
-  qualified?: number;
-  disqualified?: number;
-  qualifying?: number;
-  deferred?: number;
+/** Why a batched discovery run stopped adding new leads — see BatchDiscoveryStopReason (discovery-batch.ts). */
+const STOPPED_REASON_LABEL: Record<string, string> = {
+  target_reached: "reached this run's target for new leads",
+  no_more_results: "found no further new, matching prospects — this ICP's easily-reachable pool is exhausted for now",
+  max_batches: "reached its per-run search-batch limit",
+  out_of_time: "reached its time limit for this run",
+  provider_error: "stopped after repeated search errors",
+  not_configured: "search provider not configured",
 };
 
 type LastRunOutput = {
@@ -654,53 +656,73 @@ type LastRunOutput = {
   prospectsFound?: number;
   newLeadsCreated?: number;
   duplicatesSkipped?: number;
+  batchesRun?: number;
+  stoppedReason?: string;
   queriesRun?: string[];
   queriesFailed?: string[];
-  followUp?: FollowUpSummary;
+  research?: DiscoveryResearchSummary;
 };
 
 /**
- * What happened to the leads a run created, after they were saved. Without
- * this the run reports only how many leads it found, so leads left
- * unresearched because the run ran out of time budget are invisible — they
- * just sit at "pending" with nothing explaining why.
+ * What a batched run actually did — how many search batches it ran and why
+ * it stopped, and what happened to the leads it saved once research and
+ * qualification (finishPendingLeads) reached them. Without this a run
+ * reports only how many leads it found, so leads left waiting because the
+ * run ran out of time budget were invisible — they just sat at "pending"
+ * with nothing explaining why.
  */
-function FollowUpSummaryView({ followUp }: { followUp: FollowUpSummary }) {
-  const researched = followUp.researchSucceeded ?? 0;
-  const researchFailed = followUp.researchFailed ?? 0;
-  const deferred = followUp.deferred ?? 0;
+function DiscoveryRunSummaryView({
+  batchesRun,
+  stoppedReason,
+  duplicatesSkipped,
+  research,
+}: {
+  batchesRun?: number;
+  stoppedReason?: string;
+  duplicatesSkipped?: number;
+  research?: DiscoveryResearchSummary | null;
+}) {
+  if (batchesRun === undefined && !research) return null;
 
   return (
-    <div className="mt-4 border-t border-bb-border pt-3">
-      <div className="mb-2 text-xs font-medium text-bb-text-3">AFTER DISCOVERY</div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
-        <span className="flex items-center gap-1.5">
-          <span className="font-jetbrains font-semibold text-bb-text-2">{researched}</span> researched
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="font-jetbrains font-semibold text-bb-text-2">{followUp.qualified ?? 0}</span> qualified
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="font-jetbrains font-semibold text-bb-text-2">{followUp.qualifying ?? 0}</span> qualifying
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="font-jetbrains font-semibold text-bb-text-2">{followUp.disqualified ?? 0}</span> disqualified
-        </span>
-      </div>
-
-      {deferred > 0 ? (
-        <p className="mt-2 text-xs text-bb-amber">
-          {deferred} {deferred === 1 ? "lead was" : "leads were"} saved but not researched — this run reached its time
-          limit. {deferred === 1 ? "It is" : "They are"} waiting under Discovered Leads below; open{" "}
-          {deferred === 1 ? "it" : "any of them"} and use Run Research, then Run Qualification.
+    <div className="mt-4 border-t border-bb-border pt-3 space-y-3">
+      {batchesRun !== undefined ? (
+        <p className="text-xs text-bb-text-3">
+          Ran {batchesRun} search {batchesRun === 1 ? "batch" : "batches"}
+          {duplicatesSkipped ? `, skipped ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? "" : "s"} already on file` : ""} — this
+          run {STOPPED_REASON_LABEL[stoppedReason ?? ""] ?? "stopped"}.
         </p>
       ) : null}
 
-      {researchFailed > 0 ? (
-        <p className="mt-2 text-xs text-bb-amber">
-          Research failed for {researchFailed} {researchFailed === 1 ? "lead" : "leads"}, so {researchFailed === 1 ? "it was" : "they were"}{" "}
-          left unscored rather than judged on search results alone. You can retry from the lead&apos;s page.
-        </p>
+      {research ? (
+        <div>
+          <div className="mb-1 text-xs font-medium text-bb-text-3">RESEARCH &amp; QUALIFICATION</div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
+            <span className="flex items-center gap-1.5">
+              <span className="font-jetbrains font-semibold text-bb-text-2">{research.finished}</span> completed
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="font-jetbrains font-semibold text-bb-text-2">{research.stillPending}</span> waiting / queued
+            </span>
+            {research.failed > 0 ? (
+              <span className="flex items-center gap-1.5">
+                <span className="font-jetbrains font-semibold text-bb-amber">{research.failed}</span> failed
+              </span>
+            ) : null}
+          </div>
+          {research.stillPending > 0 ? (
+            <p className="mt-2 text-xs text-bb-amber">
+              {research.stillPending} {research.stillPending === 1 ? "lead is" : "leads are"} still waiting for research —
+              picked up automatically within the hour, or open the lead now and use Run Research.
+            </p>
+          ) : null}
+          {research.failed > 0 ? (
+            <p className="mt-2 text-xs text-bb-amber">
+              Research or qualification genuinely failed for {research.failed} {research.failed === 1 ? "lead" : "leads"} — left
+              unscored rather than judged without real evidence. Retry from the lead&apos;s page.
+            </p>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -862,16 +884,26 @@ function LeadDiscoveryTab({
             here any time to see how it went.
           </p>
           {progress && progress.leadsCreated > 0 ? (
-            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
-              <span className="flex items-center gap-1.5">
-                <span className="font-jetbrains font-semibold text-bb-text-2">{progress.leadsCreated}</span> leads found
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="font-jetbrains font-semibold text-bb-text-2">{progress.researched}</span> researched
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="font-jetbrains font-semibold text-bb-text-2">{progress.scored}</span> scored
-              </span>
+            <div className="mt-3 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
+                <span className="flex items-center gap-1.5">
+                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.leadsCreated}</span> leads found
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
+                <span className="flex items-center gap-1.5">
+                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.researched}</span> researched
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="font-jetbrains font-semibold text-bb-indigo-2">{progress.researching}</span> researching now
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.waitingForResearch}</span> queued
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.scored}</span> scored
+                </span>
+              </div>
             </div>
           ) : (
             <p className="mt-3 text-xs text-bb-text-3">Searching for prospects…</p>
@@ -910,7 +942,12 @@ function LeadDiscoveryTab({
               results below are from the queries that succeeded.
             </p>
           ) : null}
-          {result.followUp ? <FollowUpSummaryView followUp={result.followUp} /> : null}
+          <DiscoveryRunSummaryView
+            batchesRun={result.batchesRun}
+            stoppedReason={result.stoppedReason}
+            duplicatesSkipped={result.duplicatesSkipped}
+            research={result.research}
+          />
           {result.prospects.length > 0 ? (
             <div className="mt-4 space-y-3">
               {result.prospects.map((p, i) => (
@@ -938,7 +975,14 @@ function LeadDiscoveryTab({
               <DiscoveryStat label="Duplicates skipped" value={lastRunOutput.duplicatesSkipped ?? 0} />
             </div>
           ) : null}
-          {lastRunOutput?.followUp ? <FollowUpSummaryView followUp={lastRunOutput.followUp} /> : null}
+          {lastRunOutput ? (
+            <DiscoveryRunSummaryView
+              batchesRun={lastRunOutput.batchesRun}
+              stoppedReason={lastRunOutput.stoppedReason}
+              duplicatesSkipped={lastRunOutput.duplicatesSkipped}
+              research={lastRunOutput.research}
+            />
+          ) : null}
         </DarkCard>
       ) : null}
 
@@ -997,12 +1041,39 @@ function ProspectCard({ prospect }: { prospect: DiscoveredProspectSummary }) {
   );
 }
 
+/**
+ * A newly discovered lead's lifecycle, distinct from any confidence label:
+ * NEW/pending research -> researching -> researched (then qualification
+ * decides the rest) -> qualification result, or a genuine research failure.
+ * A lead that hasn't reached "completed" research must never be shown next
+ * to a confidence badge — that only ever belongs on an actual research
+ * result (see ResearchCard, lead-detail-tabs.tsx).
+ */
+function LeadLifecycleBadge({ researchStatus, qualificationStatus }: { researchStatus: string; qualificationStatus: string }) {
+  if (researchStatus === "failed") {
+    return <span className="rounded-full bg-bb-rose/15 px-2 py-0.5 text-xs font-medium text-bb-rose">Research failed</span>;
+  }
+  if (researchStatus === "researching") {
+    return <span className="rounded-full bg-bb-indigo/15 px-2 py-0.5 text-xs font-medium text-bb-indigo-2">Researching…</span>;
+  }
+  if (researchStatus !== "completed") {
+    return <span className="rounded-full bg-bb-navy-3 px-2 py-0.5 text-xs font-medium text-bb-text-3">Not researched</span>;
+  }
+  if (qualificationStatus === "pending") {
+    return <span className="rounded-full bg-bb-amber/15 px-2 py-0.5 text-xs font-medium text-bb-amber">Researched — awaiting qualification</span>;
+  }
+  return <span className="rounded-full bg-bb-emerald/15 px-2 py-0.5 text-xs font-medium capitalize text-bb-emerald">{qualificationStatus}</span>;
+}
+
 function DiscoveredLeadCard({ lead }: { lead: DiscoveredLeadRow }) {
   return (
     <Link href={`/leads/${lead.leadId}`} className="block rounded-lg border border-bb-border bg-bb-navy p-4 text-sm transition-colors hover:border-bb-indigo/30">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium text-bb-text">{lead.companyName ?? "Unnamed prospect"}</span>
-        <span className="text-xs capitalize text-bb-text-3">{lead.leadStatus}</span>
+        <div className="flex items-center gap-2">
+          <LeadLifecycleBadge researchStatus={lead.researchStatus} qualificationStatus={lead.qualificationStatus} />
+          <span className="text-xs capitalize text-bb-text-3">{lead.leadStatus}</span>
+        </div>
       </div>
       <div className="mt-1 text-xs text-bb-text-3">{[lead.industry, lead.location].filter(Boolean).join(" · ") || "No additional details"}</div>
       {lead.evidenceSnippet ? <p className="mt-2 text-xs text-bb-text-2">&ldquo;{lead.evidenceSnippet}&rdquo;</p> : null}
