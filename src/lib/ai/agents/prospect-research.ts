@@ -1,8 +1,10 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
 import { ProspectResearchSchema, type ProspectResearch } from "@/lib/ai/agents/prospect-research-schema";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
+import type { Database } from "@/types/database.types";
 
 export { ProspectResearchSchema, type ProspectResearch };
 
@@ -26,6 +28,15 @@ export type ProspectResearchInput = {
    * effectively always low — there was rarely any real evidence behind it.
    */
   discoveryEvidence: DiscoveryEvidence | null;
+  /**
+   * Forwarded straight through to runHermesCompletion's own `client` (see
+   * its doc comment) — omit for a call made inside a real user session;
+   * scheduled/cron work (lead-pipeline.ts's researchLead) must pass its own
+   * service-role client here, the same one it already uses for its own
+   * lead_research/leads writes, or this call's agent_runs/model_usage
+   * telemetry is silently rejected by RLS.
+   */
+  client?: SupabaseClient<Database>;
 };
 
 export type DiscoveryEvidence = {
@@ -134,6 +145,7 @@ export async function runProspectResearch(input: ProspectResearchInput): Promise
     maxTokens: 1600,
     temperature: 0.4,
     responseFormat: "json",
+    client: input.client,
   });
 
   if (!result.ok) {

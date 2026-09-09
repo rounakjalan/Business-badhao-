@@ -1,8 +1,10 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
+import type { Database } from "@/types/database.types";
 
 // Kept identical to the leads.qualification_status CHECK constraint in the
 // schema (supabase/migrations/20260816120300_leads_foundation.sql) — the
@@ -35,6 +37,15 @@ export type LeadQualificationInput = {
   campaignObjective: string | null;
   /** This organization's relevant Business Knowledge (see selectQualificationContext in src/lib/business-context.ts) — null when none is on file. */
   businessContext: BusinessContext | null;
+  /**
+   * Forwarded straight through to runHermesCompletion's own `client` (see
+   * its doc comment) — omit for a call made inside a real user session;
+   * scheduled/cron work (lead-pipeline.ts's qualifyLead) must pass its own
+   * service-role client here, the same one it already uses for its own
+   * leads writes, or this call's agent_runs/model_usage telemetry is
+   * silently rejected by RLS.
+   */
+  client?: SupabaseClient<Database>;
 };
 
 export type LeadQualificationResult =
@@ -100,6 +111,7 @@ export async function runLeadQualification(input: LeadQualificationInput): Promi
     maxTokens: 1600,
     temperature: 0.3,
     responseFormat: "json",
+    client: input.client,
   });
 
   if (!result.ok) {

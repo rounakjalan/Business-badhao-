@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // rather than silently indistinguishable from "pending".
 
 import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
-import { researchLead } from "@/lib/pipeline/lead-pipeline";
+import { qualifyLead, researchLead } from "@/lib/pipeline/lead-pipeline";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -354,5 +354,79 @@ describe("researchLead — automatic-research status tracking", () => {
     const lead = (tables.leads as (Row & { research_status: string })[])[0];
     expect(lead.research_status).toBe("researching");
     expect(tables.lead_research ?? []).toHaveLength(0);
+  });
+
+  it("threads this call's own Supabase client through to the research agent's agent_runs/model_usage telemetry — this is the fix for the cron RLS gap: without it, runProspectResearch fell back to the real, session-less createClient() and that write was silently dropped", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => openRouterResponse(VALID_RESEARCH))
+    );
+
+    const tables = seedTables();
+    const supabase = createFakeSupabase(tables);
+
+    const result = await researchLead(supabase, "org-1", "lead-1");
+    expect(result.ok).toBe(true);
+
+    // These rows only exist if runProspectResearch forwarded the `client` it
+    // was given into runHermesCompletion instead of leaving it undefined —
+    // the fake client passed to researchLead above is the only client wired
+    // into this test, so any row here proves it (and not some other,
+    // unreachable default client) actually received the write.
+    const agentRuns = tables.agent_runs as (Row & { agent_type: string; status: string; organization_id: string })[];
+    expect(agentRuns.some((r) => r.agent_type === "prospect_research" && r.status === "completed" && r.organization_id === "org-1")).toBe(true);
+
+    const usage = tables.model_usage as (Row & { organization_id: string })[];
+    expect(usage.length).toBeGreaterThan(0);
+    expect(usage.every((u) => u.organization_id === "org-1")).toBe(true);
+  });
+});
+
+describe("qualifyLead — telemetry client threading", () => {
+  const VALID_QUALIFICATION = {
+    qualificationScore: 70,
+    fitScore: 75,
+    intentScore: 60,
+    confidence: "medium",
+    positiveReasons: ["matches ICP"],
+    negativeReasons: [],
+    missingInformation: [],
+    recommendedStatus: "qualifying",
+  };
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+    process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    delete process.env.OPENROUTER_MODEL;
+    delete process.env.AI_PROVIDER;
+    delete process.env.AI_FALLBACK_PROVIDER;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it("threads this call's own Supabase client through to the qualification agent's agent_runs/model_usage telemetry — same RLS gap, same fix, for lead_qualification", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => openRouterResponse(VALID_QUALIFICATION))
+    );
+
+    const tables = seedTables();
+    const supabase = createFakeSupabase(tables);
+
+    const result = await qualifyLead(supabase, "org-1", "lead-1");
+    expect(result.ok).toBe(true);
+
+    const agentRuns = tables.agent_runs as (Row & { agent_type: string; status: string; organization_id: string })[];
+    expect(agentRuns.some((r) => r.agent_type === "lead_qualification" && r.status === "completed" && r.organization_id === "org-1")).toBe(true);
+
+    const usage = tables.model_usage as (Row & { organization_id: string })[];
+    expect(usage.length).toBeGreaterThan(0);
+    expect(usage.every((u) => u.organization_id === "org-1")).toBe(true);
   });
 });

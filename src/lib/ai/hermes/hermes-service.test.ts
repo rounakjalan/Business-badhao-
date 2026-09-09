@@ -44,6 +44,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 import { createProvider } from "@/lib/ai/providers/registry";
+import { getProviderCooldownMs, recordProviderRateLimit, resetRateLimitGuard } from "@/lib/ai/rate-limit-guard";
 import { executeTool } from "@/lib/ai/tools/registry";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 
@@ -83,11 +84,16 @@ const baseRequest = {
 describe("runHermesCompletion", () => {
   beforeEach(() => {
     for (const key of ENV_KEYS) delete process.env[key];
+    // Every test gets a clean slate — a rate limit recorded by one test must
+    // never make an unrelated, later test wait on a cooldown it knows
+    // nothing about.
+    resetRateLimitGuard();
   });
 
   afterEach(() => {
     for (const key of ENV_KEYS) delete process.env[key];
     vi.clearAllMocks();
+    resetRateLimitGuard();
   });
 
   it("returns a normalized success result from the configured primary provider", async () => {
@@ -425,6 +431,70 @@ describe("runHermesCompletion", () => {
         output: expect.objectContaining({ taskType: "CAMPAIGN_PLANNING", provider: "openrouter", usedFallback: false }),
       })
     );
+  });
+
+  describe("rate-limit coordination across concurrent calls", () => {
+    it("waits out a cooldown a sibling call already recorded for this provider before attempting it — this is what stops several concurrently-researched leads from all hammering a just-rate-limited provider at once", async () => {
+      recordProviderRateLimit("openrouter", 300);
+      const completeSpy = vi.fn().mockResolvedValue(fakeResponse());
+      vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));
+
+      const startedAt = Date.now();
+      const result = await runHermesCompletion(baseRequest);
+
+      expect(result.ok).toBe(true);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(250);
+      expect(completeSpy).toHaveBeenCalledTimes(1);
+    }, 10000);
+
+    it("never waits on a cooldown recorded for a different provider", async () => {
+      recordProviderRateLimit("groq", 3000); // must never leak onto an openrouter call
+      const completeSpy = vi.fn().mockResolvedValue(fakeResponse());
+      vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: completeSpy }));
+
+      const startedAt = Date.now();
+      await runHermesCompletion(baseRequest);
+
+      expect(Date.now() - startedAt).toBeLessThan(200);
+    });
+
+    it("records a cooldown for the provider that actually got rate-limited, and only that provider", async () => {
+      const rateLimited = new AiError({
+        code: "rate_limited",
+        provider: "openrouter",
+        message: "Rate limit reached ... Please try again in 50ms.",
+        statusCode: 429,
+        retryAfterMs: 50,
+      });
+      vi.mocked(createProvider).mockReturnValue(fakeProvider({ complete: vi.fn().mockRejectedValue(rateLimited) }));
+
+      await runHermesCompletion(baseRequest);
+
+      expect(getProviderCooldownMs("openrouter")).toBeGreaterThan(0);
+      expect(getProviderCooldownMs("groq")).toBe(0);
+    });
+
+    it("a rate-limited primary still falls back to Groq normally — the coordination guard only delays a call, it never blocks the fallback chain itself", async () => {
+      process.env.AI_FALLBACK_PROVIDER = "groq";
+      const rateLimited = new AiError({
+        code: "rate_limited",
+        provider: "openrouter",
+        message: "Rate limit reached ... Please try again in 50ms.",
+        statusCode: 429,
+        retryAfterMs: 50,
+      });
+      const failingPrimary = fakeProvider({ name: "openrouter", complete: vi.fn().mockRejectedValue(rateLimited) });
+      const workingFallback = fakeProvider({
+        name: "groq",
+        complete: vi.fn().mockResolvedValue(fakeResponse({ provider: "groq", model: "openai/gpt-oss-120b" })),
+      });
+      vi.mocked(createProvider).mockImplementation((name) => (name === "openrouter" ? failingPrimary : workingFallback));
+
+      const result = await runHermesCompletion(baseRequest);
+
+      expect(result).toEqual({ ok: true, text: "a real suggestion", provider: "groq", model: "openai/gpt-oss-120b" });
+      expect(workingFallback.complete).toHaveBeenCalledTimes(1);
+    }, 10000);
   });
 
   describe("tool calling (enableTools)", () => {

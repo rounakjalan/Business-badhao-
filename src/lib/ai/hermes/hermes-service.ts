@@ -3,6 +3,7 @@ import { getAiConfig } from "@/lib/ai/config";
 import { AiError, type AiErrorCode } from "@/lib/ai/errors";
 import type { AiProvider } from "@/lib/ai/providers/provider";
 import { createProvider } from "@/lib/ai/providers/registry";
+import { getProviderCooldownMs, recordProviderRateLimit } from "@/lib/ai/rate-limit-guard";
 import { withRetry } from "@/lib/ai/retry";
 import { resolveRouting } from "@/lib/ai/router/model-router";
 import type { AiTaskType } from "@/lib/ai/router/task-types";
@@ -14,6 +15,10 @@ import type { Database } from "@/types/database.types";
 
 /** Hard cap on tool-augmented follow-up calls per Hermes invocation (bounds both latency and provider cost). */
 const MAX_TOOL_ROUNDS = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * When request.enableTools is set, lets the model call read-only,
@@ -228,6 +233,16 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
       continue;
     }
 
+    // A sibling call (a different lead's research, a different discovery
+    // stage) may have just rate-limited this exact provider — see
+    // rate-limit-guard.ts. Waiting that out here, before even trying, beats
+    // firing straight into a window that's very likely still closed and
+    // adding yet another 429 to it.
+    const cooldownMs = getProviderCooldownMs(providerName);
+    if (cooldownMs > 0) {
+      await sleep(cooldownMs);
+    }
+
     try {
       // A provider named in modelByProvider gets that explicit model; any
       // other provider in the chain (a genuine fallback) keeps no override
@@ -298,6 +313,13 @@ export async function runHermesCompletion(request: HermesRequest): Promise<Herme
       // Move on to the next configured provider in providerOrder, if any.
       // withRetry() already exhausted in-provider retries for transient
       // errors, so we never retry the same provider again here.
+      if (lastError.code === "rate_limited") {
+        // Tells any sibling call already in flight (a different lead's own
+        // research/qualification, running concurrently in the same worker
+        // pool) to wait this provider's cooldown out too, instead of firing
+        // into the same window and adding to it.
+        recordProviderRateLimit(providerName, lastError.retryAfterMs);
+      }
     }
   }
 

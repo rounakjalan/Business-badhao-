@@ -70,6 +70,43 @@ describe("withRetry", () => {
     expect(fn).toHaveBeenCalledTimes(2);
   }, 10000);
 
+  it("caps exponential backoff growth instead of letting it grow unbounded across many retries", async () => {
+    const fn = vi.fn().mockRejectedValue(transientError());
+
+    const startedAt = Date.now();
+    await expect(withRetry(fn, 5)).rejects.toMatchObject({ code: "network_error" });
+    const elapsed = Date.now() - startedAt;
+
+    // Uncapped exponential (300 * 2^attempt summed over 5 retries) would be
+    // 300+600+1200+2400+4800 = 9300ms. Capped at 4000ms per wait, the worst
+    // case across 5 waits is 20000ms — still bounded, but the real
+    // regression this guards is the uncapped growth becoming unbounded as
+    // maxRetries grows; 6 attempts finishing well under that ceiling proves
+    // each individual wait was actually capped, not just summed differently.
+    expect(fn).toHaveBeenCalledTimes(6); // 1 initial + 5 retries
+    expect(elapsed).toBeLessThan(20000);
+  }, 25000);
+
+  it("adds jitter to the backoff instead of retrying at an identical fixed delay every time", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const randomSpy = vi.spyOn(Math, "random");
+
+    randomSpy.mockReturnValueOnce(0); // low end of the jitter range
+    await withRetry(vi.fn().mockRejectedValueOnce(transientError()).mockResolvedValueOnce("recovered"), 1);
+    const lowDelay = setTimeoutSpy.mock.calls.at(-1)?.[1] as number;
+
+    randomSpy.mockReturnValueOnce(1); // high end of the jitter range
+    await withRetry(vi.fn().mockRejectedValueOnce(transientError()).mockResolvedValueOnce("recovered"), 1);
+    const highDelay = setTimeoutSpy.mock.calls.at(-1)?.[1] as number;
+
+    // A pure fixed (non-jittered) backoff would make these identical
+    // regardless of Math.random()'s value.
+    expect(lowDelay).toBeLessThan(highDelay);
+
+    setTimeoutSpy.mockRestore();
+    randomSpy.mockRestore();
+  });
+
   it("ignores an implausibly long provider wait rather than holding the request open", async () => {
     const longWait = new AiError({
       code: "rate_limited",

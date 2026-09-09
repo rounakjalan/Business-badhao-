@@ -145,6 +145,7 @@ export async function researchLead(
     campaignObjective: context.campaignObjective,
     businessContext: selectResearchContext(businessContext),
     discoveryEvidence: context.discoveryEvidence,
+    client: supabase,
   });
 
   if (result.ok) {
@@ -215,6 +216,7 @@ export async function qualifyLead(
     icpCriteria: context.icpCriteria,
     campaignObjective: context.campaignObjective,
     businessContext: selectQualificationContext(businessContext),
+    client: supabase,
   });
 
   if (result.ok) {

@@ -124,4 +124,21 @@ describe("runProspectResearch", () => {
     const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
     expect(prompt).toContain("No discovery evidence on file for this lead");
   });
+
+  it("forwards an explicit client straight through to runHermesCompletion — this is what lets a cron/scheduled call's own agent_runs/model_usage telemetry actually reach RLS-protected tables instead of silently falling back to the session-less default client", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_RESEARCH), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+    const explicitClient = { from: vi.fn() } as never;
+
+    await runProspectResearch({ ...baseInput, client: explicitClient });
+
+    expect(vi.mocked(runHermesCompletion).mock.calls[0][0].client).toBe(explicitClient);
+  });
+
+  it("leaves client undefined when the caller doesn't pass one — a real user-session call keeps using runHermesCompletion's own default cookie-based client, unchanged", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_RESEARCH), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await runProspectResearch(baseInput);
+
+    expect(vi.mocked(runHermesCompletion).mock.calls[0][0].client).toBeUndefined();
+  });
 });

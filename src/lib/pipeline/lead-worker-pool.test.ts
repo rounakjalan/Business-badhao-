@@ -135,6 +135,32 @@ describe("createLeadWorkerPool", () => {
     expect(pool.summary.failed).toBe(1);
   });
 
+  it("several leads hitting a real Groq/OpenRouter rate limit concurrently never deadlocks the pool and never stops a sibling lead's own job — each is tallied as failed, drain() still resolves, and leads that didn't hit the limit still finish", async () => {
+    vi.mocked(researchLead).mockImplementation(async (_supabase: unknown, _org: unknown, leadId: unknown) => {
+      if (typeof leadId === "string" && leadId.startsWith("lead-limited")) {
+        // The exact user-safe message runHermesCompletion/researchLead
+        // surfaces for an AiErrorCode "rate_limited" failure — this proves
+        // the pool treats a real rate-limit outcome the same as any other
+        // research failure: isolated to that one job, never contagious.
+        return { ok: false, message: "The AI provider is rate-limiting requests right now — try again shortly." } as never;
+      }
+      return { ok: true, research: {} } as never;
+    });
+
+    const pool = createLeadWorkerPool(baseParams({ concurrency: 3 }));
+    pool.enqueue("lead-limited-1");
+    pool.enqueue("lead-limited-2");
+    pool.enqueue("lead-limited-3");
+    pool.enqueue("lead-good-1");
+    pool.enqueue("lead-good-2");
+
+    await pool.drain();
+
+    expect(pool.summary.failed).toBe(3);
+    expect(pool.summary.finished).toBe(2);
+    expect(researchLead).toHaveBeenCalledTimes(5);
+  });
+
   it("a lead whose researchLead call reports it's already being researched elsewhere is skipped, not counted as a failure", async () => {
     vi.mocked(researchLead).mockResolvedValue({ ok: false, message: "This lead is already being researched.", code: "already_in_progress" } as never);
 

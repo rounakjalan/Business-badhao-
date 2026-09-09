@@ -242,6 +242,32 @@ describe("runBatchedDiscovery", () => {
     expect(result.queriesFailed.some((q) => q.includes("Tavily timed out"))).toBe(true);
   });
 
+  it("a single rate-limited batch never terminates the whole run — the very next batch recovering is enough to finish successfully, target reached", async () => {
+    const discoverMock = vi
+      .fn()
+      // The exact failure shape a rate-limited Hermes/Groq call surfaces as
+      // at the discover() layer (see TavilyDiscoveryProvider.discover in
+      // discovery.ts) — generateDiscoveryQueries/extraction/the Reviewer
+      // all report their own failure this same way.
+      .mockResolvedValueOnce({ ok: false, code: "provider_error", message: "The AI provider is rate-limiting requests right now — try again shortly." } as DiscoveryResult)
+      .mockResolvedValueOnce(okResult([prospect({ companyName: "Alpha" }), prospect({ companyName: "Beta" })]));
+
+    const { tables, params } = baseParams(discoverMock, { targetNewLeads: 2, maxBatches: 6 });
+    const result = await runBatchedDiscovery(params);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // One 429 in batch 1 cost nothing but that one batch — batch 2 still ran,
+    // still found real prospects, and the run reports its normal success
+    // stop reason, never a failure just because an earlier batch hit a
+    // transient rate limit.
+    expect(result.batchesRun).toBe(2);
+    expect(result.stoppedReason).toBe("target_reached");
+    expect(result.newLeadsCreated).toBe(2);
+    expect((tables.leads ?? []).length).toBe(2);
+    expect(result.queriesFailed.some((q) => q.includes("rate-limiting"))).toBe(true);
+  });
+
   it("reports a genuine failure (never a false success) when not even one batch ever found anything", async () => {
     const discoverMock = vi
       .fn()

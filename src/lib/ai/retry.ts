@@ -4,8 +4,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const BASE_BACKOFF_MS = 300;
+/**
+ * Ceiling on the exponential growth itself, before jitter — without this, a
+ * caller configured with a larger maxRetries could end up waiting many
+ * seconds between attempts, eating into a serverless invocation's own time
+ * budget for no real benefit (a provider either recovers quickly or it
+ * doesn't; waiting longer than a few seconds just delays giving up).
+ */
+const MAX_BACKOFF_MS = 4000;
+
+/**
+ * Full jitter in [50%, 100%] of the capped exponential value. Plain
+ * exponential backoff makes every caller that failed at the same moment
+ * (e.g. several concurrently-researched leads all hitting the same
+ * rate-limited provider) wake up and retry at the same moment too, which
+ * just reproduces the same contention a beat later. Jitter spreads those
+ * retries out instead of having them collide again.
+ */
 function backoffMs(attempt: number): number {
-  return 300 * 2 ** attempt;
+  const capped = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
+  return Math.round(capped / 2 + Math.random() * (capped / 2));
 }
 
 /**
