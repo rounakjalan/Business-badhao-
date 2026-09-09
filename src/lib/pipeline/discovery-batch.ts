@@ -46,7 +46,20 @@ export type BatchDiscoveryResult =
       stoppedReason: BatchDiscoveryStopReason;
       batchTelemetry: ProviderTelemetry[];
     }
-  | { ok: false; code: "not_configured" | "provider_error"; message: string };
+  | {
+      ok: false;
+      code: "not_configured" | "provider_error";
+      message: string;
+      /**
+       * How many discover() batches were actually attempted before this run
+       * gave up — never discarded, even on a total failure: a caller
+       * reporting "0 batches" for a run that genuinely tried 2 would hide
+       * real information (see campaigns/actions.ts and scheduled-pipeline.ts,
+       * which now record this on agent_runs.output either way).
+       */
+      batchesRun: number;
+      queriesFailed: string[];
+    };
 
 /**
  * How many genuinely new prospects one call to this function tries to
@@ -64,6 +77,30 @@ const CONSECUTIVE_EMPTY_BATCHES_BEFORE_STOP = 2;
 
 function outOfTime(startedAtMs: number, budgetMs: number, reserveMs: number): boolean {
   return Date.now() - startedAtMs > budgetMs - reserveMs;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const BATCH_RETRY_BASE_MS = 1000;
+/** Ceiling on the pause between two failed batches — long enough to matter against a provider's own short rate-limit window, short enough that even a full CONSECUTIVE_EMPTY_BATCHES_BEFORE_STOP run of failures stays a small fraction of the overall budget. */
+const BATCH_RETRY_MAX_MS = 5000;
+
+/**
+ * Bounded backoff with jitter between one failed discover() batch and the
+ * next attempt. Distinct from retry.ts's own per-AI-call backoff (which
+ * governs retries *within* a single Hermes call) and from
+ * rate-limit-guard.ts's per-provider cooldown (which governs waits *before*
+ * a call, shared across concurrent callers) — this one governs the gap
+ * between two whole discover() batches in this same sequential loop, so a
+ * batch that just failed (very often exactly because a provider is
+ * rate-limited — see the discovery-batch.test.ts case this backs) doesn't
+ * immediately re-fire into the same still-closed window a beat later.
+ */
+function batchRetryBackoffMs(attempt: number): number {
+  const capped = Math.min(BATCH_RETRY_BASE_MS * 2 ** attempt, BATCH_RETRY_MAX_MS);
+  return Math.round(capped / 2 + Math.random() * (capped / 2));
 }
 
 /**
@@ -242,7 +279,7 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
 
   const provider: DiscoveryProvider = getDiscoveryProvider();
   if (!provider.isConfigured()) {
-    return { ok: false, code: "not_configured", message: "Lead discovery isn't connected to a data source yet." };
+    return { ok: false, code: "not_configured", message: "Lead discovery isn't connected to a data source yet.", batchesRun: 0, queriesFailed: [] };
   }
 
   const { data: existingProspects } = await supabase.from("prospects").select("website, company_name").eq("organization_id", organizationId);
@@ -318,6 +355,11 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
         stoppedReason = "provider_error";
         break;
       }
+      // Give a transient provider failure (very often a rate limit shared
+      // with concurrently-running research jobs) a moment to clear before
+      // this loop's next attempt, instead of immediately re-hammering the
+      // same still-closed window.
+      await sleep(batchRetryBackoffMs(consecutiveEmptyBatches - 1));
       continue;
     }
 
@@ -373,7 +415,7 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
   // grounded prospects and must never be reported as a failure just
   // because a later batch had a rough time or the ICP ran dry.
   if (newLeadsCreated === 0 && prospectsFound === 0 && firstBatchFailure) {
-    return { ok: false, ...firstBatchFailure };
+    return { ok: false, ...firstBatchFailure, batchesRun, queriesFailed };
   }
 
   return {

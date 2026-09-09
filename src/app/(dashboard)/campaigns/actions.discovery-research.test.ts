@@ -271,4 +271,46 @@ describe("startLeadDiscoveryAction — automatic AI research on manual Start Dis
     expect(leads[0].research_status).toBe("completed");
     expect(tables.lead_research).toHaveLength(1);
   });
+
+  it("a pre-existing pending lead (backlog) and a freshly discovered lead are both researched in the same Start Discovery run — pending-research recovery and fresh discovery are independent; neither one crowds out the other", async () => {
+    stubRealPipeline();
+    const tables = seedTables();
+    // Backlog: a lead an earlier run persisted but never got around to
+    // researching (its own time budget ran out first) — exactly the
+    // scenario a second "Start Discovery" press must recover from without
+    // that recovery replacing fresh discovery.
+    tables.prospects = [{ id: "prospect-backlog", company_name: "Old Leads Co", website: "oldleads.example", title: null }];
+    tables.leads = [
+      {
+        id: "lead-backlog",
+        organization_id: "org-1",
+        campaign_id: "campaign-1",
+        prospect_id: "prospect-backlog",
+        status: "new",
+        qualification_status: "pending",
+        research_status: "pending",
+        research_error: null,
+      },
+    ];
+    const supabase = createFakeSupabase(tables);
+    vi.mocked(createClient).mockResolvedValue(supabase as never);
+
+    const result = await startLeadDiscoveryAction("campaign-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Fresh discovery still found and created a genuinely new lead — the
+    // backlog existing does not make this run "just research, zero new
+    // leads".
+    expect(result.newLeadsCreated).toBe(1);
+    // ...and the pre-existing backlog lead was researched in this very same
+    // run, alongside the freshly discovered one — recovery ran, too, not
+    // instead of discovery.
+    expect(result.research.finished).toBe(2);
+    expect(result.research.stillPending).toBe(0);
+
+    const leads = tables.leads as (Row & { id: string; research_status: string })[];
+    expect(leads.find((l) => l.id === "lead-backlog")?.research_status).toBe("completed");
+    expect(leads.some((l) => l.id !== "lead-backlog" && l.research_status === "completed")).toBe(true);
+  });
 });

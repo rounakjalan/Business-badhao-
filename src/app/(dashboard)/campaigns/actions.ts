@@ -300,7 +300,14 @@ export type LeadDiscoveryActionResult =
       prospects: DiscoveredProspectSummary[];
       research: DiscoveryResearchSummary;
     }
-  | { ok: false; code: "unauthorized" | "no_icp" | "already_running" | "not_configured" | "provider_error"; message: string };
+  | {
+      ok: false;
+      code: "unauthorized" | "no_icp" | "already_running" | "not_configured" | "provider_error";
+      message: string;
+      /** How many discover() batches were actually attempted before giving up — present whenever the failure came from runBatchedDiscovery itself, so a totally-failed run's history still says how much was genuinely tried. */
+      batchesRun?: number;
+      queriesFailed?: string[];
+    };
 
 export type DiscoveryResearchSummary = {
   /** Leads this run actually finished researching + attempting qualification for (the worker pool's own "finished" count). */
@@ -451,9 +458,13 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   await pool.drain();
 
   if (!result.ok) {
-    await completeAgentRun(agentRun, "failed", { code: result.code, message: result.message } as unknown as Json);
+    await completeAgentRun(
+      agentRun,
+      "failed",
+      { code: result.code, message: result.message, batchesRun: result.batchesRun, queriesFailed: result.queriesFailed } as unknown as Json
+    );
     await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: false, error: result.message });
-    return { ok: false, code: result.code, message: result.message };
+    return { ok: false, code: result.code, message: result.message, batchesRun: result.batchesRun, queriesFailed: result.queriesFailed };
   }
 
   const research = { finished: pool.summary.finished, failed: pool.summary.failed, outreach: pool.summary.outreach };

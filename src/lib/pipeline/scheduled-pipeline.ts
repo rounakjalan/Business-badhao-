@@ -304,7 +304,13 @@ export async function runDiscoveryForCampaign(
     await completeAgentRun(
       agentRun,
       "failed",
-      { code: result.code, message: result.message, scheduled: true } as unknown as Json,
+      {
+        code: result.code,
+        message: result.message,
+        scheduled: true,
+        batchesRun: result.batchesRun,
+        queriesFailed: result.queriesFailed,
+      } as unknown as Json,
       supabase
     );
     // A failed run still books its next attempt — one slot, the same single

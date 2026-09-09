@@ -281,6 +281,48 @@ describe("runBatchedDiscovery", () => {
     if (result.ok) return;
     expect(result.code).toBe("provider_error");
     expect(result.message).toBe("Tavily is down");
+    // Even a total failure must say how much was genuinely attempted —
+    // silently dropping this would hide 2 real attempts behind "0 batches",
+    // exactly the truthful-reporting gap this run's own history depends on.
+    expect(result.batchesRun).toBe(2);
+    expect(result.queriesFailed).toHaveLength(2);
+  });
+
+  it("waits a short bounded backoff between a failed batch and the next attempt, instead of immediately re-firing into the same still-rate-limited window", async () => {
+    const discoverMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, code: "provider_error", message: "rate limited" } as DiscoveryResult)
+      .mockResolvedValueOnce(okResult([prospect({ companyName: "Alpha" })]));
+
+    const { params } = baseParams(discoverMock, { targetNewLeads: 1, maxBatches: 6 });
+
+    const startedAt = Date.now();
+    const result = await runBatchedDiscovery(params);
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.ok).toBe(true);
+    // batchRetryBackoffMs(0): base 1000ms capped, jittered to [500, 1000]ms —
+    // a plain immediate retry (the old behavior) would finish in a few ms.
+    expect(elapsed).toBeGreaterThanOrEqual(450);
+    expect(elapsed).toBeLessThan(4000);
+  }, 10000);
+
+  it("never sleeps after the final failed batch — no wasted wait once the run has already decided to stop", async () => {
+    const discoverMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, code: "provider_error", message: "down" } as DiscoveryResult)
+      .mockResolvedValueOnce({ ok: false, code: "provider_error", message: "down" } as DiscoveryResult);
+
+    const { params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 6 });
+
+    const startedAt = Date.now();
+    await runBatchedDiscovery(params);
+    const elapsed = Date.now() - startedAt;
+
+    // Exactly one backoff (between batch 1 and batch 2) — none after batch 2,
+    // since CONSECUTIVE_EMPTY_BATCHES_BEFORE_STOP is already hit and the loop
+    // breaks instead of retrying again.
+    expect(elapsed).toBeLessThan(1500);
   });
 
   it("short-circuits to not_configured immediately, without ever calling discover()", async () => {
