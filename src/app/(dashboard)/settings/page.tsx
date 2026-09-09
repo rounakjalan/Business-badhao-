@@ -1,6 +1,7 @@
 import {
   connectWhatsAppAction,
   disconnectGmailAction,
+  disconnectInstagramAction,
   disconnectWhatsAppAction,
   updateOrganization,
   updateProfile,
@@ -8,6 +9,7 @@ import {
 } from "@/app/(dashboard)/settings/actions";
 import { SettingsSections } from "@/app/(dashboard)/settings/settings-sections";
 import { getConnectionStatus } from "@/lib/gmail/tokens";
+import { getConnectionStatus as getInstagramConnectionStatus } from "@/lib/instagram/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { getWhatsAppConnectionStatus } from "@/lib/whatsapp/tokens";
@@ -15,16 +17,27 @@ import { getWhatsAppConnectionStatus } from "@/lib/whatsapp/tokens";
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; message?: string; tab?: string; gmail?: string; gmailMessage?: string; whatsapp?: string; whatsappMessage?: string }>;
+  searchParams: Promise<{
+    error?: string;
+    message?: string;
+    tab?: string;
+    gmail?: string;
+    gmailMessage?: string;
+    whatsapp?: string;
+    whatsappMessage?: string;
+    instagram?: string;
+    instagramMessage?: string;
+  }>;
 }) {
-  const { error, message, tab, gmail, gmailMessage, whatsapp, whatsappMessage } = await searchParams;
+  const { error, message, tab, gmail, gmailMessage, whatsapp, whatsappMessage, instagram, instagramMessage } = await searchParams;
 
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return null;
 
-  const [gmailStatus, whatsappStatus] = await Promise.all([
+  const [gmailStatus, whatsappStatus, instagramStatus] = await Promise.all([
     getConnectionStatus(currentOrg.organizationId),
     getWhatsAppConnectionStatus(currentOrg.organizationId),
+    getInstagramConnectionStatus(currentOrg.organizationId),
   ]);
 
   const supabase = await createClient();
@@ -73,6 +86,9 @@ export default async function SettingsPage({
       connectWhatsAppAction={connectWhatsAppAction}
       disconnectWhatsAppAction={disconnectWhatsAppAction}
       updateWhatsAppTemplateAction={updateWhatsAppTemplateAction}
+      instagramStatus={instagramStatus}
+      instagramNotice={instagram ? { status: instagram, detail: instagramMessage } : null}
+      disconnectInstagramAction={disconnectInstagramAction}
     />
   );
 }

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { disconnectAccount } from "@/lib/gmail/tokens";
+import { disconnectAccount as disconnectInstagramAccount } from "@/lib/instagram/tokens";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { disconnectWhatsAppAccount, saveWhatsAppAccount, updateWhatsAppTemplate } from "@/lib/whatsapp/tokens";
@@ -67,6 +68,16 @@ export async function disconnectGmailAction() {
   revalidatePath("/settings");
   revalidatePath("/leads");
   redirect("/settings?tab=Integrations&gmail=disconnected");
+}
+
+export async function disconnectInstagramAction() {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  await disconnectInstagramAccount(currentOrg.organizationId);
+
+  revalidatePath("/settings");
+  redirect("/settings?tab=Integrations&instagram=disconnected");
 }
 
 /**

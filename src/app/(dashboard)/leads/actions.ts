@@ -94,6 +94,7 @@ export async function findLeadContactAction(leadId: string): Promise<FindContact
     companyName: prospect.company_name ?? "",
     website: prospect.website,
     location: parseProspectRawData(prospect.raw_data).location,
+    organizationId: currentOrg.organizationId,
   });
 
   const updatedRawData = mergeContactIntoRawData(base, outcome);

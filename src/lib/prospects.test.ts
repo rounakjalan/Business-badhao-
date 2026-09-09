@@ -15,6 +15,7 @@ describe("parseProspectRawData", () => {
       discoverySource: null,
       discoveredAt: null,
       contact: null,
+      instagramProfile: null,
     });
   });
 
@@ -50,6 +51,7 @@ describe("parseProspectRawData", () => {
       discoverySource: "tavily",
       discoveredAt: "2026-08-20T10:00:00.000Z",
       contact: null,
+      instagramProfile: null,
     });
   });
 
@@ -137,6 +139,57 @@ describe("parseProspectRawData", () => {
 
     it("returns null for a contact block holding only a timestamp and no real channel", () => {
       expect(parseProspectRawData({ contact: { enrichedAt: "2026-09-02T10:00:00.000Z" } } as unknown as Json).contact).toBeNull();
+    });
+  });
+
+  describe("instagramProfile (Business Discovery verification, not a discovery source)", () => {
+    it("reads a real verified profile written by instagram-verification.ts", () => {
+      const result = parseProspectRawData({
+        instagramProfile: {
+          status: "verified",
+          username: "brightpixel",
+          name: "Bright Pixel Studio",
+          biography: "Web design studio in Pune.",
+          category: "Design agency",
+          followersCount: 4200,
+          mediaCount: 310,
+          website: "https://brightpixel.in",
+          profilePictureUrl: "https://example.com/pic.jpg",
+          verifiedAt: "2026-09-09T10:00:00.000Z",
+        },
+      } as unknown as Json);
+
+      expect(result.instagramProfile).toEqual({
+        status: "verified",
+        username: "brightpixel",
+        name: "Bright Pixel Studio",
+        biography: "Web design studio in Pune.",
+        category: "Design agency",
+        followersCount: 4200,
+        mediaCount: 310,
+        website: "https://brightpixel.in",
+        profilePictureUrl: "https://example.com/pic.jpg",
+        verifiedAt: "2026-09-09T10:00:00.000Z",
+      });
+    });
+
+    it("returns null when a prospect has never had Instagram verified — never fabricates a profile", () => {
+      expect(parseProspectRawData({ location: "Delhi" } as unknown as Json).instagramProfile).toBeNull();
+    });
+
+    it("rejects a profile without status: 'verified' or without a username — never trusts a malformed/legacy block", () => {
+      expect(parseProspectRawData({ instagramProfile: { username: "brightpixel" } } as unknown as Json).instagramProfile).toBeNull();
+      expect(parseProspectRawData({ instagramProfile: { status: "verified" } } as unknown as Json).instagramProfile).toBeNull();
+    });
+
+    it("drops non-string/non-number fields rather than fabricating them", () => {
+      const result = parseProspectRawData({
+        instagramProfile: { status: "verified", username: "brightpixel", followersCount: "a lot", name: 42 },
+      } as unknown as Json);
+
+      expect(result.instagramProfile?.username).toBe("brightpixel");
+      expect(result.instagramProfile?.followersCount).toBeNull();
+      expect(result.instagramProfile?.name).toBeNull();
     });
   });
 });

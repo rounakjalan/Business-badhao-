@@ -651,6 +651,8 @@ const STOPPED_REASON_LABEL: Record<string, string> = {
   not_configured: "search provider not configured",
 };
 
+type InstagramEnrichmentSummaryView = { verified: number; failed: number; notConnected: number };
+
 type LastRunOutput = {
   message?: string;
   prospectsFound?: number;
@@ -661,6 +663,7 @@ type LastRunOutput = {
   queriesRun?: string[];
   queriesFailed?: string[];
   research?: DiscoveryResearchSummary;
+  instagram?: InstagramEnrichmentSummaryView;
 };
 
 /**
@@ -676,13 +679,17 @@ function DiscoveryRunSummaryView({
   stoppedReason,
   duplicatesSkipped,
   research,
+  instagram,
 }: {
   batchesRun?: number;
   stoppedReason?: string;
   duplicatesSkipped?: number;
   research?: DiscoveryResearchSummary | null;
+  instagram?: InstagramEnrichmentSummaryView | null;
 }) {
   if (batchesRun === undefined && !research) return null;
+
+  const instagramTouched = instagram && (instagram.verified > 0 || instagram.failed > 0 || instagram.notConnected > 0);
 
   return (
     <div className="mt-4 border-t border-bb-border pt-3 space-y-3">
@@ -691,6 +698,18 @@ function DiscoveryRunSummaryView({
           Ran {batchesRun} search {batchesRun === 1 ? "batch" : "batches"}
           {duplicatesSkipped ? `, skipped ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? "" : "s"} already on file` : ""} — this
           run {STOPPED_REASON_LABEL[stoppedReason ?? ""] ?? "stopped"}.
+        </p>
+      ) : null}
+
+      {instagramTouched ? (
+        <p className="text-xs text-bb-text-3">
+          Instagram: <span className="font-jetbrains font-semibold text-bb-text-2">{instagram!.verified}</span> profile
+          {instagram!.verified === 1 ? "" : "s"} verified
+          {instagram!.failed > 0 ? `, ${instagram!.failed} failed` : ""}
+          {instagram!.notConnected > 0
+            ? ` — ${instagram!.notConnected} more ${instagram!.notConnected === 1 ? "handle was" : "handles were"} found but Instagram isn't connected (Settings → Integrations)`
+            : ""}
+          .
         </p>
       ) : null}
 
@@ -949,6 +968,7 @@ function LeadDiscoveryTab({
             stoppedReason={result.stoppedReason}
             duplicatesSkipped={result.duplicatesSkipped}
             research={result.research}
+            instagram={result.instagram}
           />
           {result.prospects.length > 0 ? (
             <div className="mt-4 space-y-3">
@@ -983,6 +1003,7 @@ function LeadDiscoveryTab({
               stoppedReason={lastRunOutput.stoppedReason}
               duplicatesSkipped={lastRunOutput.duplicatesSkipped}
               research={lastRunOutput.research}
+              instagram={lastRunOutput.instagram}
             />
           ) : null}
         </DarkCard>

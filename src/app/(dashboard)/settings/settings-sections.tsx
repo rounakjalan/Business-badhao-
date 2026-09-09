@@ -15,6 +15,7 @@ const MESSAGES: Record<string, string> = {
 const INTEGRATIONS = [
   { name: "WhatsApp Business", desc: "Send and receive WhatsApp messages" },
   { name: "Gmail / Google Workspace", desc: "Email outreach and conversations" },
+  { name: "Instagram", desc: "Verify a discovered lead's Instagram profile" },
   { name: "Outlook", desc: "Microsoft email integration" },
   { name: "Google Calendar", desc: "Sync tasks and follow-up reminders" },
   { name: "Salesforce", desc: "Sync deals and contacts" },
@@ -42,6 +43,8 @@ type GmailStatus = { connected: boolean; emailAddress: string | null };
 type GmailNotice = { status: string; detail?: string } | null;
 type WhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null; templateName: string | null; templateLanguage: string };
 type WhatsAppNotice = { status: string; detail?: string } | null;
+type InstagramStatus = { connected: boolean; username: string | null };
+type InstagramNotice = { status: string; detail?: string } | null;
 
 function isSection(value: string | undefined): value is (typeof SECTIONS)[number] {
   return Boolean(value) && (SECTIONS as readonly string[]).includes(value as string);
@@ -64,6 +67,9 @@ export function SettingsSections({
   connectWhatsAppAction,
   disconnectWhatsAppAction,
   updateWhatsAppTemplateAction,
+  instagramStatus,
+  instagramNotice,
+  disconnectInstagramAction,
 }: {
   error?: string;
   message?: string;
@@ -81,6 +87,9 @@ export function SettingsSections({
   connectWhatsAppAction: (formData: FormData) => void;
   disconnectWhatsAppAction: () => void;
   updateWhatsAppTemplateAction: (formData: FormData) => void;
+  instagramStatus: InstagramStatus;
+  instagramNotice: InstagramNotice;
+  disconnectInstagramAction: () => void;
 }) {
   const [section, setSection] = useState<(typeof SECTIONS)[number]>(isSection(initialTab) ? initialTab : "Account");
   const [showWhatsAppForm, setShowWhatsAppForm] = useState(false);
@@ -211,6 +220,17 @@ export function SettingsSections({
                       : whatsappNotice.status === "template_saved"
                         ? "WhatsApp template saved."
                         : (whatsappNotice.detail ?? "Something went wrong connecting WhatsApp.")}
+                </DarkAlert>
+              </div>
+            ) : null}
+            {instagramNotice ? (
+              <div className="mb-1">
+                <DarkAlert variant={instagramNotice.status === "error" ? "error" : "success"}>
+                  {instagramNotice.status === "connected"
+                    ? "Instagram connected."
+                    : instagramNotice.status === "disconnected"
+                      ? "Instagram disconnected."
+                      : (instagramNotice.detail ?? "Something went wrong connecting Instagram.")}
                 </DarkAlert>
               </div>
             ) : null}
@@ -352,6 +372,34 @@ export function SettingsSections({
                       <>
                         <span className="rounded-full border border-bb-text-3/25 bg-bb-text-3/10 px-2 py-0.5 text-xs text-bb-text-3">Not Connected</span>
                         <a href="/api/gmail/oauth/start">
+                          <DashButton type="button" variant="gradient">
+                            Connect
+                          </DashButton>
+                        </a>
+                      </>
+                    )}
+                  </div>
+                ) : int.name === "Instagram" ? (
+                  <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-bb-text">{int.name}</div>
+                      <div className="text-xs text-bb-text-3">
+                        {instagramStatus.connected ? `Connected as @${instagramStatus.username}` : int.desc}
+                      </div>
+                    </div>
+                    {instagramStatus.connected ? (
+                      <>
+                        <span className="rounded-full border border-bb-emerald/25 bg-bb-emerald/10 px-2 py-0.5 text-xs text-bb-emerald">Connected</span>
+                        <form action={disconnectInstagramAction}>
+                          <DashButton type="submit" variant="outline">
+                            Disconnect
+                          </DashButton>
+                        </form>
+                      </>
+                    ) : (
+                      <>
+                        <span className="rounded-full border border-bb-text-3/25 bg-bb-text-3/10 px-2 py-0.5 text-xs text-bb-text-3">Not Connected</span>
+                        <a href="/api/instagram/oauth/start">
                           <DashButton type="button" variant="gradient">
                             Connect
                           </DashButton>

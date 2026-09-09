@@ -334,6 +334,7 @@ export async function runDiscoveryForCampaign(
       queriesFailed: result.queriesFailed,
       research: { finished: pool.summary.finished, failed: pool.summary.failed, outreach: pool.summary.outreach },
       telemetry: result.batchTelemetry,
+      instagram: result.instagram,
     } as unknown as Json,
     supabase
   );

@@ -11,6 +11,7 @@ import {
   type ExtractedContacts,
 } from "@/lib/discovery/contact-extraction";
 import { searchContactEvidence } from "@/lib/discovery/contact-search";
+import { verifyInstagramProfile, type InstagramVerificationOutcome } from "@/lib/discovery/instagram-verification";
 
 /**
  * Contact discovery — the fetching half.
@@ -164,6 +165,14 @@ export type ContactDiscoveryOutcome = {
   contacts: ExtractedContacts | null;
   /** "found" once anything real was found, from either stage; "not_found" when both stages genuinely ran and turned up nothing. */
   status: "found" | "not_found";
+  /**
+   * Whether the discovered Instagram handle (if any) was verified against
+   * the org's own connected Instagram professional account — see
+   * instagram-verification.ts. Always present (never undefined) so a
+   * caller can tell "genuinely nothing to verify" from "verification
+   * wasn't even attempted this call" (a website-less prospect, say).
+   */
+  instagram: InstagramVerificationOutcome;
 };
 
 /**
@@ -181,15 +190,36 @@ export type ContactDiscoveryOutcome = {
  * that was genuinely searched and came up empty is distinguishable from one
  * that was never attempted at all.
  */
+/**
+ * Best-effort, isolated Instagram verification for whatever contact block
+ * this call ended up with. Never allowed to change the contact-discovery
+ * outcome itself — a rate-limited or errored Business Discovery call still
+ * returns real contact data, with Instagram's own outcome recorded
+ * separately (see InstagramVerificationOutcome's own doc comment).
+ */
+async function verifyInstagramIfPresent(organizationId: string | undefined, contacts: ExtractedContacts): Promise<InstagramVerificationOutcome> {
+  if (!organizationId || !contacts.instagram) return { attempted: false, reason: "no_handle" };
+
+  try {
+    return await verifyInstagramProfile(organizationId, contacts.instagram.value);
+  } catch (error) {
+    console.error("[contact-enrichment] Instagram verification threw unexpectedly — proceeding without it", error);
+    return { attempted: true, ok: false, code: "provider_error", message: "Instagram verification failed unexpectedly." };
+  }
+}
+
 export async function discoverProspectContacts(params: {
   companyName: string;
   website: string | null;
   location: string | null;
   telemetry?: ProviderTelemetry;
+  /** Enables the Instagram Business Discovery verification step below — omit for a caller with no organization context. */
+  organizationId?: string;
 }): Promise<ContactDiscoveryOutcome> {
   const websiteContacts = await enrichProspectContact(params.website);
   if (websiteContacts && hasAnyContact(websiteContacts)) {
-    return { contacts: websiteContacts, status: "found" };
+    const instagram = await verifyInstagramIfPresent(params.organizationId, websiteContacts);
+    return { contacts: websiteContacts, status: "found", instagram };
   }
 
   const websiteHost = (() => {
@@ -210,7 +240,10 @@ export async function discoverProspectContacts(params: {
   });
 
   const merged = mergeContacts([websiteContacts ?? emptyContacts(), searchContacts ?? emptyContacts()]);
-  return hasAnyContact(merged) ? { contacts: merged, status: "found" } : { contacts: null, status: "not_found" };
+  if (!hasAnyContact(merged)) return { contacts: null, status: "not_found", instagram: { attempted: false, reason: "no_handle" } };
+
+  const instagram = await verifyInstagramIfPresent(params.organizationId, merged);
+  return { contacts: merged, status: "found", instagram };
 }
 
 /**
@@ -267,8 +300,20 @@ export function mergeContactIntoRawData(base: Record<string, unknown>, outcome: 
   const anyChannel = Object.values(merged).some((field) => field !== null);
   const status: "found" | "not_found" = anyChannel ? "found" : outcome.status;
 
+  // Only a genuinely successful verification ever replaces what's already
+  // on file — a retry that hit a rate limit or a since-broken connection
+  // must never erase a profile a previous run already verified for real.
+  const existingInstagramProfile =
+    base.instagramProfile && typeof base.instagramProfile === "object" && !Array.isArray(base.instagramProfile)
+      ? (base.instagramProfile as Record<string, unknown>)
+      : null;
+  const instagramProfile = outcome.instagram.attempted && outcome.instagram.ok
+    ? { status: "verified" as const, ...outcome.instagram.profile, verifiedAt: new Date().toISOString() }
+    : existingInstagramProfile ?? null;
+
   return {
     ...base,
     contact: { ...merged, contactStatus: status, enrichedAt: new Date().toISOString() },
+    instagramProfile,
   };
 }

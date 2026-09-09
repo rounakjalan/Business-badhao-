@@ -24,6 +24,33 @@ export type DiscoveredProspectSummary = {
   matchedIcpCriteria: string[];
 };
 
+/**
+ * Tally of the Instagram Business Discovery verification step (see
+ * instagram-verification.ts) across every prospect this run persisted.
+ * Never a count of leads *found on* Instagram — this app has no compliant
+ * way to search Instagram — only of already-discovered handles this run
+ * checked against the org's own connected account.
+ */
+export type InstagramEnrichmentSummary = {
+  verified: number;
+  failed: number;
+  /** Had a discovered handle but the org has no Instagram account connected — not a failure, just nothing to verify against yet. */
+  notConnected: number;
+};
+
+function emptyInstagramSummary(): InstagramEnrichmentSummary {
+  return { verified: 0, failed: 0, notConnected: 0 };
+}
+
+function tallyInstagramOutcome(summary: InstagramEnrichmentSummary, outcome: ContactDiscoveryOutcome["instagram"]): void {
+  if (!outcome.attempted) {
+    if (outcome.reason === "not_connected") summary.notConnected += 1;
+    return;
+  }
+  if (outcome.ok) summary.verified += 1;
+  else summary.failed += 1;
+}
+
 export type BatchDiscoveryStopReason =
   | "target_reached"
   | "no_more_results"
@@ -45,6 +72,7 @@ export type BatchDiscoveryResult =
       queriesFailed: string[];
       stoppedReason: BatchDiscoveryStopReason;
       batchTelemetry: ProviderTelemetry[];
+      instagram: InstagramEnrichmentSummary;
     }
   | {
       ok: false;
@@ -118,17 +146,18 @@ async function persistDiscoveredProspect(
   discoverySourceName: string,
   prospect: DiscoveredProspect,
   agentRun: AgentRunHandle | null
-): Promise<{ leadId: string; summary: DiscoveredProspectSummary } | null> {
+): Promise<{ leadId: string; summary: DiscoveredProspectSummary; instagram: ContactDiscoveryOutcome["instagram"] } | null> {
   let contactOutcome: ContactDiscoveryOutcome;
   try {
     contactOutcome = await discoverProspectContacts({
       companyName: prospect.companyName,
       website: prospect.website,
       location: prospect.location,
+      organizationId,
     });
   } catch (error) {
     console.error("[discovery-batch] contact discovery threw unexpectedly — proceeding without it", error);
-    contactOutcome = { contacts: null, status: "not_found" };
+    contactOutcome = { contacts: null, status: "not_found", instagram: { attempted: false, reason: "no_handle" } };
   }
 
   const { data: prospectRow } = await supabase
@@ -199,6 +228,7 @@ async function persistDiscoveredProspect(
       evidenceSnippet: prospect.evidenceSnippet,
       matchedIcpCriteria: prospect.matchedIcpCriteria,
     },
+    instagram: contactOutcome.instagram,
   };
 }
 
@@ -316,6 +346,7 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
   let newLeadsCreated = 0;
   let duplicatesSkipped = 0;
   let consecutiveEmptyBatches = 0;
+  const instagramSummary = emptyInstagramSummary();
   let batchesRun = 0;
   let stoppedReason: BatchDiscoveryStopReason = "max_batches";
   let firstBatchFailure: { code: "not_configured" | "provider_error"; message: string } | null = null;
@@ -383,6 +414,7 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
         createdProspects.push(persisted.summary);
         newLeadsCreated += 1;
         newLeadsThisBatch += 1;
+        tallyInstagramOutcome(instagramSummary, persisted.instagram);
         // Fired immediately, before the next prospect in this batch is even
         // persisted — see onLeadPersisted's own doc comment above. Wrapped
         // defensively: a bug in whatever this triggers (a worker pool's own
@@ -430,5 +462,6 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
     queriesFailed,
     stoppedReason,
     batchTelemetry,
+    instagram: instagramSummary,
   };
 }

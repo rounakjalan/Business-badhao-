@@ -125,7 +125,7 @@ function baseParams(discoverMock: DiscoveryProvider["discover"], overrides: Part
 
 describe("runBatchedDiscovery", () => {
   beforeEach(() => {
-    vi.mocked(discoverProspectContacts).mockResolvedValue({ contacts: null, status: "not_found" });
+    vi.mocked(discoverProspectContacts).mockResolvedValue({ contacts: null, status: "not_found", instagram: { attempted: false, reason: "no_handle" } });
   });
 
   afterEach(() => {
@@ -379,5 +379,94 @@ describe("runBatchedDiscovery", () => {
     expect(result.newLeadsCreated).toBe(0);
     expect(result.duplicatesSkipped).toBe(1);
     expect((tables.leads ?? []).length).toBe(0);
+  });
+
+  describe("Instagram enrichment (additional evidence, never a discovery source of its own)", () => {
+    it("tallies Instagram outcomes across every persisted prospect and never lets a failed verification stop discovery", async () => {
+      vi.mocked(discoverProspectContacts)
+        .mockResolvedValueOnce({
+          contacts: null,
+          status: "not_found",
+          instagram: {
+            attempted: true,
+            ok: true,
+            profile: {
+              username: "alphaco",
+              name: "Alpha Co",
+              biography: null,
+              category: null,
+              followersCount: 100,
+              mediaCount: 10,
+              website: null,
+              profilePictureUrl: null,
+            },
+          },
+        })
+        .mockResolvedValueOnce({ contacts: null, status: "not_found", instagram: { attempted: true, ok: false, code: "rate_limited", message: "limited" } })
+        .mockResolvedValueOnce({ contacts: null, status: "not_found", instagram: { attempted: false, reason: "not_connected" } });
+
+      const discoverMock = vi
+        .fn()
+        .mockResolvedValueOnce(okResult([prospect({ companyName: "Alpha" }), prospect({ companyName: "Beta" }), prospect({ companyName: "Gamma" })]))
+        .mockResolvedValue(okResult([]));
+
+      const { tables, params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 3 });
+      const result = await runBatchedDiscovery(params);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // All three prospects were persisted regardless of what happened with
+      // Instagram for each — a rate-limited or unconnected verification is
+      // never a reason to drop a real, already-grounded lead.
+      expect(result.newLeadsCreated).toBe(3);
+      expect((tables.leads ?? []).length).toBe(3);
+      expect(result.instagram).toEqual({ verified: 1, failed: 1, notConnected: 1 });
+    });
+
+    it("preserves an earlier batch's Instagram tally when a later batch fails outright", async () => {
+      vi.mocked(discoverProspectContacts).mockResolvedValue({
+        contacts: null,
+        status: "not_found",
+        instagram: {
+          attempted: true,
+          ok: true,
+          profile: { username: "alphaco", name: null, biography: null, category: null, followersCount: null, mediaCount: null, website: null, profilePictureUrl: null },
+        },
+      });
+
+      const discoverMock = vi
+        .fn()
+        .mockResolvedValueOnce(okResult([prospect({ companyName: "Alpha" })]))
+        .mockResolvedValueOnce({ ok: false, code: "provider_error", message: "down" } as DiscoveryResult)
+        .mockResolvedValueOnce({ ok: false, code: "provider_error", message: "down" } as DiscoveryResult);
+
+      const { params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 6 });
+      const result = await runBatchedDiscovery(params);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // Batch 1's real, verified Instagram result survives two later batches
+      // failing outright — provider failures never erase already-recorded
+      // evidence, for Instagram exactly as for everything else this run found.
+      expect(result.instagram).toEqual({ verified: 1, failed: 0, notConnected: 0 });
+    });
+
+    it("never calls contact/Instagram enrichment for a prospect the dedup check already rejected as a duplicate", async () => {
+      const discoverMock = vi.fn().mockResolvedValueOnce(okResult([prospect({ companyName: "Alpha", website: "alpha.example" })])).mockResolvedValue(okResult([]));
+
+      const { tables, params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 3 });
+      tables.prospects = [{ id: "prospect-existing", organization_id: "org-1", company_name: "Alpha", website: "alpha.example" }];
+
+      const result = await runBatchedDiscovery(params);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.duplicatesSkipped).toBe(1);
+      // discoverProspectContacts (and therefore Instagram verification,
+      // which only ever runs inside it) is never even reached for a
+      // duplicate — dedup happens strictly before persistence.
+      expect(discoverProspectContacts).not.toHaveBeenCalled();
+      expect(result.instagram).toEqual({ verified: 0, failed: 0, notConnected: 0 });
+    });
   });
 });

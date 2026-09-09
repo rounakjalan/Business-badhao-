@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/discovery/instagram-verification", () => ({ verifyInstagramProfile: vi.fn() }));
+
 import { discoverProspectContacts, enrichProspectContact, mergeContactIntoRawData, toFetchableUrl } from "@/lib/discovery/contact-enrichment";
 import { emptyContacts } from "@/lib/discovery/contact-extraction";
+import { verifyInstagramProfile } from "@/lib/discovery/instagram-verification";
 
 /**
  * discoverProspectContacts is the fix for the exact production bug reported:
@@ -116,17 +120,76 @@ describe("discoverProspectContacts", () => {
     const outcome = await discoverProspectContacts({ companyName: "Unfindable Co", website: null, location: null });
     expect(outcome.status).toBe("not_found");
   });
+
+  it("never attempts Instagram verification when no organizationId is given — a caller with no org context (or none supplied) is unaffected", async () => {
+    vi.stubGlobal("fetch", mockFetchRouter({ website: () => htmlResponse(`<html><body><a href="https://instagram.com/brightpixel">IG</a></body></html>`) }));
+
+    const outcome = await discoverProspectContacts({ companyName: "Bright Pixel", website: "brightpixel.in", location: "Delhi" });
+
+    expect(outcome.contacts?.instagram?.value).toBe("https://instagram.com/brightpixel");
+    expect(outcome.instagram).toEqual({ attempted: false, reason: "no_handle" });
+    expect(verifyInstagramProfile).not.toHaveBeenCalled();
+  });
+
+  it("verifies the discovered Instagram handle against the org's connected account when organizationId is given", async () => {
+    vi.stubGlobal("fetch", mockFetchRouter({ website: () => htmlResponse(`<html><body><a href="https://instagram.com/brightpixel">IG</a></body></html>`) }));
+    vi.mocked(verifyInstagramProfile).mockResolvedValue({
+      attempted: true,
+      ok: true,
+      profile: {
+        username: "brightpixel",
+        name: "Bright Pixel Studio",
+        biography: null,
+        category: "Design agency",
+        followersCount: 4200,
+        mediaCount: 310,
+        website: null,
+        profilePictureUrl: null,
+      },
+    });
+
+    const outcome = await discoverProspectContacts({ companyName: "Bright Pixel", website: "brightpixel.in", location: "Delhi", organizationId: "org-1" });
+
+    expect(verifyInstagramProfile).toHaveBeenCalledWith("org-1", "https://instagram.com/brightpixel");
+    expect(outcome.instagram).toEqual(expect.objectContaining({ attempted: true, ok: true }));
+    // A successful Instagram verification never changes the contact
+    // discovery outcome itself — the two are recorded, and can fail,
+    // completely independently.
+    expect(outcome.status).toBe("found");
+    expect(outcome.contacts?.email).toBeNull();
+  });
+
+  it("an Instagram verification failure never changes the contact-discovery outcome — the two are isolated", async () => {
+    vi.stubGlobal("fetch", mockFetchRouter({ website: () => htmlResponse(`<html><body><a href="mailto:hello@brightpixel.in">Email</a><a href="https://instagram.com/brightpixel">IG</a></body></html>`) }));
+    vi.mocked(verifyInstagramProfile).mockResolvedValue({ attempted: true, ok: false, code: "rate_limited", message: "Application request limit reached" });
+
+    const outcome = await discoverProspectContacts({ companyName: "Bright Pixel", website: "brightpixel.in", location: "Delhi", organizationId: "org-1" });
+
+    expect(outcome.status).toBe("found");
+    expect(outcome.contacts?.email?.value).toBe("hello@brightpixel.in");
+    expect(outcome.instagram).toEqual({ attempted: true, ok: false, code: "rate_limited", message: "Application request limit reached" });
+  });
+
+  it("an Instagram verification that throws unexpectedly is caught and recorded as a failure, never propagated", async () => {
+    vi.stubGlobal("fetch", mockFetchRouter({ website: () => htmlResponse(`<html><body><a href="https://instagram.com/brightpixel">IG</a></body></html>`) }));
+    vi.mocked(verifyInstagramProfile).mockRejectedValue(new Error("unexpected"));
+
+    const outcome = await discoverProspectContacts({ companyName: "Bright Pixel", website: "brightpixel.in", location: "Delhi", organizationId: "org-1" });
+
+    expect(outcome.status).toBe("found");
+    expect(outcome.instagram).toEqual({ attempted: true, ok: false, code: "provider_error", message: "Instagram verification failed unexpectedly." });
+  });
 });
 
 describe("mergeContactIntoRawData", () => {
   it("always writes a contact block with contactStatus, even on a not_found outcome — distinguishing 'searched, found nothing' from 'never attempted'", () => {
-    const result = mergeContactIntoRawData({ location: "Pune" }, { contacts: null, status: "not_found" });
+    const result = mergeContactIntoRawData({ location: "Pune" }, { contacts: null, status: "not_found", instagram: { attempted: false, reason: "no_handle" } });
     expect(result.contact).toMatchObject({ contactStatus: "not_found", email: null, phone: null });
     expect(result.location).toBe("Pune");
   });
 
   it("preserves every other raw_data field untouched", () => {
-    const result = mergeContactIntoRawData({ location: "Pune", industry: "Retail", evidenceSnippet: "a real snippet" }, { contacts: null, status: "not_found" });
+    const result = mergeContactIntoRawData({ location: "Pune", industry: "Retail", evidenceSnippet: "a real snippet" }, { contacts: null, status: "not_found", instagram: { attempted: false, reason: "no_handle" } });
     expect(result.industry).toBe("Retail");
     expect(result.evidenceSnippet).toBe("a real snippet");
   });
@@ -136,6 +199,7 @@ describe("mergeContactIntoRawData", () => {
     const retry = {
       contacts: { ...emptyContacts(), email: { value: "brightpixel.studio@gmail.com", source: "https://directory.example/listing", confidence: "low" as const } },
       status: "found" as const,
+      instagram: { attempted: false, reason: "no_handle" } as const,
     };
 
     const result = mergeContactIntoRawData(base, retry);
@@ -147,6 +211,7 @@ describe("mergeContactIntoRawData", () => {
     const retry = {
       contacts: { ...emptyContacts(), email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" as const } },
       status: "found" as const,
+      instagram: { attempted: false, reason: "no_handle" } as const,
     };
 
     const result = mergeContactIntoRawData(base, retry);
@@ -158,6 +223,7 @@ describe("mergeContactIntoRawData", () => {
     const retry = {
       contacts: { ...emptyContacts(), phone: { value: "+91 11111 11111", source: "https://brightpixel.in/about", confidence: "high" as const } },
       status: "found" as const,
+      instagram: { attempted: false, reason: "no_handle" } as const,
     };
 
     const result = mergeContactIntoRawData(base, retry);
@@ -169,6 +235,7 @@ describe("mergeContactIntoRawData", () => {
     const retry = {
       contacts: { ...emptyContacts(), linkedin: { value: "https://linkedin.com/company/brightpixel", source: "https://brightpixel.in/about", confidence: "high" as const } },
       status: "found" as const,
+      instagram: { attempted: false, reason: "no_handle" } as const,
     };
 
     const result = mergeContactIntoRawData(base, retry) as { contact: { email: { value: string }; linkedin: { value: string } } };
@@ -178,16 +245,58 @@ describe("mergeContactIntoRawData", () => {
 
   it("never downgrades an already-found prospect back to not_found when a retry turns up nothing new", () => {
     const base = { contact: { email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } } };
-    const retry = { contacts: null, status: "not_found" as const };
+    const retry = { contacts: null, status: "not_found" as const, instagram: { attempted: false, reason: "no_handle" } as const };
 
     const result = mergeContactIntoRawData(base, retry);
     expect((result.contact as { contactStatus: string }).contactStatus).toBe("found");
   });
 
+  it("writes a verified Instagram profile into raw_data when the outcome carries one", () => {
+    const result = mergeContactIntoRawData(
+      { location: "Pune" },
+      {
+        contacts: { ...emptyContacts(), instagram: { value: "https://instagram.com/brightpixel", source: "https://brightpixel.in/", confidence: "high" } },
+        status: "found",
+        instagram: {
+          attempted: true,
+          ok: true,
+          profile: {
+            username: "brightpixel",
+            name: "Bright Pixel Studio",
+            biography: null,
+            category: "Design agency",
+            followersCount: 4200,
+            mediaCount: 310,
+            website: null,
+            profilePictureUrl: null,
+          },
+        },
+      }
+    );
+
+    expect(result.instagramProfile).toMatchObject({ status: "verified", username: "brightpixel", followersCount: 4200 });
+  });
+
+  it("never erases an already-verified Instagram profile when a later run's own verification fails (rate limit, broken connection)", () => {
+    const base = { instagramProfile: { status: "verified", username: "brightpixel", followersCount: 4200 } };
+    const result = mergeContactIntoRawData(base, {
+      contacts: null,
+      status: "not_found",
+      instagram: { attempted: true, ok: false, code: "rate_limited", message: "Application request limit reached" },
+    });
+
+    expect(result.instagramProfile).toEqual(base.instagramProfile);
+  });
+
+  it("leaves instagramProfile null when verification was never attempted (no handle, or not connected)", () => {
+    const result = mergeContactIntoRawData({ location: "Pune" }, { contacts: null, status: "not_found", instagram: { attempted: false, reason: "no_handle" } });
+    expect(result.instagramProfile).toBeNull();
+  });
+
   it("has no existing contact to protect on a fresh prospect's first insert — the new outcome is simply written through", () => {
     const result = mergeContactIntoRawData(
       { location: "Pune" },
-      { contacts: { ...emptyContacts(), email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } }, status: "found" }
+      { contacts: { ...emptyContacts(), email: { value: "hello@brightpixel.in", source: "https://brightpixel.in/contact", confidence: "high" } }, status: "found", instagram: { attempted: false, reason: "no_handle" } }
     );
     expect((result.contact as { email: { value: string } }).email.value).toBe("hello@brightpixel.in");
   });

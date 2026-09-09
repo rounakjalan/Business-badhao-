@@ -636,6 +636,48 @@ export interface Database {
         };
         Relationships: [];
       };
+      instagram_accounts: {
+        Row: {
+          id: string;
+          organization_id: string;
+          connected_by: string | null;
+          ig_business_account_id: string;
+          ig_username: string;
+          facebook_page_id: string;
+          access_token: string;
+          token_expires_at: string;
+          scope: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          connected_by?: string | null;
+          ig_business_account_id: string;
+          ig_username: string;
+          facebook_page_id: string;
+          access_token: string;
+          token_expires_at: string;
+          scope?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          connected_by?: string | null;
+          ig_business_account_id?: string;
+          ig_username?: string;
+          facebook_page_id?: string;
+          access_token?: string;
+          token_expires_at?: string;
+          scope?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       whatsapp_accounts: {
         Row: {
           id: string;

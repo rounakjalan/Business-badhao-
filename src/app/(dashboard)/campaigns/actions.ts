@@ -15,7 +15,7 @@ import {
   stopCampaignDiscovery,
   type CampaignDiscoverySchedule,
 } from "@/lib/pipeline/discovery-schedule";
-import { runBatchedDiscovery, type BatchDiscoveryStopReason, type DiscoveredProspectSummary } from "@/lib/pipeline/discovery-batch";
+import { runBatchedDiscovery, type BatchDiscoveryStopReason, type DiscoveredProspectSummary, type InstagramEnrichmentSummary } from "@/lib/pipeline/discovery-batch";
 import { createLeadWorkerPool, type OutreachSweepSummary } from "@/lib/pipeline/lead-worker-pool";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
@@ -299,6 +299,7 @@ export type LeadDiscoveryActionResult =
       queriesFailed: string[];
       prospects: DiscoveredProspectSummary[];
       research: DiscoveryResearchSummary;
+      instagram: InstagramEnrichmentSummary;
     }
   | {
       ok: false;
@@ -496,6 +497,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     queriesRun: result.queriesRun,
     queriesFailed: result.queriesFailed,
     telemetry: result.batchTelemetry,
+    instagram: result.instagram,
   } as unknown as Json);
 
   // Books the next run in this campaign's single schedule slot — see
@@ -517,6 +519,7 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     queriesFailed: result.queriesFailed,
     prospects: result.createdProspects,
     research: researchSummary,
+    instagram: result.instagram,
   };
 }
 

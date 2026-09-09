@@ -21,6 +21,28 @@ export type ProspectRawData = {
   discoveredAt: string | null;
   /** Contact channels read from the business's own website — see contact-enrichment.ts. Null when the site was never reached or stated nothing. */
   contact: ProspectContact | null;
+  /**
+   * Real public Instagram profile data for this prospect's already-discovered
+   * handle, verified via the org's own connected Instagram professional
+   * account (Business Discovery — see instagram-verification.ts). Never a
+   * search result: this only ever confirms a handle contact.instagram above
+   * already found. Null until a run with Instagram connected actually
+   * verifies one.
+   */
+  instagramProfile: ProspectInstagramProfile | null;
+};
+
+export type ProspectInstagramProfile = {
+  status: "verified";
+  username: string;
+  name: string | null;
+  biography: string | null;
+  category: string | null;
+  followersCount: number | null;
+  mediaCount: number | null;
+  website: string | null;
+  profilePictureUrl: string | null;
+  verifiedAt: string | null;
 };
 
 /** How sure discovery is that a value actually belongs to this prospect — never affects whether it's stored, only how confidently it's presented. */
@@ -93,6 +115,29 @@ function parseProspectContact(raw: unknown): ProspectContact | null {
   return hasChannel || contactStatus ? contact : null;
 }
 
+/** Reads real fields only — never fabricates a profile that wasn't actually returned by a verified Business Discovery lookup. */
+function parseProspectInstagramProfile(raw: unknown): ProspectInstagramProfile | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  if (record.status !== "verified" || typeof record.username !== "string" || !record.username) return null;
+
+  const str = (key: string) => (typeof record[key] === "string" ? (record[key] as string) : null);
+  const num = (key: string) => (typeof record[key] === "number" ? (record[key] as number) : null);
+
+  return {
+    status: "verified",
+    username: record.username,
+    name: str("name"),
+    biography: str("biography"),
+    category: str("category"),
+    followersCount: num("followersCount"),
+    mediaCount: num("mediaCount"),
+    website: str("website"),
+    profilePictureUrl: str("profilePictureUrl"),
+    verifiedAt: str("verifiedAt"),
+  };
+}
+
 /** Parses prospects.raw_data defensively — it's untyped jsonb, and rows created before a field existed simply won't have it. */
 export function parseProspectRawData(raw: Json | null | undefined): ProspectRawData {
   const data = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
@@ -107,5 +152,6 @@ export function parseProspectRawData(raw: Json | null | undefined): ProspectRawD
     discoverySource: typeof data.discoverySource === "string" ? data.discoverySource : null,
     discoveredAt: typeof data.discoveredAt === "string" ? data.discoveredAt : null,
     contact: parseProspectContact(data.contact),
+    instagramProfile: parseProspectInstagramProfile(data.instagramProfile),
   };
 }
