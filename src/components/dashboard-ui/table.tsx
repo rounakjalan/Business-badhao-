@@ -14,7 +14,7 @@ type DataTableProps<T> = {
 
 export function DataTable<T>({ columns, rows, getRowKey, onRowClick }: DataTableProps<T>) {
   return (
-    <div className="bb-shadow-card overflow-hidden rounded-3xl bg-bb-navy-2">
+    <div className="bb-shadow-card overflow-x-auto rounded-3xl bg-bb-navy-2">
       <table className="w-full text-sm">
         <thead>
           <tr>

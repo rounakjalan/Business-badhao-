@@ -110,7 +110,7 @@ export function ConversationDetailClient({
             </div>
             <div>
               <div className="font-semibold text-bb-text">{contactName}</div>
-              <div className="flex items-center gap-2 text-xs text-bb-text-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-bb-text-3">
                 {contactEmail ? <span>{contactEmail}</span> : null}
                 <ChannelBadge channel={conversation.channel} />
                 <OwnerBadge owner={conversation.owner} />
