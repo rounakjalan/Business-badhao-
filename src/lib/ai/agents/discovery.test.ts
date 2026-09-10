@@ -743,7 +743,7 @@ describe("lead discovery", () => {
 
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
-      expect(result).toEqual({ ok: true, candidates: [candidate()] });
+      expect(result).toEqual({ ok: true, candidates: [candidate()], reviewerStatus: "ok", reviewerError: null });
       // Exactly once: the primary Reviewer model answered, so the
       // deterministic fallback attempt is never made — a real second
       // request only ever happens after a real failure (see the fallback
@@ -767,7 +767,7 @@ describe("lead discovery", () => {
     it("skips the call entirely when there are no candidates to review — nothing to validate, no point spending a request", async () => {
       const result = await runFinalHermesValidation(baseCriteria, [], groundingMap(), newTelemetry());
 
-      expect(result).toEqual({ ok: true, candidates: [] });
+      expect(result).toEqual({ ok: true, candidates: [], reviewerStatus: "skipped", reviewerError: null });
       expect(runHermesCompletion).not.toHaveBeenCalled();
     });
 
@@ -785,31 +785,84 @@ describe("lead discovery", () => {
       const telemetry = newTelemetry();
       const result = await runFinalHermesValidation(baseCriteria, [kept, dropped], groundingMap(), telemetry);
 
-      expect(result).toEqual({ ok: true, candidates: [kept] });
+      expect(result).toEqual({ ok: true, candidates: [kept], reviewerStatus: "ok", reviewerError: null });
       expect(telemetry.finalValidationInput).toBe(2);
+      expect(telemetry.finalValidationAccepted).toBe(1);
+      expect(telemetry.reviewerStatus).toBe("ok");
+      expect(telemetry.reviewerError).toBeNull();
+    });
+
+    it("a timeout on BOTH Reviewer attempts degrades gracefully — the real, already-extracted candidates are preserved, never discarded, and the failure is recorded honestly rather than hidden", async () => {
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "timeout", message: "The AI provider took too long to respond. Try again." })
+        .mockResolvedValueOnce({ ok: false, code: "timeout", message: "The AI provider took too long to respond. Try again." });
+
+      const telemetry = newTelemetry();
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), telemetry);
+
+      // Never discarded: this reproduces the real 2026-09-07/2026-09-08
+      // production incidents where a Reviewer timeout threw away a whole
+      // batch of genuinely extracted, grounded candidates.
+      expect(result).toEqual({ ok: true, candidates: [candidate()], reviewerStatus: "failed", reviewerError: "The AI provider took too long to respond. Try again." });
+      expect(runHermesCompletion).toHaveBeenCalledTimes(2);
+      // Never falsely marked successful, and never silently hidden.
+      expect(telemetry.reviewerStatus).toBe("failed");
+      expect(telemetry.reviewerError).toBe("The AI provider took too long to respond. Try again.");
+      // Honest about what happened: these candidates proceed to the
+      // Deterministic Validator unreviewed, not because the Reviewer
+      // "accepted" them.
+      expect(telemetry.finalValidationInput).toBe(1);
       expect(telemetry.finalValidationAccepted).toBe(1);
     });
 
-    it("propagates a failure of BOTH Reviewer attempts honestly, never fabricating an accepted list", async () => {
+    it("propagates a failure of BOTH Reviewer attempts honestly — degrades to the unreviewed candidates, never fabricating an accepted list and never silently marking the review as ok", async () => {
       vi.mocked(runHermesCompletion)
         .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "The configured AI model is unavailable." })
         .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "The configured AI model is unavailable." });
 
-      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+      const telemetry = newTelemetry();
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), telemetry);
 
-      expect(result.ok).toBe(false);
-      // Never silently marks discovery successful without a real reviewed
-      // result — this is exactly the production incident this fix
-      // addresses, reproduced: both attempts fail, so validation fails.
+      expect(result.ok).toBe(true);
+      expect(result.candidates).toEqual([candidate()]);
+      expect(result.reviewerStatus).toBe("failed");
+      expect(result.reviewerError).toBe("The configured AI model is unavailable.");
+      expect(telemetry.reviewerStatus).toBe("failed");
       expect(runHermesCompletion).toHaveBeenCalledTimes(2);
     });
 
-    it("returns an honest failure (not a fabricated accept) on a malformed model response", async () => {
+    it("degrades gracefully (never a fabricated accept, never a discarded batch) on a malformed model response", async () => {
       vi.mocked(runHermesCompletion).mockResolvedValueOnce({ ok: true, text: "not json", provider: "openrouter", model: "nousresearch/hermes-3-llama-3.1-70b" });
 
-      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
+      const telemetry = newTelemetry();
+      const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), telemetry);
 
-      expect(result.ok).toBe(false);
+      expect(result.ok).toBe(true);
+      expect(result.candidates).toEqual([candidate()]);
+      expect(result.reviewerStatus).toBe("failed");
+      expect(result.reviewerError).toBeTruthy();
+      expect(telemetry.reviewerStatus).toBe("failed");
+    });
+
+    it("the Deterministic Validator still independently grounds candidates that reached it via a degraded (Reviewer-failed) path — a timeout never bypasses grounding", async () => {
+      const ungrounded = candidate({ companyName: "Fake Co", sourceUrl: "https://never-returned.example/x" });
+
+      vi.mocked(runHermesCompletion)
+        .mockResolvedValueOnce({ ok: false, code: "timeout", message: "The AI provider took too long to respond. Try again." })
+        .mockResolvedValueOnce({ ok: false, code: "timeout", message: "The AI provider took too long to respond. Try again." });
+
+      const telemetry = newTelemetry();
+      const reviewResult = await runFinalHermesValidation(baseCriteria, [candidate(), ungrounded], groundingMap(), telemetry);
+      expect(reviewResult.reviewerStatus).toBe("failed");
+
+      const finalized = finalizeDiscoveryResult(baseCriteria, reviewResult.candidates, groundingMap(), [], [], telemetry);
+      expect(finalized.ok).toBe(true);
+      if (!finalized.ok) return;
+      // The grounded candidate survives; the one citing a URL that was
+      // never in the real evidence is still rejected — grounding runs
+      // exactly as it would after a successful review.
+      expect(finalized.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+      expect(telemetry.rejectedNotGrounded).toBe(1);
     });
   });
 
@@ -846,7 +899,7 @@ describe("lead discovery", () => {
 
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
-      expect(result).toEqual({ ok: true, candidates: [candidate()] });
+      expect(result).toEqual({ ok: true, candidates: [candidate()], reviewerStatus: "ok", reviewerError: null });
       expect(runHermesCompletion).toHaveBeenCalledTimes(2);
 
       const [firstCall, secondCall] = vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0]);
@@ -883,14 +936,17 @@ describe("lead discovery", () => {
       }
     });
 
-    it("never retries more than once — a fallback failure ends the attempt instead of looping", async () => {
+    it("never retries more than once — a fallback failure ends the attempt instead of looping, and still degrades to the unreviewed candidates rather than discarding them", async () => {
       vi.mocked(runHermesCompletion)
         .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "primary down" })
         .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "fallback down too" });
 
       const result = await runFinalHermesValidation(baseCriteria, [candidate()], groundingMap(), newTelemetry());
 
-      expect(result.ok).toBe(false);
+      expect(result.ok).toBe(true);
+      expect(result.candidates).toEqual([candidate()]);
+      expect(result.reviewerStatus).toBe("failed");
+      expect(result.reviewerError).toBe("fallback down too");
       expect(runHermesCompletion).toHaveBeenCalledTimes(2);
     });
 

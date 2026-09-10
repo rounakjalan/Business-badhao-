@@ -329,7 +329,7 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
     expect(result.code).toBe("provider_error");
   });
 
-  it("final Hermes call failure: a real Nemotron extraction still fails the whole run honestly if the THIRD call fails, never falling back to unvalidated candidates", async () => {
+  it("final Hermes call (Independent Reviewer) failure degrades gracefully: a real Nemotron extraction still succeeds through the Deterministic Validator, never discarded just because the Reviewer itself failed", async () => {
     const realHit = { title: "Jaipur Retail Directory", url: "https://directory.example/jaipur-retail", content: "Sharma Boutique is a family-run clothing store in Jaipur." };
     const candidate = {
       companyName: "Sharma Boutique",
@@ -364,11 +364,17 @@ describe("real runtime call graph: Business Badhao -> Hermes -> Nemotron -> Tavi
 
     const result = await new TavilyDiscoveryProvider().discover(criteria);
 
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.code).toBe("provider_error");
-    // Confirms discover() does not silently fall back to the second call's
-    // un-reviewed candidates when the third call itself fails.
+    // A Reviewer failure (both real HTTP attempts) is a degradation, not a
+    // reason to discard a genuinely extracted, genuinely grounded candidate
+    // — this reproduces the real 2026-09-07/2026-09-08 production incidents
+    // where the opposite (discarding the whole run) was the bug.
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+    // Honestly recorded as degraded — never silently indistinguishable from
+    // a run where the Independent Reviewer actually reviewed anything.
+    expect(result.telemetry?.reviewerStatus).toBe("failed");
+    expect(result.telemetry?.reviewerError).toBeTruthy();
   });
 
   it("Nemotron routing divergence, fixed: an OpenRouter (Nemotron) outage on query generation genuinely falls back to Groq's OWN configured model — never retried against Groq using Nemotron's model id — and agent_runs honestly records requested=Nemotron/openrouter distinct from actual=Groq's real model", async () => {

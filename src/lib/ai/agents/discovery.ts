@@ -106,6 +106,12 @@ const NEMOTRON_MODEL = DEFAULT_OPENROUTER_MODEL;
 //        this codebase never trusts a model's own claim that it stayed
 //        grounded, whichever model made that claim. Pure TypeScript, no
 //        AI call and no external search — never anything else in between.
+//        Runs unconditionally, even when the Reviewer itself timed out or
+//        failed: runFinalHermesValidation degrades to handing back the
+//        Analyst's own extracted candidates unreviewed rather than
+//        discarding them (recorded honestly via
+//        ProviderTelemetry.reviewerStatus/reviewerError) — this stage is
+//        exactly why that is safe to do.
 //     -> back to Business Badhao as this module's DiscoveryResult.
 // Proven end-to-end (not just asserted) by discovery.call-graph.test.ts,
 // which mocks only fetch and Supabase — never runHermesCompletion — so a
@@ -163,8 +169,37 @@ export type ProviderTelemetry = {
   extracted: number;
   /** How many of Nemotron's extracted candidates the final Hermes validation call was asked to review. */
   finalValidationInput: number;
-  /** How many it accepted — still subject to the deterministic grounding/anti-fabrication check that follows. */
+  /**
+   * How many candidates proceeded into the Deterministic Validator next —
+   * still subject to its grounding/anti-fabrication check regardless of how
+   * this number was reached. When reviewerStatus is "ok" this is genuinely
+   * how many the Reviewer accepted; when reviewerStatus is "failed" this is
+   * every extracted candidate, unreviewed (see reviewerStatus's own doc
+   * comment) — never silently indistinguishable between the two, which is
+   * exactly what reviewerStatus is for.
+   */
   finalValidationAccepted: number;
+  /**
+   * Whether the Independent Hermes Reviewer stage actually produced a real,
+   * independent review of this batch's extracted candidates before they
+   * reached the Deterministic Validator.
+   * - "ok": the Reviewer (its primary or named fallback model — see
+   *   callIndependentReviewer) answered and parsed; its own accepted list
+   *   is what proceeded into finalizeDiscoveryResult.
+   * - "failed": both Reviewer attempts failed, timed out, or returned a
+   *   response that could not be parsed — see reviewerError. This is a
+   *   real, recorded degradation, never silently treated as "ok": a run can
+   *   still succeed with real, grounded leads (finalizeDiscoveryResult runs
+   *   unchanged either way, on the unreviewed extracted candidates), but
+   *   without the Reviewer's additional, genuinely-different-model opinion
+   *   on top of Nemotron's own extraction.
+   * - "skipped": there were zero extracted candidates to review, so the
+   *   Reviewer was never called — an LLM call over nothing can only ever
+   *   return nothing.
+   */
+  reviewerStatus: "ok" | "failed" | "skipped";
+  /** Set only when reviewerStatus is "failed" — the real error from the Reviewer's last attempt (network/timeout/provider error, or an unparseable response), for diagnosing a recurring issue. Always null otherwise. */
+  reviewerError: string | null;
   rejectedNotGrounded: number;
   rejectedNotABusiness: number;
   rejectedCompetitor: number;
@@ -179,6 +214,8 @@ export function newTelemetry(): ProviderTelemetry {
     extracted: 0,
     finalValidationInput: 0,
     finalValidationAccepted: 0,
+    reviewerStatus: "skipped",
+    reviewerError: null,
     rejectedNotGrounded: 0,
     rejectedNotABusiness: 0,
     rejectedCompetitor: 0,
@@ -938,15 +975,33 @@ const INDEPENDENT_REVIEWER_FALLBACK_MODEL = "nousresearch/hermes-4-405b";
 /**
  * The Reviewer's models are much larger than most Hermes-routed calls (up to
  * 405B) and this call's own maxTokens budget is 4000 — comfortably past the
- * platform-wide 20s default (config.timeoutMs) under real generation load. A
- * production run (2026-09-07) showed both attempts aborting right around
- * 20s, which — because the abort landed mid body-read rather than on the
- * initial request — surfaced as a misleading "malformed_response ... raw
- * body (empty)" instead of the real "timeout" (see the body-read fix in
- * src/lib/ai/providers/openai-compatible.ts). This override doesn't change
- * the platform default for any other Hermes-routed call.
+ * platform-wide 20s default (config.timeoutMs) under real generation load.
+ *
+ * Raised once already, from the 20s platform default to 40s, after a
+ * 2026-09-07 incident where both attempts aborted right around 20s while
+ * still generating — because the abort landed mid body-read rather than on
+ * the initial request, that surfaced as a misleading "malformed_response
+ * ... raw body (empty)" instead of the real "timeout" (see the body-read fix
+ * in src/lib/ai/providers/openai-compatible.ts).
+ *
+ * Raised again here, to 60s, after real production telemetry (2026-09-07
+ * 19:38 and 2026-09-08 19:06 UTC) showed the Reviewer still timing out at
+ * exactly 40,000ms under real load on these same large models. Raising the
+ * number alone is not the actual fix for a model that is occasionally just
+ * slow — at any finite value, a genuine outage would still eventually time
+ * out — so this is a modest, evidence-based increase, not the safety net:
+ * see runFinalHermesValidation's own doc comment for that (a Reviewer
+ * timeout/failure no longer discards this batch's already-grounded
+ * candidates; it only means they proceed to the Deterministic Validator
+ * without the Reviewer's additional opinion on top). 60s stays a small
+ * fraction of both the manual Start Discovery action's own budget (270s,
+ * see TOTAL_REQUEST_BUDGET_MS in campaigns/actions.ts) and the scheduled
+ * pipeline's (240s, scheduled-pipeline.ts) — two failed attempts in a row
+ * (see callIndependentReviewer) costs at most 120s, still well inside
+ * either. This override doesn't change the platform default for any other
+ * Hermes-routed call.
  */
-const INDEPENDENT_REVIEWER_TIMEOUT_MS = 40_000;
+const INDEPENDENT_REVIEWER_TIMEOUT_MS = 60_000;
 
 const FinalValidationSchema = z.object({ accepted: z.array(ExtractedProspectSchema) });
 
@@ -1031,6 +1086,14 @@ async function callIndependentReviewer(
   });
 }
 
+/** Always ok:true — see runFinalHermesValidation's own doc comment for why a Reviewer failure is a degradation, never a hard failure. */
+export type FinalHermesValidationResult = {
+  ok: true;
+  candidates: DiscoveredProspect[];
+  reviewerStatus: "ok" | "failed" | "skipped";
+  reviewerError: string | null;
+};
+
 /**
  * The Independent Hermes Reviewer: a real call to a genuinely different
  * model (see INDEPENDENT_REVIEWER_MODEL above) than the Nemotron calls
@@ -1042,11 +1105,29 @@ async function callIndependentReviewer(
  * skipping extraction when a search returns zero hits (see discover()
  * below).
  *
- * Never fabricates a review: a failure at either the completion call
- * (both attempts, see callIndependentReviewer) or JSON parsing returns
- * ok:false here, which discover() below already treats as a failed
- * discovery run — this stage cannot silently mark discovery successful
- * without a real reviewed result to show for it.
+ * Resilient to a Reviewer failure/timeout BY DESIGN: this function always
+ * returns ok:true. A failure of both Reviewer attempts (network error,
+ * timeout, rate limit — see callIndependentReviewer) or a response that
+ * cannot be parsed is never treated as a reason to throw away candidates
+ * that Nemotron's own extraction step already grounded in real search
+ * evidence — production telemetry (2026-09-07, 2026-09-08) showed exactly
+ * this happening: a Reviewer timeout discarding a whole batch of otherwise
+ * real, grounded candidates. Instead it degrades to `reviewerStatus:
+ * "failed"` and hands the unreviewed extracted candidates straight through.
+ *
+ * This is safe specifically because finalizeDiscoveryResult (the
+ * Deterministic Validator) runs immediately after this, on every path,
+ * unconditionally — it already re-checks each candidate's URL/evidence
+ * grounding and re-applies the competitor/non-business filters completely
+ * independently of whether the Reviewer ever ran (it was never written to
+ * trust the Reviewer's approval as sufficient on its own). A missing
+ * Reviewer opinion removes one of two independent checks, never the only
+ * one — the deterministic grounding check that follows is never bypassed.
+ *
+ * Never silently fabricates or hides a review: reviewerStatus/reviewerError
+ * on the telemetry record exactly what happened, so a degraded run's leads
+ * are never indistinguishable from ones a real independent model actually
+ * reviewed (see ProviderTelemetry.reviewerStatus's own doc comment).
  */
 export async function runFinalHermesValidation(
   criteria: DiscoveryCriteria,
@@ -1054,8 +1135,11 @@ export async function runFinalHermesValidation(
   realHitByCanonicalUrl: Map<string, SearchHit>,
   telemetry?: ProviderTelemetry,
   trackingClient?: TrackingClient
-): Promise<{ ok: true; candidates: DiscoveredProspect[] } | { ok: false; message: string }> {
-  if (candidates.length === 0) return { ok: true, candidates: [] };
+): Promise<FinalHermesValidationResult> {
+  if (candidates.length === 0) {
+    if (telemetry) telemetry.reviewerStatus = "skipped";
+    return { ok: true, candidates: [], reviewerStatus: "skipped", reviewerError: null };
+  }
 
   if (telemetry) telemetry.finalValidationInput = candidates.length;
 
@@ -1076,14 +1160,39 @@ export async function runFinalHermesValidation(
 
   const result = await callIndependentReviewer(criteria.organizationId, FINAL_VALIDATION_SYSTEM_PROMPT, userPrompt, trackingClient);
 
-  if (!result.ok) return { ok: false, message: result.message };
+  if (!result.ok) {
+    // Degrade, don't discard — see this function's own doc comment. These
+    // candidates were never actually reviewed, so they are recorded as the
+    // Reviewer having failed, not as it having "accepted" them — but they
+    // are exactly what the Deterministic Validator receives next.
+    if (telemetry) {
+      telemetry.reviewerStatus = "failed";
+      telemetry.reviewerError = result.message;
+      telemetry.finalValidationAccepted = candidates.length;
+    }
+    return { ok: true, candidates, reviewerStatus: "failed", reviewerError: result.message };
+  }
 
   const parsed = parseAiJson(result.text, FinalValidationSchema);
-  if (!parsed.ok) return { ok: false, message: "Could not complete final validation of discovered prospects — please try again." };
+  if (!parsed.ok) {
+    // The Reviewer answered, but not usably — the same underlying problem
+    // as an outright call failure (no real, trustworthy independent opinion
+    // to act on), so the same degrade-gracefully treatment applies.
+    const message = "Independent Hermes Reviewer returned a response that could not be validated.";
+    if (telemetry) {
+      telemetry.reviewerStatus = "failed";
+      telemetry.reviewerError = message;
+      telemetry.finalValidationAccepted = candidates.length;
+    }
+    return { ok: true, candidates, reviewerStatus: "failed", reviewerError: message };
+  }
 
-  if (telemetry) telemetry.finalValidationAccepted = parsed.data.accepted.length;
+  if (telemetry) {
+    telemetry.reviewerStatus = "ok";
+    telemetry.finalValidationAccepted = parsed.data.accepted.length;
+  }
 
-  return { ok: true, candidates: parsed.data.accepted };
+  return { ok: true, candidates: parsed.data.accepted, reviewerStatus: "ok", reviewerError: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1375,14 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       return { ok: false, code: "provider_error", message: extraction.message, telemetry };
     }
 
+    // runFinalHermesValidation never fails outright (see its own doc
+    // comment) — a Reviewer timeout/failure degrades to reviewerStatus:
+    // "failed" and hands back Nemotron's own extracted candidates
+    // unreviewed, recorded honestly in telemetry, rather than discarding a
+    // whole batch of otherwise real, grounded candidates. The Deterministic
+    // Validator next is what actually guarantees grounding/anti-
+    // fabrication/competitor filtering, on every path, regardless of
+    // whether the Reviewer ran.
     const finalValidation = await runFinalHermesValidation(
       criteria,
       extraction.candidates,
@@ -1273,9 +1390,6 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       telemetry,
       trackingClient
     );
-    if (!finalValidation.ok) {
-      return { ok: false, code: "provider_error", message: finalValidation.message, telemetry };
-    }
 
     return finalizeDiscoveryResult(
       criteria,
