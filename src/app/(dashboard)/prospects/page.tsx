@@ -52,7 +52,7 @@ export default async function ProspectsPage() {
         <DarkEmptyState
           icon={ProspectsIcon}
           title="No prospects yet"
-          description="Raw, unqualified contacts will appear here before they're promoted to leads."
+          description="Businesses discovered by Lead Discovery will show up here, each one already linked to the lead record created for it."
         />
       ) : (
         <DataTable
