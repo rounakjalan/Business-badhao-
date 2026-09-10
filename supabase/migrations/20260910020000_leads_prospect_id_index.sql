@@ -1,0 +1,42 @@
+-- =============================================================================
+-- Foreign-key indexing fix (Supabase advisor: "Unindexed foreign keys",
+-- unindexed_foreign_keys) — leads.prospect_id only.
+--
+-- The audit flagged 22 unindexed foreign keys. 4 were already covered as a
+-- side effect of the Analytics fix (20260910000000_analytics_aggregation_
+-- functions.sql): conversations.campaign_id, deals.campaign_id,
+-- leads.lead_source_id, prospects.lead_source_id. Of the remaining 18,
+-- this migration adds exactly one index — leads.prospect_id — because it
+-- is the only one with a real, verified access pattern: it is filtered
+-- directly (not just joined incidentally) in the highest-traffic parts of
+-- the pipeline:
+--
+--   * src/lib/gmail/replies.ts — every Gmail reply-poll cycle looks up a
+--     lead by (organization_id, prospect_id) to route an inbound reply to
+--     the right lead.
+--   * src/app/api/whatsapp/webhook/route.ts — every inbound WhatsApp
+--     message does the same (organization_id, prospect_id) lookup.
+--   * src/components/layout/global-search.tsx — global search resolves
+--     company names via `.in("prospect_id", prospectIds)`.
+--
+-- leads and prospects are also the two largest tables in this schema by a
+-- wide margin (106 and 105 rows respectively at the time of this fix, vs.
+-- single digits or zero rows for every other table with a flagged FK), so
+-- this is also the one relationship where a sequential scan is actually
+-- reachable today, not just theoretically.
+--
+-- The other 17 flagged foreign keys were deliberately left unindexed — see
+-- this fix's own report for the full table-by-table review. In summary: 15
+-- are *_created_by / *_connected_by / *_assigned_to / audit_logs.user_id
+-- attribution columns that are written once on insert and never read back
+-- through a WHERE filter, join, or ORDER BY anywhere in the application
+-- (verified by grep across src/), and profiles are never deleted in this
+-- app, so their `on delete set null` cascade path is not a live concern
+-- either. The remaining 2 (messages.outreach_campaign_id,
+-- recovery_attempts.loss_analysis_id) are the same write-once, read-never
+-- shape in the current codebase — messages are always queried by
+-- conversation_id or lead_id (both already indexed), and recovery_attempts
+-- are always queried by deal_id (already indexed).
+-- =============================================================================
+
+create index if not exists leads_prospect_id_idx on public.leads (prospect_id);
