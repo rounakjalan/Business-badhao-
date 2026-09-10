@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
+import type { ProspectResearch } from "@/lib/ai/agents/prospect-research-schema";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
@@ -32,6 +33,19 @@ export type LeadQualificationInput = {
   currentStatus: string;
   currentScore: number | null;
   researchSummary: string | null;
+  /**
+   * The structured findings from the most recent Lead Research pass on this
+   * lead (see prospect-research-schema.ts) — a third, separate context from
+   * businessContext (what the business offers) and icpCriteria (who the
+   * campaign targets): what was actually discovered about THIS prospect.
+   * null when there is no research on file, it hasn't completed, or the
+   * stored findings don't parse (e.g. a manually-entered lead_research row)
+   * — qualification must work from researchSummary alone in that case, and
+   * this field is never consulted by clampWithoutResearchEvidence below,
+   * which keys off researchSummary only, so its presence or absence can
+   * never change whether the no-research-evidence gate applies.
+   */
+  researchFindings: ProspectResearch | null;
   /** The campaign's Ideal Customer Profile — kept a fully separate concept from businessContext below; ICP is who the campaign targets, businessContext is what the business actually offers. */
   icpCriteria: Record<string, unknown> | null;
   campaignObjective: string | null;
@@ -52,7 +66,9 @@ export type LeadQualificationResult =
   | { ok: true; qualification: LeadQualification }
   | { ok: false; message: string };
 
-const SYSTEM_PROMPT = `You are the AI lead-qualification engine inside Business Badhao, a customer-acquisition CRM. Score how well a lead fits THIS BUSINESS and THIS CAMPAIGN, using only the information given: the lead's own record, any research on file, this business's real Business Knowledge (products/services, service area, relevant policies), and the campaign's Ideal Customer Profile criteria if available. Business Knowledge and the campaign's ICP are two separate things — Business Knowledge is what the business actually offers, the ICP is who this specific campaign targets. A lead can fit the ICP but not the business's actual offerings (e.g. outside the service area), or vice versa; consider both.
+const SYSTEM_PROMPT = `You are the AI lead-qualification engine inside Business Badhao, a customer-acquisition CRM. Score how well a lead fits THIS BUSINESS and THIS CAMPAIGN, using only the information given: the lead's own record, any research on file, this business's real Business Knowledge (products/services, service area, relevant policies), and the campaign's Ideal Customer Profile criteria if available. Business Knowledge, the campaign's ICP, and Prospect Research are three separate things — Business Knowledge is what the business actually offers, the ICP is who this specific campaign targets, and Prospect Research is what was actually discovered about THIS lead. A lead can fit the ICP but not the business's actual offerings (e.g. outside the service area), or vice versa; consider both. Keep evaluating the lead against the campaign's ICP — research evidence should inform and sharpen that judgment, never substitute for it.
+
+When structured Prospect Research findings are available, treat them as evidence to weigh, not settled fact: only what the research explicitly lists as verified is a verified fact about the prospect. Anything listed as inferred is the research agent's OWN speculation, not confirmed — do not upgrade it to a verified fact just because it appears alongside real evidence, and do not let an unverified buying signal or objection alone justify a confident "qualified"/"disqualified" call. Where research leaves something unresolved, say so in "missingInformation" rather than guessing.
 
 Respond with ONLY a single JSON object — no markdown fences, no commentary — with exactly these keys:
 {
@@ -67,6 +83,37 @@ Respond with ONLY a single JSON object — no markdown fences, no commentary —
 }
 
 Every reason must trace back to something in the input — never invent a product, price, policy, or business fact not present in Business Knowledge. If there isn't enough information to score confidently, say so in "missingInformation", keep confidence "low", and recommend "qualifying" or "pending" rather than guessing "qualified"/"disqualified".`;
+
+/**
+ * Only the structured Lead Research fields that actually bear on a
+ * fit/intent decision, and that production data shows are reliably
+ * populated (see this fix's own report). Deliberately excludes fields
+ * already covered elsewhere or not needed here: companySummary duplicates
+ * researchSummary above (same value, written from the same source),
+ * businessFactsReferenced duplicates businessContext already passed
+ * separately, and likelyNeeds/possiblePainPoints/relevantProductsOrServices/
+ * personalizationOpportunities are outreach-drafting inputs (see
+ * generateOutreach), not qualification-fit signals — repeating them here
+ * would just spend tokens without changing the score.
+ */
+function formatResearchFindings(findings: ProspectResearch | null): string {
+  if (!findings) return "No structured research findings on file for this lead yet.";
+
+  return [
+    `Research confidence: ${findings.confidence}`,
+    findings.verifiedInformation.length > 0
+      ? `Verified facts about this prospect (directly evidenced — treat as fact): ${findings.verifiedInformation.join("; ")}`
+      : "Verified facts about this prospect: none recorded.",
+    findings.buyingSignals.length > 0 ? `Buying signals: ${findings.buyingSignals.join("; ")}` : "Buying signals: none recorded.",
+    findings.potentialObjections.length > 0 ? `Potential objections: ${findings.potentialObjections.join("; ")}` : "Potential objections: none recorded.",
+    findings.inferredInformation.length > 0
+      ? `Inferred by research (the research agent's OWN reasoning, NOT independently verified — weigh cautiously, never treat as fact): ${findings.inferredInformation.join("; ")}`
+      : "Inferred information: none recorded.",
+    findings.unavailableInformation.length > 0
+      ? `What research explicitly could not determine: ${findings.unavailableInformation.join("; ")}`
+      : "What research could not determine: nothing flagged as unavailable.",
+  ].join("\n");
+}
 
 /**
  * Scores a lead against its campaign's ICP, this business's real Business
@@ -90,7 +137,10 @@ export async function runLeadQualification(input: LeadQualificationInput): Promi
     `Existing research summary: ${input.researchSummary ?? "none on file"}`,
     `Campaign objective: ${input.campaignObjective ?? "unknown"}`,
     "",
-    "=== CAMPAIGN ICP (separate from Business Knowledge above — who this campaign targets) ===",
+    "=== PROSPECT RESEARCH FINDINGS (what was discovered about THIS lead — separate from Business Knowledge and the campaign ICP; distinguish verified facts from inference per the system prompt) ===",
+    formatResearchFindings(input.researchFindings),
+    "",
+    "=== CAMPAIGN ICP (separate from Business Knowledge and Prospect Research above — who this campaign targets) ===",
     input.icpCriteria ? JSON.stringify(input.icpCriteria) : "none on file",
   ].join("\n");
 

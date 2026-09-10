@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/ai/hermes/hermes-service", () => ({ runHermesCompletion: vi.fn() }));
 
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
+import type { ProspectResearch } from "@/lib/ai/agents/prospect-research-schema";
 import {
   runLeadQualification,
   clampWithoutResearchEvidence,
@@ -28,9 +29,25 @@ const baseInput = {
   currentStatus: "new",
   currentScore: null,
   researchSummary: null,
+  researchFindings: null,
   icpCriteria: null,
   campaignObjective: "Book demo calls",
   businessContext: null,
+};
+
+const FULL_RESEARCH_FINDINGS: ProspectResearch = {
+  companySummary: "Sharma Retailers operates three stores in Noida and is actively hiring.",
+  likelyNeeds: ["Inventory management software"],
+  possiblePainPoints: ["Manual stock tracking"],
+  relevantProductsOrServices: ["POS system"],
+  buyingSignals: ["Actively hiring store staff", "Recently opened a third location"],
+  personalizationOpportunities: ["Mention their Noida expansion"],
+  potentialObjections: ["May already have a POS vendor"],
+  confidence: "high",
+  verifiedInformation: ["Company: Sharma Retailers", "Location: Noida", "Three store locations"],
+  businessFactsReferenced: ["POS Package"],
+  inferredInformation: ["Likely evaluating vendors given recent growth"],
+  unavailableInformation: ["Current POS vendor, if any"],
 };
 
 describe("runLeadQualification", () => {
@@ -115,6 +132,100 @@ describe("runLeadQualification", () => {
     const result = await runLeadQualification({ ...baseInput, businessContext: null, icpCriteria: null });
 
     expect(result.ok).toBe(true);
+  });
+
+  it("sends structured research findings — buying signals, objections, verified evidence, and confidence — as their own section, separate from Business Knowledge and the campaign ICP", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_QUALIFICATION), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await runLeadQualification({
+      ...baseInput,
+      icpCriteria: { targetMarket: "Retail store owners" },
+      researchFindings: FULL_RESEARCH_FINDINGS,
+    });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    const leadIdx = prompt.indexOf("=== LEAD ===");
+    const researchIdx = prompt.indexOf("=== PROSPECT RESEARCH FINDINGS");
+    const icpIdx = prompt.indexOf("=== CAMPAIGN ICP");
+
+    // Three distinct, ordered sections — never merged into one another.
+    expect(leadIdx).toBeGreaterThanOrEqual(0);
+    expect(researchIdx).toBeGreaterThan(leadIdx);
+    expect(icpIdx).toBeGreaterThan(researchIdx);
+
+    // Buying signals reach the context.
+    expect(prompt).toContain("Actively hiring store staff");
+    expect(prompt.indexOf("Actively hiring store staff")).toBeGreaterThan(researchIdx);
+    expect(prompt.indexOf("Actively hiring store staff")).toBeLessThan(icpIdx);
+    // Objections reach the context.
+    expect(prompt).toContain("May already have a POS vendor");
+    // Verified evidence/source information reaches the context.
+    expect(prompt).toContain("Three store locations");
+    // Confidence/research status reaches the context.
+    expect(prompt).toContain("Research confidence: high");
+    // Missing information (what research could not determine) reaches the context.
+    expect(prompt).toContain("Current POS vendor, if any");
+    // Inferred content is present but explicitly labeled as not verified.
+    expect(prompt).toContain("NOT independently verified");
+    expect(prompt).toContain("Likely evaluating vendors given recent growth");
+  });
+
+  it("does not repeat Business Knowledge facts already referenced by research, or outreach-drafting fields not needed for scoring — keeps the research section to what actually bears on fit/intent", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_QUALIFICATION), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    await runLeadQualification({ ...baseInput, researchFindings: FULL_RESEARCH_FINDINGS });
+
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    // businessFactsReferenced, likelyNeeds, possiblePainPoints, relevantProductsOrServices,
+    // and personalizationOpportunities are outreach/duplication-prone fields deliberately
+    // left out of the research section (see formatResearchFindings's own comment).
+    expect(prompt).not.toContain("POS Package");
+    expect(prompt).not.toContain("Inventory management software");
+    expect(prompt).not.toContain("Manual stock tracking");
+    expect(prompt).not.toContain("Mention their Noida expansion");
+  });
+
+  it("falls back to an explicit 'no structured research findings' line when researchFindings is null — qualification still works from the summary alone", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_QUALIFICATION), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    const result = await runLeadQualification({
+      ...baseInput,
+      researchSummary: "Sharma Retailers operates three stores in Noida.",
+      researchFindings: null,
+    });
+
+    expect(result.ok).toBe(true);
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("No structured research findings on file for this lead yet.");
+    expect(prompt).toContain("Sharma Retailers operates three stores in Noida.");
+  });
+
+  it("treats structured findings with every array empty the same as no structured findings — none of the six lines silently disappear or throw", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_QUALIFICATION), provider: "openrouter", model: "nousresearch/hermes-4-70b" });
+
+    const emptyFindings: ProspectResearch = {
+      companySummary: "",
+      likelyNeeds: [],
+      possiblePainPoints: [],
+      relevantProductsOrServices: [],
+      buyingSignals: [],
+      personalizationOpportunities: [],
+      potentialObjections: [],
+      confidence: "low",
+      verifiedInformation: [],
+      businessFactsReferenced: [],
+      inferredInformation: [],
+      unavailableInformation: [],
+    };
+
+    const result = await runLeadQualification({ ...baseInput, researchFindings: emptyFindings });
+
+    expect(result.ok).toBe(true);
+    const prompt = vi.mocked(runHermesCompletion).mock.calls[0][0].userPrompt;
+    expect(prompt).toContain("Buying signals: none recorded.");
+    expect(prompt).toContain("Potential objections: none recorded.");
+    expect(prompt).toContain("Verified facts about this prospect: none recorded.");
+    expect(prompt).toContain("Research confidence: low");
   });
 
   it("forwards an explicit client straight through to runHermesCompletion — this is what lets a cron/scheduled call's own agent_runs/model_usage telemetry actually reach RLS-protected tables instead of silently falling back to the session-less default client", async () => {
@@ -211,6 +322,49 @@ describe("runLeadQualification's no-research guard", () => {
     });
 
     const result = await runLeadQualification({ ...baseInput, researchSummary: "   " });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.qualification.recommendedStatus).toBe("qualifying");
+  });
+
+  it("4. a model cannot bypass the no-research-evidence gate simply because structured findings are present — the gate keys on researchSummary alone, never on whether researchFindings is populated", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({
+      ok: true,
+      text: JSON.stringify({ ...VALID_QUALIFICATION, recommendedStatus: "qualified" }),
+      provider: "openrouter",
+      model: "nousresearch/hermes-4-70b",
+    });
+
+    // researchSummary is null/missing (no real research evidence on file),
+    // but researchFindings is fully populated with buying signals and
+    // "verified" claims the model itself produced in this same response —
+    // none of that can substitute for the actual research-completed signal.
+    const result = await runLeadQualification({
+      ...baseInput,
+      researchSummary: null,
+      researchFindings: FULL_RESEARCH_FINDINGS,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.qualification.recommendedStatus).toBe("qualifying");
+    expect(result.qualification.missingInformation).toEqual(expect.arrayContaining([expect.stringContaining("Lead Research")]));
+  });
+
+  it("5. research findings alone (without a research summary) also cannot produce a final 'disqualified' decision", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({
+      ok: true,
+      text: JSON.stringify({ ...VALID_QUALIFICATION, recommendedStatus: "disqualified" }),
+      provider: "openrouter",
+      model: "nousresearch/hermes-4-70b",
+    });
+
+    const result = await runLeadQualification({
+      ...baseInput,
+      researchSummary: null,
+      researchFindings: FULL_RESEARCH_FINDINGS,
+    });
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");

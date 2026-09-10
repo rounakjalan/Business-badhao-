@@ -1,7 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { generateOutreach } from "@/lib/ai/agents/outreach";
-import { runProspectResearch, type ProspectResearchResult } from "@/lib/ai/agents/prospect-research";
+import { runProspectResearch, ProspectResearchSchema, type ProspectResearch, type ProspectResearchResult } from "@/lib/ai/agents/prospect-research";
 import { runLeadQualification, type LeadQualificationResult } from "@/lib/ai/agents/qualification";
 import { completeAgentRun, createAgentRun, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectOutreachContext, selectQualificationContext, selectResearchContext } from "@/lib/business-context";
@@ -54,12 +54,22 @@ export async function loadLeadContext(supabase: Client, leadId: string, organiza
       : Promise.resolve({ data: null }),
     supabase
       .from("lead_research")
-      .select("summary")
+      .select("summary, findings")
       .eq("lead_id", leadId)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
   ]);
+
+  // The structured findings jsonb (see prospect-research-schema.ts) is only
+  // ever meaningful when it actually parses as a ProspectResearch object —
+  // a manually-entered lead_research row (source: 'manual') has no such
+  // structure, and safeParse then correctly yields null here, same as "no
+  // research on file". Qualification must work from latestResearchSummary
+  // alone in that case; this is never allowed to widen the deterministic
+  // clampWithoutResearchEvidence gate, which keys off the summary, not this.
+  const parsedFindings = latestResearch.data?.findings ? ProspectResearchSchema.safeParse(latestResearch.data.findings) : null;
+  const latestResearchFindings: ProspectResearch | null = parsedFindings?.success ? parsedFindings.data : null;
 
   let icpCriteria: Record<string, unknown> | null = null;
   if (campaign.data?.ideal_customer_profile_id) {
@@ -89,6 +99,7 @@ export async function loadLeadContext(supabase: Client, leadId: string, organiza
     campaignObjective: campaign.data?.objective ?? null,
     icpCriteria,
     latestResearchSummary: latestResearch.data?.summary ?? null,
+    latestResearchFindings,
     discoveryEvidence: rawData
       ? {
           location: rawData.location,
@@ -213,6 +224,7 @@ export async function qualifyLead(
     currentStatus: context.lead.qualification_status,
     currentScore: context.lead.current_score,
     researchSummary: context.latestResearchSummary,
+    researchFindings: context.latestResearchFindings,
     icpCriteria: context.icpCriteria,
     campaignObjective: context.campaignObjective,
     businessContext: selectQualificationContext(businessContext),

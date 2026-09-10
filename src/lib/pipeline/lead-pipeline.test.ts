@@ -430,3 +430,129 @@ describe("qualifyLead — telemetry client threading", () => {
     expect(usage.every((u) => u.organization_id === "org-1")).toBe(true);
   });
 });
+
+describe("qualifyLead — Research to Qualification information flow", () => {
+  beforeEach(() => {
+    for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+    process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+    delete process.env.OPENROUTER_MODEL;
+    delete process.env.AI_PROVIDER;
+    delete process.env.AI_FALLBACK_PROVIDER;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+    vi.unstubAllGlobals();
+  });
+
+  const VALID_QUALIFICATION = {
+    qualificationScore: 70,
+    fitScore: 75,
+    intentScore: 60,
+    confidence: "medium",
+    positiveReasons: ["matches ICP"],
+    negativeReasons: [],
+    missingInformation: [],
+    recommendedStatus: "qualified",
+  };
+
+  it("passes the stored lead_research.findings jsonb through to the qualification prompt as structured findings, not just the summary string", async () => {
+    let capturedUserMessage = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === OPENROUTER_URL) {
+          const body = JSON.parse(init?.body as string);
+          capturedUserMessage = body.messages.find((m: { role: string }) => m.role === "user").content as string;
+          return openRouterResponse(VALID_QUALIFICATION);
+        }
+        throw new Error(`unexpected fetch url: ${url}`);
+      })
+    );
+
+    const tables = seedTables();
+    tables.lead_research = [
+      {
+        id: "research-1",
+        organization_id: "org-1",
+        lead_id: "lead-1",
+        source: "ai",
+        summary: VALID_RESEARCH.companySummary,
+        findings: {
+          ...VALID_RESEARCH,
+          buyingSignals: ["Recently expanded to a second location"],
+          potentialObjections: ["Price sensitivity"],
+          verifiedInformation: ["Company: Bright Pixel", "Location: Pune"],
+          confidence: "high",
+        },
+        created_at: new Date().toISOString(),
+      },
+    ];
+    const supabase = createFakeSupabase(tables);
+
+    const result = await qualifyLead(supabase, "org-1", "lead-1");
+    expect(result.ok).toBe(true);
+
+    expect(capturedUserMessage).toContain("Recently expanded to a second location");
+    expect(capturedUserMessage).toContain("Price sensitivity");
+    expect(capturedUserMessage).toContain("Company: Bright Pixel");
+    expect(capturedUserMessage).toContain("Research confidence: high");
+  });
+
+  it("still qualifies correctly from the summary alone when the stored findings jsonb doesn't parse as ProspectResearch (e.g. a manually-entered lead_research row)", async () => {
+    let capturedUserMessage = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === OPENROUTER_URL) {
+          const body = JSON.parse(init?.body as string);
+          capturedUserMessage = body.messages.find((m: { role: string }) => m.role === "user").content as string;
+          return openRouterResponse(VALID_QUALIFICATION);
+        }
+        throw new Error(`unexpected fetch url: ${url}`);
+      })
+    );
+
+    const tables = seedTables();
+    tables.lead_research = [
+      {
+        id: "research-1",
+        organization_id: "org-1",
+        lead_id: "lead-1",
+        source: "manual",
+        summary: "Spoke on the phone — seemed interested.",
+        findings: {},
+        created_at: new Date().toISOString(),
+      },
+    ];
+    const supabase = createFakeSupabase(tables);
+
+    const result = await qualifyLead(supabase, "org-1", "lead-1");
+    expect(result.ok).toBe(true);
+
+    expect(capturedUserMessage).toContain("Spoke on the phone");
+    expect(capturedUserMessage).toContain("No structured research findings on file for this lead yet.");
+    // A manual note still counts as real research evidence — a final
+    // "qualified" verdict is not clamped away just because it has no
+    // structured findings behind it.
+    expect(result.ok && result.qualification.recommendedStatus).toBe("qualified");
+  });
+
+  it("holds a 'qualified' verdict at 'qualifying' when there is no lead_research row at all, even though the model can see the campaign ICP and Business Knowledge", async () => {
+    const fetchMock = vi.fn(async () => openRouterResponse(VALID_QUALIFICATION));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tables = seedTables();
+    tables.lead_research = [];
+    const supabase = createFakeSupabase(tables);
+
+    const result = await qualifyLead(supabase, "org-1", "lead-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.qualification.recommendedStatus).toBe("qualifying");
+  });
+});
