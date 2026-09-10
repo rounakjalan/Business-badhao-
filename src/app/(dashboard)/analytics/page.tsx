@@ -1,63 +1,28 @@
 import { PageHeader } from "@/components/layout/page-header";
 import { AnimatedBar } from "@/components/dashboard-ui/animated-bar";
 import { DarkCard } from "@/components/dashboard-ui/card";
+import { getCampaignPerformance, getLeadSourcePerformance, getOverallTotals } from "@/lib/analytics";
 import { getAcquisitionFunnel } from "@/lib/dashboard";
 import { formatCurrency } from "@/lib/format";
 import { getCurrentOrg } from "@/lib/organizations";
-import { createClient } from "@/lib/supabase/server";
 
 export default async function AnalyticsPage() {
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return null;
 
-  const supabase = await createClient();
-  const [funnel, campaigns, leadSources] = await Promise.all([
+  // Each of these is aggregated in Postgres (see src/lib/analytics.ts) —
+  // one row per campaign/lead source, not every lead/conversation/deal/
+  // prospect row for the organization grouped here the way this page used
+  // to.
+  const [funnel, campaignPerf, sourcePerf, overallTotals] = await Promise.all([
     getAcquisitionFunnel(currentOrg.organizationId),
-    supabase.from("campaigns").select("id, name").eq("organization_id", currentOrg.organizationId),
-    supabase.from("lead_sources").select("id, name").eq("organization_id", currentOrg.organizationId),
+    getCampaignPerformance(currentOrg.organizationId),
+    getLeadSourcePerformance(currentOrg.organizationId),
+    getOverallTotals(currentOrg.organizationId),
   ]);
-
-  const campaignIds = (campaigns.data ?? []).map((c) => c.id);
-  const [leads, conversations, deals] = await Promise.all([
-    campaignIds.length
-      ? supabase.from("leads").select("campaign_id, qualification_status, lead_source_id").in("campaign_id", campaignIds)
-      : Promise.resolve({ data: [] }),
-    campaignIds.length ? supabase.from("conversations").select("campaign_id").in("campaign_id", campaignIds) : Promise.resolve({ data: [] }),
-    campaignIds.length ? supabase.from("deals").select("campaign_id, status, value").in("campaign_id", campaignIds) : Promise.resolve({ data: [] }),
-  ]);
-
-  const campaignPerf = (campaigns.data ?? []).map((c) => {
-    const cLeads = (leads.data ?? []).filter((l) => l.campaign_id === c.id);
-    const cQualified = cLeads.filter((l) => l.qualification_status === "qualified").length;
-    const cConversations = (conversations.data ?? []).filter((cv) => cv.campaign_id === c.id).length;
-    const cDeals = (deals.data ?? []).filter((d) => d.campaign_id === c.id);
-    const cWon = cDeals.filter((d) => d.status === "won");
-    const revenue = cWon.reduce((sum, d) => sum + Number(d.value), 0);
-    return {
-      name: c.name,
-      leads: cLeads.length,
-      qualified: cQualified,
-      conversations: cConversations,
-      deals: cDeals.length,
-      won: cWon.length,
-      revenue,
-      cr: cLeads.length > 0 ? ((cWon.length / cLeads.length) * 100).toFixed(1) : "0.0",
-    };
-  });
-
-  const allLeads = await supabase.from("leads").select("lead_source_id").eq("organization_id", currentOrg.organizationId);
-  const allDeals = await supabase.from("deals").select("lead_id, status, value").eq("organization_id", currentOrg.organizationId);
-  const allProspects = await supabase.from("prospects").select("id, lead_source_id").eq("organization_id", currentOrg.organizationId);
-
-  const sourcePerf = (leadSources.data ?? []).map((source) => {
-    const sProspects = (allProspects.data ?? []).filter((p) => p.lead_source_id === source.id).length;
-    const sLeads = (allLeads.data ?? []).filter((l) => l.lead_source_id === source.id).length;
-    return { source: source.name, prospects: sProspects, leads: sLeads };
-  });
 
   const funnelMax = Math.max(...funnel.map((f) => f.count), 1);
-  const totalWon = (allDeals.data ?? []).filter((d) => d.status === "won").length;
-  const totalRevenue = (allDeals.data ?? []).filter((d) => d.status === "won").reduce((sum, d) => sum + Number(d.value), 0);
+  const { totalWon, totalRevenue } = overallTotals;
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col gap-6 p-4 sm:p-6">
@@ -162,8 +127,8 @@ export default async function AnalyticsPage() {
             {[
               { label: "Total Deals Won", val: totalWon.toString() },
               { label: "Total Revenue", val: formatCurrency(totalRevenue, "INR") },
-              { label: "Campaigns", val: (campaigns.data ?? []).length.toString() },
-              { label: "Lead Sources", val: (leadSources.data ?? []).length.toString() },
+              { label: "Campaigns", val: campaignPerf.length.toString() },
+              { label: "Lead Sources", val: sourcePerf.length.toString() },
             ].map((m) => (
               <div key={m.label} className="bb-stagger-item flex items-center justify-between border-b border-bb-navy-3 py-1.5 last:border-0">
                 <span className="text-sm text-bb-text-2">{m.label}</span>

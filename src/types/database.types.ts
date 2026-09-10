@@ -1382,6 +1382,35 @@ export interface Database {
         Args: { org_name: string };
         Returns: Database["public"]["Tables"]["organizations"]["Row"];
       };
+      analytics_campaign_performance: {
+        Args: { p_organization_id: string };
+        Returns: {
+          campaign_id: string;
+          campaign_name: string;
+          leads_count: number;
+          qualified_count: number;
+          conversations_count: number;
+          deals_count: number;
+          won_count: number;
+          revenue: number;
+        }[];
+      };
+      analytics_lead_source_performance: {
+        Args: { p_organization_id: string };
+        Returns: {
+          lead_source_id: string;
+          lead_source_name: string;
+          prospects_count: number;
+          leads_count: number;
+        }[];
+      };
+      analytics_overall_totals: {
+        Args: { p_organization_id: string };
+        Returns: {
+          total_won: number;
+          total_revenue: number;
+        }[];
+      };
     };
     Enums: {
       org_role: OrgRole;
