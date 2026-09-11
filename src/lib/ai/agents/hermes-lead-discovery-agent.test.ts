@@ -230,3 +230,102 @@ describe("HermesLeadDiscoveryAgent — genuine orchestration, not a renamed runH
     expect(tool.calls).toHaveLength(3);
   });
 });
+
+// STEP 3 — Independent Hermes Reviewer verification, against the current
+// orchestration entry point (HermesLeadDiscoveryAgent). The Reviewer's own
+// implementation is untouched by this step (see discovery.ts's
+// callIndependentReviewer/runFinalHermesValidation — unchanged since the
+// Hermes orchestration fix); these tests fill the specific gaps the prior
+// agent tests above didn't already cover: a genuine rejection (not just
+// dedup) narrowing the set, a malformed (unparseable) Reviewer response
+// degrading gracefully, and the Reviewer's request never being retried
+// against Groq.
+describe("HermesLeadDiscoveryAgent — Independent Hermes Reviewer verification (Step 3)", () => {
+  beforeEach(() => {
+    process.env.TAVILY_API_KEY = "unused-in-this-file";
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("a genuine Reviewer rejection removes that candidate from the set reaching the Deterministic Validator — not merely a pass-through of whatever extraction produced", async () => {
+    const kept = candidate();
+    const rejected = candidate({ companyName: "Rao Fabrics", website: "raofabrics.example" });
+    const tool = fakeSearchTool({ "retail store owners in Jaipur": [REAL_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["retail store owners in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [kept, rejected] }))
+      // The Reviewer's own JSON only accepts `kept` — a real, independent
+      // narrowing decision, not an echo of its input.
+      .mockResolvedValueOnce(hermesOk({ accepted: [kept] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tool).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+    expect(result.telemetry?.reviewerStatus).toBe("ok");
+  });
+
+  it("a malformed (unparseable) Reviewer response degrades gracefully — identical treatment to an outright call failure, never a fabricated accept and never a discarded batch", async () => {
+    const tool = fakeSearchTool({ "retail store owners in Jaipur": [REAL_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["retail store owners in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      // The Reviewer answers, but with text that isn't the expected JSON shape.
+      .mockResolvedValueOnce({ ok: true as const, text: "not valid json at all", provider: "openrouter" as const, model: "nousresearch/hermes-3-llama-3.1-70b" });
+
+    const result = await new HermesLeadDiscoveryAgent(tool).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+    expect(result.telemetry?.reviewerStatus).toBe("failed");
+    expect(result.telemetry?.reviewerError).toBeTruthy();
+  });
+
+  it("the Reviewer's own request is restricted to modelProviders: ['openrouter'] — a primary-model failure retries the Reviewer's own distinct fallback model, never Groq, even though Groq is configured as the main pipeline's fallback", async () => {
+    const tool = fakeSearchTool({ "retail store owners in Jaipur": [REAL_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["retail store owners in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      // Reviewer's primary model fails...
+      .mockResolvedValueOnce({ ok: false, code: "model_not_found", message: "primary reviewer model unavailable" })
+      // ...and its own named fallback (never Groq) answers.
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate()] }, "nousresearch/hermes-4-405b"));
+
+    await new HermesLeadDiscoveryAgent(tool).discover(criteria);
+
+    const reviewerCalls = vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0]).filter((c) => c.agentType === "lead_discovery_hermes_review");
+    expect(reviewerCalls).toHaveLength(2);
+    for (const call of reviewerCalls) {
+      expect(call.modelProviders).toEqual(["openrouter"]);
+      expect(call.model).not.toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+    }
+    expect(reviewerCalls[0].model).toBe("nousresearch/hermes-3-llama-3.1-70b");
+    expect(reviewerCalls[1].model).toBe("nousresearch/hermes-4-405b");
+  });
+
+  it("the Reviewer is invoked as its own, separately-agentType-tagged call — distinct from the planning and extraction calls — carrying the real extracted candidates and real search evidence, not a relabeled copy of an earlier request", async () => {
+    const tool = fakeSearchTool({ "retail store owners in Jaipur": [REAL_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["retail store owners in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    await new HermesLeadDiscoveryAgent(tool).discover(criteria);
+
+    const calls = vi.mocked(runHermesCompletion).mock.calls.map((c) => c[0]);
+    expect(calls.map((c) => c.agentType)).toEqual([
+      "lead_discovery_query_generation",
+      "lead_discovery_extraction",
+      "lead_discovery_hermes_review",
+    ]);
+    const reviewerCall = calls[2];
+    expect(reviewerCall.userPrompt).toContain(REAL_HIT.url);
+    expect(reviewerCall.userPrompt).toContain(REAL_HIT.content);
+    expect(reviewerCall.userPrompt).toContain("Sharma Boutique");
+    expect(reviewerCall.userPrompt).toContain(JSON.stringify(criteria.icpCriteria));
+  });
+});
