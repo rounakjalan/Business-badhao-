@@ -335,6 +335,36 @@ const TOTAL_REQUEST_BUDGET_MS = 270_000;
  */
 const STALE_RUN_AFTER_MS = 15 * 60 * 1000;
 
+/**
+ * Readers of a lead_discovery run's status (the duplicate-run guard above,
+ * the Lead Discovery tab, its live poll) all need to stop believing a
+ * "running" row this old — it almost certainly means the serverless
+ * function died (timeout, deploy, crash) before writing a terminal status,
+ * not that the run is still genuinely in flight. The guard above only
+ * ignores the stale claim for its own decision; this actually corrects the
+ * row the first time anything notices, so "Last run: Running" does not go
+ * on lying — for up to a full day, on a plan whose cron sweep can only run
+ * once every 24 hours — and every other reader sees the truth straight from
+ * the database afterward.
+ */
+async function healStaleRunStatus(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  run: { id: string; status: string; started_at: string | null }
+): Promise<string> {
+  if (run.status !== "running") return run.status;
+
+  const startedAtMs = run.started_at ? Date.parse(run.started_at) : NaN;
+  if (Number.isNaN(startedAtMs) || Date.now() - startedAtMs <= STALE_RUN_AFTER_MS) return run.status;
+
+  await completeAgentRun(
+    { id: run.id },
+    "failed",
+    { code: "stale_run", message: "This run's serverless function never reported back (timeout, deploy, or crash) — treated as failed so discovery can run again." } as unknown as Json,
+    supabase
+  );
+  return "failed";
+}
+
 export async function startLeadDiscoveryAction(campaignId: string): Promise<LeadDiscoveryActionResult> {
   // Budget the whole request, not just the follow-up loop — discovery and
   // extraction have already spent ~45s by the time the loop starts.
@@ -698,7 +728,7 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
   const [run, leadRows] = await Promise.all([
     supabase
       .from("agent_runs")
-      .select("status, started_at, completed_at, output")
+      .select("id, status, started_at, completed_at, output")
       .eq("organization_id", currentOrg.organizationId)
       .eq("agent_type", "lead_discovery")
       .contains("input", { campaignId })
@@ -712,6 +742,7 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
   // the tab can offer Stop before the first manual run has ever happened.
   if (!run.data) return { ...empty, schedule };
 
+  const status = await healStaleRunStatus(supabase, run.data);
   const leads = leadRows.data ?? [];
 
   const output = (run.data.output ?? null) as {
@@ -740,7 +771,7 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
       : null;
 
   return {
-    status: run.data.status as DiscoveryProgress["status"],
+    status: status as DiscoveryProgress["status"],
     startedAt: run.data.started_at,
     completedAt: run.data.completed_at,
     leadsCreated: leads.length,
@@ -789,7 +820,7 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
     // campaign's last run silently disappeared from the page.
     supabase
       .from("agent_runs")
-      .select("status, started_at, completed_at, output")
+      .select("id, status, started_at, completed_at, output")
       .eq("organization_id", currentOrg.organizationId)
       .eq("agent_type", "lead_discovery")
       .contains("input", { campaignId })
@@ -845,7 +876,7 @@ export async function getLeadDiscoveryStateAction(campaignId: string): Promise<{
   return {
     lastRun: lastRunForCampaign
       ? {
-          status: lastRunForCampaign.status,
+          status: await healStaleRunStatus(supabase, lastRunForCampaign),
           startedAt: lastRunForCampaign.started_at,
           completedAt: lastRunForCampaign.completed_at,
           output: lastRunForCampaign.output,
