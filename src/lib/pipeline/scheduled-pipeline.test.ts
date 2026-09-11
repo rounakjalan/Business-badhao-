@@ -119,6 +119,10 @@ function createFakeSupabase(tables: Tables) {
         filters.push((row) => row[column] !== value);
         return api;
       },
+      gte(column: string, value: unknown) {
+        filters.push((row) => String(row[column] ?? "") >= String(value));
+        return api;
+      },
       not() {
         return api;
       },
@@ -380,7 +384,14 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     // directly. It's the baseline every other row below is compared against.
     const parentRuns = byType("lead_discovery");
     expect(parentRuns).toHaveLength(1);
-    expect(parentRuns[0].status).toBe("completed");
+    // STEP 7: the run's own target (DEFAULT_DISCOVERY_TARGET = 10) is far
+    // more than this mock scenario ever produces, so the run correctly
+    // stays "running" — durable and resumable — rather than being marked
+    // terminal just because this one invocation stopped. Status is
+    // incidental to what this test actually verifies (per-stage telemetry
+    // client-threading, below); see discovery-run.test.ts for lifecycle
+    // coverage.
+    expect(parentRuns[0].status).toBe("running");
 
     // The three AI stages inside discover() — before this fix these never
     // appeared in the caller's own client/tables at all under a
@@ -714,5 +725,50 @@ describe("runDiscoveryForCampaign — real automatic contact discovery wiring", 
     expect(secondFinish).toEqual({ finished: 0, failed: 0, outreach: { whatsappSent: 0, whatsappFailed: 0, gmailManualPending: 0, noChannelAvailable: 0 } });
     expect(tables.lead_research).toHaveLength(2);
   });
+  });
+
+  // STEP 7 — target-based, durable, resumable discovery, proved here for the
+  // SCHEDULED (cron) path specifically, since it is the one automatic
+  // continuation mechanism this project's Vercel plan allows (its cron sweep
+  // can only run once every 24 hours) — see discovery-run.test.ts for the
+  // shared decision logic this reuses, and
+  // actions.discovery-lifecycle.test.ts for the equivalent proof on the
+  // manual "Start Discovery" path.
+  it("a scheduled sweep resumes an existing incomplete run toward its own stored target instead of starting a new one, and reaches 'completed' once the target and its research are both done", async () => {
+    stubRealPipeline(); // yields Bright Pixel + Triverse — exactly the 2 more leads this run needs to hit target 10
+    const tables = seedTables();
+    const runStartedAt = new Date(Date.now() - 20 * 60 * 1000).toISOString(); // stale enough that the concurrency guard allows this sweep through
+    tables.agent_runs = [
+      { id: "run-existing", organization_id: "org-1", agent_type: "lead_discovery", status: "running", started_at: runStartedAt, completed_at: null, input: { campaignId: "campaign-1", scheduled: true, targetLeads: 10 }, output: {} },
+    ];
+    tables.prospects = Array.from({ length: 8 }, (_, i) => ({
+      id: `prospect-old-${i}`,
+      organization_id: "org-1",
+      campaign_id: "campaign-1",
+      company_name: `Existing Co ${i}`,
+      website: `existing${i}.example`,
+      created_at: new Date(Date.parse(runStartedAt) + 1000).toISOString(),
+    }));
+    tables.leads = Array.from({ length: 8 }, (_, i) => ({
+      id: `lead-old-${i}`,
+      organization_id: "org-1",
+      campaign_id: "campaign-1",
+      prospect_id: `prospect-old-${i}`,
+      status: "new",
+      qualification_status: "qualified",
+      research_status: "completed",
+      created_at: new Date(Date.parse(runStartedAt) + 1000).toISOString(),
+    }));
+    const supabase = createFakeSupabase(tables);
+
+    const result = await runDiscoveryForCampaign(supabase, "org-1", "campaign-1", Date.now(), 240_000);
+
+    expect(result.ran).toBe(true);
+    expect(result.newLeads).toBe(2);
+
+    const discoveryRuns = (tables.agent_runs as (Row & { agent_type: string; id: string; status: string })[]).filter((r) => r.agent_type === "lead_discovery");
+    expect(discoveryRuns).toHaveLength(1); // no duplicate run — the SAME row, resumed
+    expect(discoveryRuns[0].id).toBe("run-existing");
+    expect(discoveryRuns[0].status).toBe("completed"); // 8 + 2 = target of 10, and Bright Pixel/Triverse's own research+qualification (stubRealPipeline covers both) complete within this same call
   });
 });

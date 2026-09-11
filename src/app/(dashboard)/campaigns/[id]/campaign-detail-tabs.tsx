@@ -186,6 +186,8 @@ export function CampaignDetailTabs({
       researchFailed: p?.researchFailed ?? 0,
       waitingForResearch: p?.waitingForResearch ?? 0,
       scored: p?.scored ?? 0,
+      targetLeads: p?.targetLeads ?? null,
+      runValidLeadCount: p?.runValidLeadCount ?? 0,
       discovery: null,
       message: null,
       schedule: p?.schedule ?? schedule,
@@ -664,6 +666,12 @@ type LastRunOutput = {
   queriesFailed?: string[];
   research?: DiscoveryResearchSummary;
   instagram?: InstagramEnrichmentSummaryView;
+  /** STEP 7 — target-based discovery: how many new leads this run is/was trying to reach, and how far it actually got, straight from the database. Absent on historical runs from before this fix. */
+  targetLeads?: number;
+  validLeadCount?: number;
+  researchedCount?: number;
+  researchFailedCount?: number;
+  researchPendingCount?: number;
 };
 
 /**
@@ -904,16 +912,24 @@ function LeadDiscoveryTab({
             This keeps running on our servers — you can close this tab or shut your laptop and it will finish. Come back
             here any time to see how it went.
           </p>
-          {progress && progress.leadsCreated > 0 ? (
+          {progress && progress.targetLeads ? (
             <div className="mt-3 space-y-1.5">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
                 <span className="flex items-center gap-1.5">
-                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.leadsCreated}</span> leads found
+                  Discovery{" "}
+                  <span className="font-jetbrains font-semibold text-bb-text-2">
+                    {progress.runValidLeadCount} / {progress.targetLeads}
+                  </span>{" "}
+                  leads
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-bb-text-3">
                 <span className="flex items-center gap-1.5">
-                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.researched}</span> researched
+                  Research{" "}
+                  <span className="font-jetbrains font-semibold text-bb-text-2">
+                    {progress.researched} / {progress.targetLeads}
+                  </span>{" "}
+                  completed
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="font-jetbrains font-semibold text-bb-indigo-2">{progress.researching}</span> researching now
@@ -921,10 +937,13 @@ function LeadDiscoveryTab({
                 <span className="flex items-center gap-1.5">
                   <span className="font-jetbrains font-semibold text-bb-text-2">{progress.waitingForResearch}</span> queued
                 </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="font-jetbrains font-semibold text-bb-text-2">{progress.scored}</span> scored
-                </span>
+                {progress.researchFailed > 0 ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-jetbrains font-semibold text-bb-amber">{progress.researchFailed}</span> failed
+                  </span>
+                ) : null}
               </div>
+              <p className="text-xs text-bb-text-3">Status: Running — this run resumes automatically if it&apos;s ever interrupted.</p>
             </div>
           ) : (
             <p className="mt-3 text-xs text-bb-text-3">Searching for prospects…</p>
@@ -936,7 +955,9 @@ function LeadDiscoveryTab({
         <DarkAlert variant={progress.status === "failed" ? "error" : "success"}>
           {progress.status === "failed"
             ? progress.message ?? "The discovery run did not complete."
-            : `Discovery finished — ${progress.leadsCreated} leads found, ${progress.scored} researched and scored.`}
+            : progress.targetLeads
+              ? `Discovery complete — ${progress.runValidLeadCount}/${progress.targetLeads} leads, ${progress.researched}/${progress.targetLeads} researched.`
+              : `Discovery finished — ${progress.leadsCreated} leads found, ${progress.scored} researched and scored.`}
         </DarkAlert>
       ) : null}
 
@@ -950,7 +971,11 @@ function LeadDiscoveryTab({
         <DarkCard className="border-bb-indigo/30 p-5 text-sm">
           <div className="mb-3 flex items-center gap-2 font-medium text-bb-indigo-2">
             <span className="h-2 w-2 rounded-full bg-bb-indigo" />
-            {result.status === "completed" ? "Discovery completed" : "Discovery partially completed"}
+            {result.status === "completed"
+              ? "Discovery completed"
+              : result.status === "running"
+                ? `Discovery in progress — ${result.validLeadCount}/${result.targetLeads} leads so far`
+                : "Discovery partially completed"}
           </div>
           <div className="grid grid-cols-3 gap-3 text-center">
             <DiscoveryStat label="Found" value={result.prospectsFound} />
@@ -990,6 +1015,20 @@ function LeadDiscoveryTab({
             {discovery.lastRun.completedAt ? <span className="text-bb-text-3">· {formatDate(discovery.lastRun.completedAt)}</span> : null}
           </div>
           {lastRunOutput?.message ? <p className="text-bb-text-3">{lastRunOutput.message}</p> : null}
+          {lastRunOutput?.targetLeads ? (
+            <p className="mt-2 text-xs text-bb-text-3">
+              Target:{" "}
+              <span className="font-jetbrains font-semibold text-bb-text-2">
+                {lastRunOutput.validLeadCount ?? 0}/{lastRunOutput.targetLeads}
+              </span>{" "}
+              leads ·{" "}
+              <span className="font-jetbrains font-semibold text-bb-text-2">
+                {lastRunOutput.researchedCount ?? 0}/{lastRunOutput.targetLeads}
+              </span>{" "}
+              researched
+              {lastRunOutput.researchFailedCount ? ` (${lastRunOutput.researchFailedCount} failed)` : ""}
+            </p>
+          ) : null}
           {lastRunOutput?.prospectsFound !== undefined ? (
             <div className="mt-3 grid grid-cols-3 gap-3 text-center">
               <DiscoveryStat label="Found" value={lastRunOutput.prospectsFound ?? 0} />

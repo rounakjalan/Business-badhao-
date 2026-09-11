@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { runCampaignPlanner, type CampaignPlan, type CampaignPlannerResult } from "@/lib/ai/agents/campaign-planner";
 import { IcpSchema, runIcpGenerator, type IcpGeneratorResult } from "@/lib/ai/agents/icp-generator";
-import { completeAgentRun, createAgentRun } from "@/lib/ai/tracking/agent-runs";
+import { completeAgentRun, createAgentRun, updateAgentRunOutput, type AgentRunHandle } from "@/lib/ai/tracking/agent-runs";
 import { getBusinessContext, selectDiscoveryContext } from "@/lib/business-context";
 import {
   getCampaignDiscoverySchedule,
@@ -15,7 +15,22 @@ import {
   stopCampaignDiscovery,
   type CampaignDiscoverySchedule,
 } from "@/lib/pipeline/discovery-schedule";
-import { runBatchedDiscovery, type BatchDiscoveryStopReason, type DiscoveredProspectSummary, type InstagramEnrichmentSummary } from "@/lib/pipeline/discovery-batch";
+import {
+  runBatchedDiscovery,
+  type BatchDiscoveryResult,
+  type BatchDiscoveryStopReason,
+  type DiscoveredProspectSummary,
+  type InstagramEnrichmentSummary,
+} from "@/lib/pipeline/discovery-batch";
+import {
+  DEFAULT_DISCOVERY_TARGET,
+  STALE_RUN_AFTER_MS,
+  getLatestDiscoveryRun,
+  getResumableRun,
+  getRunProgress,
+  isRunComplete,
+  isRunGenuinelyActive,
+} from "@/lib/pipeline/discovery-run";
 import { createLeadWorkerPool, type OutreachSweepSummary } from "@/lib/pipeline/lead-worker-pool";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
@@ -289,7 +304,24 @@ export type { DiscoveredProspectSummary };
 export type LeadDiscoveryActionResult =
   | {
       ok: true;
-      status: "completed" | "partially_completed";
+      /**
+       * "completed": target reached and every one of this run's own leads
+       * reached a terminal research outcome. "running": this invocation made
+       * progress (or none, on a transient provider hiccup) but the run's own
+       * target/research isn't finished yet — durably persisted either way,
+       * so the NEXT invocation (another press, or the daily cron sweep)
+       * resumes toward the same target rather than losing it or restarting.
+       * "partially_completed" is kept for backward compatibility with
+       * historical runs' own stored output; new runs no longer produce it.
+       */
+      status: "completed" | "partially_completed" | "running";
+      /** How many genuinely new leads this run is trying to reach — see DEFAULT_DISCOVERY_TARGET. */
+      targetLeads: number;
+      /** This run's own persisted lead count so far — read from the database, not an in-memory tally, so it is accurate across resumed invocations. */
+      validLeadCount: number;
+      researchedCount: number;
+      researchFailedCount: number;
+      researchPendingCount: number;
       prospectsFound: number;
       newLeadsCreated: number;
       duplicatesSkipped: number;
@@ -326,14 +358,6 @@ export type DiscoveryResearchSummary = {
  * millisecond of it is usable.
  */
 const TOTAL_REQUEST_BUDGET_MS = 270_000;
-
-/**
- * How long a "running" discovery run can sit before the duplicate-run guard
- * stops believing it. Comfortably longer than the 300s a request can
- * possibly take, so it never releases a genuinely live run — it only clears
- * one that died without writing a terminal status.
- */
-const STALE_RUN_AFTER_MS = 15 * 60 * 1000;
 
 /**
  * Readers of a lead_discovery run's status (the duplicate-run guard above,
@@ -402,32 +426,41 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   }
 
   // Duplicate-run guard: refuse to start a second discovery run for this
-  // campaign while one is already in flight.
-  const { data: runningRuns } = await supabase
-    .from("agent_runs")
-    .select("input, started_at")
-    .eq("organization_id", currentOrg.organizationId)
-    .eq("agent_type", "lead_discovery")
-    .eq("status", "running");
-
-  const alreadyRunning = (runningRuns ?? []).some((r) => {
-    if ((r.input as { campaignId?: string } | null)?.campaignId !== campaignId) return false;
-
-    // A run killed mid-flight — function timeout, deploy, crash — never gets
-    // its terminal status written and would otherwise hold this lock
-    // forever, permanently blocking discovery for the campaign with no way
-    // back from the UI. Past the stale window, treat it as dead and let a
-    // new run proceed.
-    const startedAt = r.started_at ? Date.parse(r.started_at) : NaN;
-    if (!Number.isNaN(startedAt) && Date.now() - startedAt > STALE_RUN_AFTER_MS) return false;
-
-    return true;
-  });
-  if (alreadyRunning) {
+  // campaign while one is genuinely still in flight. Anything past the
+  // stale window is not a live run to protect against — see
+  // isRunGenuinelyActive (discovery-run.ts).
+  const latestRun = await getLatestDiscoveryRun(supabase, currentOrg.organizationId, campaignId);
+  if (isRunGenuinelyActive(latestRun)) {
     return { ok: false, code: "already_running", message: "A discovery run is already in progress for this campaign." };
   }
 
-  const agentRun = await createAgentRun(currentOrg.organizationId, "lead_discovery", { campaignId } as unknown as Json);
+  // STEP 7: target-based, durable, resumable discovery. A run that hasn't
+  // yet reached its own stored target (whether still "running" from an
+  // invocation that died mid-flight, or "failed" for a transient reason) is
+  // continued toward that SAME target rather than restarted from zero or
+  // blocked — see isResumable (discovery-run.ts). Only a run already fully
+  // finished, or dead for a genuinely unrecoverable reason (no search
+  // provider configured), starts a brand new one.
+  const resumableRun = getResumableRun(latestRun);
+  const targetLeads = resumableRun ? resumableRun.targetLeads : DEFAULT_DISCOVERY_TARGET;
+  const runStartedAtIso = resumableRun ? (resumableRun.startedAt ?? new Date().toISOString()) : new Date().toISOString();
+
+  const agentRun: AgentRunHandle | null = resumableRun
+    ? { id: resumableRun.id }
+    : await createAgentRun(currentOrg.organizationId, "lead_discovery", { campaignId, targetLeads } as unknown as Json, undefined, runStartedAtIso);
+
+  if (!agentRun) {
+    return { ok: false, code: "provider_error", message: "Could not start a discovery run — please try again." };
+  }
+
+  // A resumed run may currently be marked "failed" (a transient provider
+  // outage on its last attempt, or the stale-run display healer) — this
+  // invocation is genuinely working on it again now, so the status should
+  // say so, exactly as a brand new run's own createAgentRun already does.
+  if (resumableRun && resumableRun.status !== "running") {
+    await supabase.from("agent_runs").update({ status: "running" }).eq("id", agentRun.id);
+  }
+
   // Pressing Start also starts the recurring cycle: this run marks the
   // campaign as running, and whatever it finds (or fails on) books the next
   // run about an hour out. A user who only ever presses the button once still
@@ -441,9 +474,11 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
   // leads live as each one is saved, so research on lead A is already
   // running while discovery is still out fetching/persisting lead B/C, not
   // queued up to be worked through only after the whole run finishes.
-  // Seeded with this campaign's existing backlog too (leads an earlier run's
-  // own budget didn't reach), so a fresh Start Discovery press also makes
-  // progress on those, not just what it discovers this time.
+  // Seeded with this campaign's existing backlog too — leads an earlier
+  // invocation's own budget didn't reach, whether from a previous, already-
+  // finished run or from THIS SAME run being resumed — so a fresh Start
+  // Discovery press also makes progress on those, not just what it
+  // discovers this time.
   const pool = createLeadWorkerPool({ supabase, organizationId: currentOrg.organizationId, startedAtMs, budgetMs: TOTAL_REQUEST_BUDGET_MS });
   const { data: backlogLeads } = await supabase
     .from("leads")
@@ -456,68 +491,142 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     .order("created_at", { ascending: true });
   for (const lead of backlogLeads ?? []) pool.enqueue(lead.id);
 
+  // How many MORE genuinely new leads this run still needs — computed from
+  // the database (never an in-memory counter), so a resumed invocation asks
+  // for exactly the remaining distance to the target instead of the full
+  // target again. See Part 5/9 of the discovery-lifecycle fix this backs:
+  // duplicates/invalid candidates never counted toward the target in the
+  // first place (runBatchedDiscovery's own dedup), and a target already met
+  // by an earlier invocation is never re-discovered.
+  const progressBefore = await getRunProgress(supabase, currentOrg.organizationId, campaignId, runStartedAtIso, targetLeads);
+  const remaining = Math.max(0, targetLeads - progressBefore.validLeadCount);
+
   // Batched (see discovery-batch.ts): keeps calling discover() — each time
   // asking Nemotron/Groq to avoid the queries already tried — until it hits
-  // a real target, runs out of its own time slice, or two batches in a row
-  // turn up nothing genuinely new. A single batch's own provider error never
-  // throws away an earlier batch's already-persisted leads. No client is
-  // passed through here (unlike the scheduled path) — this call already runs
-  // inside a real signed-in session, so the default cookie-based client
-  // already satisfies RLS for every AI stage's own telemetry.
+  // this invocation's own share of the remaining target, runs out of its own
+  // time slice, or two batches in a row turn up nothing genuinely new. A
+  // single batch's own provider error never throws away an earlier batch's
+  // already-persisted leads. No client is passed through here (unlike the
+  // scheduled path) — this call already runs inside a real signed-in
+  // session, so the default cookie-based client already satisfies RLS for
+  // every AI stage's own telemetry.
   //
   // Discovery and research now share one clock/budget rather than splitting
   // it into two sequential phases — they are concurrent workloads against
-  // one shared deadline, not competitors for separate slices of it.
-  const result = await runBatchedDiscovery({
-    supabase,
-    organizationId: currentOrg.organizationId,
-    campaignId,
-    campaignName: campaign.name,
-    campaignObjective: campaign.objective,
-    icpCriteria,
-    businessContext: selectDiscoveryContext(businessContext),
-    startedAtMs,
-    budgetMs: TOTAL_REQUEST_BUDGET_MS,
-    agentRun,
-    onLeadPersisted: (leadId) => pool.enqueue(leadId),
-  });
+  // one shared deadline, not competitors for separate slices of it. Skipped
+  // entirely once the target is already met (Part 4: never discover more
+  // than asked just because there's time left).
+  const result: BatchDiscoveryResult =
+    remaining > 0
+      ? await runBatchedDiscovery({
+          supabase,
+          organizationId: currentOrg.organizationId,
+          campaignId,
+          campaignName: campaign.name,
+          campaignObjective: campaign.objective,
+          icpCriteria,
+          businessContext: selectDiscoveryContext(businessContext),
+          startedAtMs,
+          budgetMs: TOTAL_REQUEST_BUDGET_MS,
+          targetNewLeads: remaining,
+          agentRun,
+          onLeadPersisted: (leadId) => pool.enqueue(leadId),
+        })
+      : {
+          ok: true,
+          batchesRun: 0,
+          prospectsFound: 0,
+          newLeadsCreated: 0,
+          duplicatesSkipped: 0,
+          newLeadIds: [],
+          createdProspects: [],
+          queriesRun: [],
+          queriesFailed: [],
+          stoppedReason: "target_reached",
+          batchTelemetry: [],
+          instagram: { verified: 0, failed: 0, notConnected: 0 },
+        };
 
   // Whatever the pool couldn't start or finish within the shared budget is
   // left exactly as researchLead/qualifyLead left it (or untouched, if
-  // never reached) — not lost, picked up automatically by the next hourly
-  // cron tick, or by opening the lead.
+  // never reached) — not lost, picked up by the next invocation that
+  // resumes this run (another press, or the daily cron sweep), or by
+  // opening the lead.
   await pool.drain();
 
-  if (!result.ok) {
-    await completeAgentRun(
-      agentRun,
-      "failed",
-      { code: result.code, message: result.message, batchesRun: result.batchesRun, queriesFailed: result.queriesFailed } as unknown as Json
-    );
-    await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: false, error: result.message });
-    return { ok: false, code: result.code, message: result.message, batchesRun: result.batchesRun, queriesFailed: result.queriesFailed };
-  }
-
+  const progressAfter = await getRunProgress(supabase, currentOrg.organizationId, campaignId, runStartedAtIso, targetLeads);
   const research = { finished: pool.summary.finished, failed: pool.summary.failed, outreach: pool.summary.outreach };
-
-  const { count: stillPending } = await supabase
-    .from("leads")
-    .select("id", { count: "exact", head: true })
-    .eq("organization_id", currentOrg.organizationId)
-    .eq("campaign_id", campaignId)
-    .eq("qualification_status", "pending")
-    .neq("research_status", "failed");
-
   const researchSummary: DiscoveryResearchSummary = {
     finished: research.finished,
     failed: research.failed,
-    stillPending: stillPending ?? 0,
+    stillPending: progressAfter.researchPendingCount,
     outreach: research.outreach,
   };
 
-  const finalStatus: "completed" | "partially_completed" =
-    result.queriesFailed.length > 0 || result.stoppedReason === "provider_error" ? "partially_completed" : "completed";
-  await completeAgentRun(agentRun, finalStatus, {
+  if (!result.ok) {
+    if (result.code === "not_configured") {
+      // Genuinely unrecoverable without a human fixing configuration —
+      // retrying automatically would just fail identically. Terminal.
+      await completeAgentRun(
+        agentRun,
+        "failed",
+        { code: result.code, message: result.message, targetLeads, batchesRun: result.batchesRun, queriesFailed: result.queriesFailed } as unknown as Json
+      );
+      await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: false, error: result.message });
+      return { ok: false, code: result.code, message: result.message, batchesRun: result.batchesRun, queriesFailed: result.queriesFailed };
+    }
+
+    // A transient provider_error this invocation never overcame (Tavily/
+    // Nemotron/Groq all genuinely down right now, or similar) must not
+    // permanently kill the run — see Part 7/13 of the discovery-lifecycle
+    // fix this backs. Progress is persisted and the status stays "running"
+    // so a later invocation (another press, or the daily cron sweep) can
+    // retry once the provider recovers, exactly like any other batch-level
+    // failure runBatchedDiscovery itself already tolerates mid-run.
+    await updateAgentRunOutput(
+      agentRun,
+      {
+        targetLeads,
+        validLeadCount: progressAfter.validLeadCount,
+        researchedCount: progressAfter.researchedCount,
+        researchFailedCount: progressAfter.researchFailedCount,
+        researchPendingCount: progressAfter.researchPendingCount,
+        batchesRun: result.batchesRun,
+        stoppedReason: "provider_error",
+        research: researchSummary,
+        queriesFailed: result.queriesFailed,
+        message: result.message,
+      } as unknown as Json,
+      supabase
+    );
+    revalidatePath(`/campaigns/${campaignId}`);
+    return {
+      ok: true,
+      status: "running",
+      targetLeads,
+      validLeadCount: progressAfter.validLeadCount,
+      researchedCount: progressAfter.researchedCount,
+      researchFailedCount: progressAfter.researchFailedCount,
+      researchPendingCount: progressAfter.researchPendingCount,
+      prospectsFound: 0,
+      newLeadsCreated: 0,
+      duplicatesSkipped: 0,
+      batchesRun: result.batchesRun,
+      stoppedReason: "provider_error",
+      queriesRun: [],
+      queriesFailed: result.queriesFailed,
+      prospects: [],
+      research: researchSummary,
+      instagram: { verified: 0, failed: 0, notConnected: 0 },
+    };
+  }
+
+  const outputPayload = {
+    targetLeads,
+    validLeadCount: progressAfter.validLeadCount,
+    researchedCount: progressAfter.researchedCount,
+    researchFailedCount: progressAfter.researchFailedCount,
+    researchPendingCount: progressAfter.researchPendingCount,
     batchesRun: result.batchesRun,
     stoppedReason: result.stoppedReason,
     research: researchSummary,
@@ -528,18 +637,37 @@ export async function startLeadDiscoveryAction(campaignId: string): Promise<Lead
     queriesFailed: result.queriesFailed,
     telemetry: result.batchTelemetry,
     instagram: result.instagram,
-  } as unknown as Json);
+  } as unknown as Json;
 
-  // Books the next run in this campaign's single schedule slot — see
-  // discovery-schedule.ts. Two runs finishing at once overwrite one slot
-  // rather than queueing two jobs, so this cannot double-schedule.
-  await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: true });
+  const complete = isRunComplete(progressAfter);
+
+  if (complete) {
+    // Target reached AND every one of this run's own leads has reached a
+    // terminal research outcome — genuinely done, not just "this
+    // invocation's own time ran out." See Part 4/6 of the discovery-
+    // lifecycle fix this backs.
+    await completeAgentRun(agentRun, "completed", outputPayload);
+    // Books the next run in this campaign's single schedule slot — see
+    // discovery-schedule.ts. Two runs finishing at once overwrite one slot
+    // rather than queueing two jobs, so this cannot double-schedule.
+    await markDiscoveryFinished(supabase, campaignId, currentOrg.organizationId, { ok: true });
+  } else {
+    // Not complete yet — durable progress persisted, status stays "running"
+    // (never marked complete or failed just because this invocation's own
+    // slice ended) so a future invocation resumes toward the same target.
+    await updateAgentRunOutput(agentRun, outputPayload, supabase);
+  }
 
   revalidatePath(`/campaigns/${campaignId}`);
 
   return {
     ok: true,
-    status: finalStatus,
+    status: complete ? "completed" : "running",
+    targetLeads,
+    validLeadCount: progressAfter.validLeadCount,
+    researchedCount: progressAfter.researchedCount,
+    researchFailedCount: progressAfter.researchFailedCount,
+    researchPendingCount: progressAfter.researchPendingCount,
     prospectsFound: result.prospectsFound,
     newLeadsCreated: result.newLeadsCreated,
     duplicatesSkipped: result.duplicatesSkipped,
@@ -682,6 +810,10 @@ export type DiscoveryProgress = {
   /** Discovered but not yet picked up for research — waiting for this run's own budget, or the next hourly cron tick. */
   waitingForResearch: number;
   scored: number;
+  /** How many genuinely new leads THIS run is trying to reach — see DEFAULT_DISCOVERY_TARGET (discovery-run.ts). Null when the campaign has never been run. */
+  targetLeads: number | null;
+  /** This run's own persisted lead count so far, read from the database — never the campaign's total (leadsCreated above), and never an in-memory tally. */
+  runValidLeadCount: number;
   /** The most recent run's own reported totals, once it has a terminal status — null while still running or if it has none yet. */
   discovery: DiscoveryRunOutputSummary | null;
   message: string | null;
@@ -713,6 +845,8 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
     researchFailed: 0,
     waitingForResearch: 0,
     scored: 0,
+    targetLeads: null,
+    runValidLeadCount: 0,
     discovery: null,
     message: null,
     schedule: null,
@@ -728,7 +862,7 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
   const [run, leadRows] = await Promise.all([
     supabase
       .from("agent_runs")
-      .select("id, status, started_at, completed_at, output")
+      .select("id, status, started_at, completed_at, input, output")
       .eq("organization_id", currentOrg.organizationId)
       .eq("agent_type", "lead_discovery")
       .contains("input", { campaignId })
@@ -744,6 +878,10 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
 
   const status = await healStaleRunStatus(supabase, run.data);
   const leads = leadRows.data ?? [];
+
+  const runInput = (run.data.input ?? null) as { targetLeads?: number } | null;
+  const targetLeads = runInput?.targetLeads ?? DEFAULT_DISCOVERY_TARGET;
+  const runProgress = await getRunProgress(supabase, currentOrg.organizationId, campaignId, run.data.started_at ?? new Date(0).toISOString(), targetLeads);
 
   const output = (run.data.output ?? null) as {
     prospectsFound?: number;
@@ -780,6 +918,8 @@ export async function getLeadDiscoveryProgressAction(campaignId: string): Promis
     researchFailed: leads.filter((l) => l.research_status === "failed").length,
     waitingForResearch: leads.filter((l) => l.research_status === "pending" || l.research_status === null).length,
     scored: leads.filter((l) => l.qualification_status !== "pending").length,
+    targetLeads,
+    runValidLeadCount: runProgress.validLeadCount,
     discovery,
     message: output?.message ?? null,
     schedule,

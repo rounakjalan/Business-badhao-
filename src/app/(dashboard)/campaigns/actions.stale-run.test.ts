@@ -70,6 +70,10 @@ function createFakeSupabase(tables: Tables) {
         filters.push((row) => row[column] === value);
         return api;
       },
+      gte(column: string, value: unknown) {
+        filters.push((row) => String(row[column] ?? "") >= String(value));
+        return api;
+      },
       contains(column: string, value: Record<string, unknown>) {
         filters.push((row) => {
           const cell = row[column] as Record<string, unknown> | null | undefined;

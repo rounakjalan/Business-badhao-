@@ -90,6 +90,17 @@ function createFakeSupabase(tables: Tables) {
         filters.push((row) => row[column] !== value);
         return api;
       },
+      gte(column: string, value: unknown) {
+        filters.push((row) => String(row[column] ?? "") >= String(value));
+        return api;
+      },
+      contains(column: string, value: Record<string, unknown>) {
+        filters.push((row) => {
+          const target = row[column] as Record<string, unknown> | null | undefined;
+          return Boolean(target) && Object.entries(value).every(([k, v]) => target?.[k] === v);
+        });
+        return api;
+      },
       order(column: string, opts?: { ascending?: boolean }) {
         orderSpec = { column, ascending: opts?.ascending ?? true };
         return api;

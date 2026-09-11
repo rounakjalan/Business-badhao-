@@ -18,7 +18,9 @@ export async function createAgentRun(
   organizationId: string | null,
   agentType: string,
   input: Json,
-  client?: TrackingClient
+  client?: TrackingClient,
+  /** Overrides the default now()-at-call-time started_at — used by the target-based discovery lifecycle so the exact same timestamp it inserts with is also the one it scopes "leads belonging to this run" from, with no clock-skew gap between the two. */
+  startedAt?: string
 ): Promise<AgentRunHandle | null> {
   if (!organizationId) return null;
 
@@ -31,7 +33,7 @@ export async function createAgentRun(
         agent_type: agentType,
         status: "running",
         input,
-        started_at: new Date().toISOString(),
+        started_at: startedAt ?? new Date().toISOString(),
       })
       .select("id")
       .single();
@@ -67,6 +69,29 @@ export async function completeAgentRun(
     }
   } catch (error) {
     console.error("[ai] failed to complete agent_run", error);
+  }
+}
+
+/**
+ * Updates a run's own output while it is still genuinely in progress —
+ * unlike completeAgentRun, this never touches status or completed_at. Used
+ * by the target-based discovery lifecycle (discovery-run.ts) to persist
+ * durable progress (validLeadCount, researchPendingCount, …) after an
+ * invocation that hasn't yet reached its target, so a later invocation
+ * resuming the same run reads the truth from the database instead of
+ * starting from zero.
+ */
+export async function updateAgentRunOutput(run: AgentRunHandle | null, output: Json, client?: TrackingClient): Promise<void> {
+  if (!run) return;
+
+  try {
+    const supabase = client ?? (await createClient());
+    const { error } = await supabase.from("agent_runs").update({ output }).eq("id", run.id);
+    if (error) {
+      console.error("[ai] failed to update agent_run output", error);
+    }
+  } catch (error) {
+    console.error("[ai] failed to update agent_run output", error);
   }
 }
 
