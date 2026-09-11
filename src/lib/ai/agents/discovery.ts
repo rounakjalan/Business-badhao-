@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
+import { HermesLeadDiscoveryAgent, type DiscoverySearchTool } from "@/lib/ai/agents/hermes-lead-discovery-agent";
 import { runHermesCompletion, type HermesResult } from "@/lib/ai/hermes/hermes-service";
 import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
@@ -16,7 +17,7 @@ import type { Database } from "@/types/database.types";
  * session; the manual "Start Discovery" action never passes one and is
  * unaffected by this.
  */
-type TrackingClient = SupabaseClient<Database>;
+export type TrackingClient = SupabaseClient<Database>;
 
 /**
  * The intended model for both Nemotron-designated stages below (query
@@ -56,17 +57,37 @@ const NEMOTRON_MODEL = DEFAULT_OPENROUTER_MODEL;
 // bottom of this file.
 //
 // Runtime call graph, named against the app's own terms for these layers.
-// "Hermes" in this codebase means exactly one thing — runHermesCompletion,
-// the orchestration/routing function everything calls through — not a
-// model of its own. What model actually answers depends on what that call
-// is routed to and on each stage's own explicit routing decision below:
+//
+// UPDATED (2026-09, post-audit): "Hermes" now means TWO distinct things in
+// this codebase, and they must not be confused with each other:
+//
+//   1. runHermesCompletion (hermes-service.ts) — shared AI infrastructure.
+//      The generic routing/telemetry wrapper every AI feature in this app
+//      calls through to actually reach a model. It has no opinion about
+//      Lead Discovery specifically; it just routes, retries, falls back,
+//      and records telemetry for whatever request it's given.
+//   2. HermesLeadDiscoveryAgent (hermes-lead-discovery-agent.ts) — the real
+//      Lead Discovery ORCHESTRATOR. This is the thing that actually owns
+//      the workflow below: it decides to plan queries, decides to search,
+//      decides to extract, decides to review, decides to validate, and
+//      decides what to do when any one of those steps comes back empty or
+//      fails. TavilyDiscoveryProvider.discover() (below) now delegates to
+//      it instead of containing that orchestration logic itself — a
+//      production audit (2026-09) found the orchestration trapped inside
+//      what was supposed to be just a search-provider class, with nothing
+//      in the codebase actually playing the role "Hermes" implies.
+//
+// What model actually answers a given AI step depends on what that call is
+// routed to and on each stage's own explicit routing decision below:
 //
 //   Business Badhao (campaigns/actions.ts / scheduled-pipeline.ts)
-//     -> Hermes Planner: routes LEAD_DISCOVERY to the "openrouter"
-//        provider first, explicitly requesting NEMOTRON_MODEL there via
-//        modelByProvider (generateDiscoveryQueries below) — not left to
-//        OpenRouterProvider's own implicit default, so what this call
-//        intends is a named, checkable fact rather than an assumption.
+//     -> HermesLeadDiscoveryAgent.discover(criteria) — the orchestrator
+//     -> HermesLeadDiscoveryAgent.planDiscoveryQueries: routes LEAD_DISCOVERY
+//        to the "openrouter" provider first, explicitly requesting
+//        NEMOTRON_MODEL there via modelByProvider (generateDiscoveryQueries
+//        below) — not left to OpenRouterProvider's own implicit default, so
+//        what this call intends is a named, checkable fact rather than an
+//        assumption.
 //        When openrouter's free-tier Nemotron endpoint is unavailable,
 //        Hermes falls through to config.fallbackProvider
 //        (AI_FALLBACK_PROVIDER) honestly and automatically — that
@@ -82,23 +103,27 @@ const NEMOTRON_MODEL = DEFAULT_OPENROUTER_MODEL;
 //        quota — genuinely running on whatever config.fallbackProvider is
 //        set to (Groq's openai/gpt-oss-120b in that deployment) rather
 //        than Nemotron, honestly recorded as such. Check agent_runs for
-//        the requested/actual ground truth for any real run.
-//     -> Nemotron Reasoner: that call is generateDiscoveryQueries below,
-//        turning the campaign/ICP into real search queries
-//     -> Tavily, Exa on Tavily failure (searchWithFallback) — real HTTP
-//        search, never an AI call
-//     -> Nemotron Analyst: a second Hermes-routed call, same explicit
-//        NEMOTRON_MODEL routing (extractProspectsFromResults below), this
-//        time reasoning over the actual SearchHit[] text, not the
-//        original prompt, returning its raw candidates un-graded
-//     -> Independent Hermes Reviewer (runFinalHermesValidation below) —
-//        a THIRD Hermes-routed call, but this one passes an explicit
-//        model override (INDEPENDENT_REVIEWER_MODEL) that forces a
-//        genuinely different model — NousResearch's Hermes, not Nvidia's
-//        Nemotron — reviewing the Analyst's own candidates against that
-//        same real evidence and returning only the ones its own
-//        independent reading judges are actually supported
-//     -> Deterministic Validator: finalizeDiscoveryResult below is the
+//        the requested/actual ground truth for any real run. The call
+//        itself is generateDiscoveryQueries below, turning the campaign/ICP
+//        into real search queries.
+//     -> HermesLeadDiscoveryAgent.runSearchProviders: Tavily, Exa on Tavily
+//        failure (searchWithFallback, via the injected DiscoverySearchTool)
+//        — real HTTP search, never an AI call.
+//     -> HermesLeadDiscoveryAgent.extractCandidates: a second Hermes-routed
+//        call, same explicit NEMOTRON_MODEL routing
+//        (extractProspectsFromResults below), this time reasoning over the
+//        actual SearchHit[] text, not the original prompt, returning its
+//        raw candidates un-graded.
+//     -> HermesLeadDiscoveryAgent.reviewCandidates -> the Independent
+//        Hermes Reviewer (runFinalHermesValidation below) — a THIRD
+//        Hermes-routed call, but this one passes an explicit model
+//        override (INDEPENDENT_REVIEWER_MODEL) that forces a genuinely
+//        different model — NousResearch's Hermes, not Nvidia's Nemotron —
+//        reviewing the Analyst's own candidates against that same real
+//        evidence and returning only the ones its own independent reading
+//        judges are actually supported.
+//     -> HermesLeadDiscoveryAgent.validateCandidates -> the Deterministic
+//        Validator: finalizeDiscoveryResult below is the
 //        safety net that runs on whatever the Reviewer accepted:
 //        grounding/anti-fabrication/non-business/competitor filtering
 //        (independent of, not replaced by, either AI stage above it),
@@ -408,7 +433,7 @@ function icpDerivedQuery(icpCriteria: Record<string, unknown>): string | null {
   return location && !who.toLowerCase().includes(location.toLowerCase().split(",")[0].trim()) ? `${who} ${location}` : who;
 }
 
-async function generateDiscoveryQueries(
+export async function generateDiscoveryQueries(
   criteria: DiscoveryCriteria,
   trackingClient?: TrackingClient
 ): Promise<{ ok: true; queries: string[] } | { ok: false; message: string }> {
@@ -798,7 +823,7 @@ function canonicalizeUrl(url: string): string | null {
  * anti-fabrication filtering, dedup, and assembling the final result is
  * finalizeDiscoveryResult's job below, not this function's.
  */
-async function extractProspectsFromResults(
+export async function extractProspectsFromResults(
   criteria: DiscoveryCriteria,
   searchesByQuery: { query: string; results: SearchHit[] }[],
   telemetry?: ProviderTelemetry,
@@ -1307,10 +1332,18 @@ export function finalizeDiscoveryResult(
 }
 
 // ---------------------------------------------------------------------------
-// Real provider: Tavily search, gated entirely behind TAVILY_API_KEY.
+// Real search tool: Tavily search (with Exa as its own same-query fallback),
+// gated entirely behind TAVILY_API_KEY. This class has exactly one job —
+// answer one query with real results — and no orchestration logic of its
+// own. It implements DiscoverySearchTool (hermes-lead-discovery-agent.ts),
+// which is what HermesLeadDiscoveryAgent actually calls; it also still
+// implements DiscoveryProvider for backward-compatible callers
+// (discovery-batch.ts's getDiscoveryProvider() consumer, and every existing
+// test that constructs this class directly), by handing the real
+// orchestration straight to the Hermes agent.
 // ---------------------------------------------------------------------------
 
-export class TavilyDiscoveryProvider implements DiscoveryProvider {
+export class TavilyDiscoveryProvider implements DiscoveryProvider, DiscoverySearchTool {
   readonly name = "tavily";
 
   private get apiKey(): string | undefined {
@@ -1326,9 +1359,27 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
     return Boolean(this.apiKey);
   }
 
-  async discover(criteria: DiscoveryCriteria, trackingClient?: TrackingClient): Promise<DiscoveryResult> {
+  /**
+   * The actual DiscoverySearchTool capability: one query in, real results
+   * (or a real failure) out. No query planning, no extraction, no review,
+   * no validation — those are HermesLeadDiscoveryAgent's job, not this
+   * class's. Unchanged behavior from before this fix: still Tavily first,
+   * Exa only on Tavily's own failure for this exact query
+   * (searchWithFallback, untouched).
+   */
+  async search(
+    query: string,
+    telemetry?: ProviderTelemetry
+  ): Promise<{ ok: true; results: SearchHit[] } | { ok: false; message: string }> {
     const apiKey = this.apiKey;
     if (!apiKey) {
+      return { ok: false, message: "Lead discovery isn't connected to a search provider yet — TAVILY_API_KEY is not set." };
+    }
+    return searchWithFallback(query, apiKey, this.exaApiKey, telemetry);
+  }
+
+  async discover(criteria: DiscoveryCriteria, trackingClient?: TrackingClient): Promise<DiscoveryResult> {
+    if (!this.isConfigured()) {
       return {
         ok: false,
         code: "not_configured",
@@ -1336,69 +1387,10 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider {
       };
     }
 
-    const exaApiKey = this.exaApiKey;
-    const telemetry = newTelemetry();
-
-    const queriesResult = await generateDiscoveryQueries(criteria, trackingClient);
-    if (!queriesResult.ok) {
-      return { ok: false, code: "provider_error", message: queriesResult.message };
-    }
-
-    const outcomes = await Promise.all(
-      queriesResult.queries.map(async (query) => ({ query, result: await searchWithFallback(query, apiKey, exaApiKey, telemetry) }))
-    );
-    const succeeded = outcomes.filter((o): o is { query: string; result: { ok: true; results: SearchHit[] } } => o.result.ok);
-    const queriesFailed = outcomes.filter((o) => !o.result.ok).map((o) => o.query);
-
-    if (succeeded.length === 0) {
-      const firstError = outcomes[0]?.result as { ok: false; message: string } | undefined;
-      return {
-        ok: false,
-        code: "provider_error",
-        message: `All ${queriesResult.queries.length} discovery searches failed.${firstError ? ` First error: ${firstError.message}` : ""}`,
-        telemetry,
-      };
-    }
-
-    const totalHits = succeeded.reduce((sum, o) => sum + o.result.results.length, 0);
-    if (totalHits === 0) {
-      return { ok: true, prospects: [], queriesRun: succeeded.map((o) => o.query), queriesFailed, telemetry };
-    }
-
-    const extraction = await extractProspectsFromResults(
-      criteria,
-      succeeded.map((o) => ({ query: o.query, results: o.result.results })),
-      telemetry,
-      trackingClient
-    );
-    if (!extraction.ok) {
-      return { ok: false, code: "provider_error", message: extraction.message, telemetry };
-    }
-
-    // runFinalHermesValidation never fails outright (see its own doc
-    // comment) — a Reviewer timeout/failure degrades to reviewerStatus:
-    // "failed" and hands back Nemotron's own extracted candidates
-    // unreviewed, recorded honestly in telemetry, rather than discarding a
-    // whole batch of otherwise real, grounded candidates. The Deterministic
-    // Validator next is what actually guarantees grounding/anti-
-    // fabrication/competitor filtering, on every path, regardless of
-    // whether the Reviewer ran.
-    const finalValidation = await runFinalHermesValidation(
-      criteria,
-      extraction.candidates,
-      extraction.realHitByCanonicalUrl,
-      telemetry,
-      trackingClient
-    );
-
-    return finalizeDiscoveryResult(
-      criteria,
-      finalValidation.candidates,
-      extraction.realHitByCanonicalUrl,
-      succeeded.map((o) => o.query),
-      queriesFailed,
-      telemetry
-    );
+    // The real orchestrator. See HermesLeadDiscoveryAgent's own doc comment
+    // (hermes-lead-discovery-agent.ts) for why this class no longer contains
+    // the plan -> search -> extract -> review -> validate sequence itself.
+    return new HermesLeadDiscoveryAgent(this).discover(criteria, trackingClient);
   }
 }
 
