@@ -2,11 +2,26 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
 import { ProspectResearchSchema, type ProspectResearch } from "@/lib/ai/agents/prospect-research-schema";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
+import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
 import type { Database } from "@/types/database.types";
 
 export { ProspectResearchSchema, type ProspectResearch };
+
+/**
+ * Same explicit-pinning fix as Lead Discovery's two Nemotron stages (see
+ * NEMOTRON_MODEL in discovery.ts): a production audit (2026-09) found
+ * Research silently inheriting whatever OPENROUTER_MODEL happened to
+ * resolve to, rather than naming its intended model — so a change to that
+ * env var, or an admin unaware this agent depends on it, could silently
+ * retarget Research without anyone noticing. Naming it explicitly here
+ * doesn't change which model actually gets requested today (it's the exact
+ * same string OpenRouterProvider already defaults to) — it only makes the
+ * intent a checkable fact instead of an assumption, and keeps Research
+ * immune to a future OPENROUTER_MODEL change made for a different agent.
+ */
+const NEMOTRON_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 export type ProspectResearchInput = {
   organizationId: string;
@@ -145,6 +160,18 @@ export async function runProspectResearch(input: ProspectResearchInput): Promise
     maxTokens: 1600,
     temperature: 0.4,
     responseFormat: "json",
+    // Explicit Nemotron-on-openrouter-only routing — see NEMOTRON_MODEL's
+    // own doc comment above. A genuine fallback to config.fallbackProvider
+    // still requests THAT provider's own configured default, never this
+    // model's id (modelByProvider only names "openrouter").
+    modelByProvider: { openrouter: NEMOTRON_MODEL },
+    // NEMOTRON_MODEL's own published spec only supports reasoning efforts
+    // "medium"/"high" — not OpenRouterProvider's own default "low", which it
+    // silently ignores, reasoning at "high" instead and risking this call's
+    // timeout. Same fix already applied to Lead Discovery's two Nemotron
+    // stages (see discovery.ts) for the identical, previously-confirmed
+    // production failure mode.
+    reasoningEffort: "medium",
     client: input.client,
   });
 

@@ -3,9 +3,20 @@ import { z } from "zod";
 import { formatBusinessContext } from "@/lib/ai/business-context-prompt";
 import type { ProspectResearch } from "@/lib/ai/agents/prospect-research-schema";
 import { runHermesCompletion } from "@/lib/ai/hermes/hermes-service";
+import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
 import type { Database } from "@/types/database.types";
+
+/**
+ * Same explicit-pinning fix as Lead Discovery's two Nemotron stages and
+ * Research (see NEMOTRON_MODEL in discovery.ts / prospect-research.ts): a
+ * production audit (2026-09) found Qualification silently inheriting
+ * whatever OPENROUTER_MODEL happened to resolve to, rather than naming its
+ * intended model explicitly. Same string OpenRouterProvider already
+ * defaults to today — this only makes the intent a checkable fact.
+ */
+const NEMOTRON_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 // Kept identical to the leads.qualification_status CHECK constraint in the
 // schema (supabase/migrations/20260816120300_leads_foundation.sql) — the
@@ -161,6 +172,18 @@ export async function runLeadQualification(input: LeadQualificationInput): Promi
     maxTokens: 1600,
     temperature: 0.3,
     responseFormat: "json",
+    // Explicit Nemotron-on-openrouter-only routing — see NEMOTRON_MODEL's
+    // own doc comment above. A genuine fallback to config.fallbackProvider
+    // still requests THAT provider's own configured default, never this
+    // model's id (modelByProvider only names "openrouter").
+    modelByProvider: { openrouter: NEMOTRON_MODEL },
+    // NEMOTRON_MODEL's own published spec only supports reasoning efforts
+    // "medium"/"high" — not OpenRouterProvider's own default "low", which it
+    // silently ignores, reasoning at "high" instead and risking this call's
+    // timeout. Same fix already applied to Lead Discovery's two Nemotron
+    // stages (see discovery.ts) for the identical, previously-confirmed
+    // production failure mode.
+    reasoningEffort: "medium",
     client: input.client,
   });
 

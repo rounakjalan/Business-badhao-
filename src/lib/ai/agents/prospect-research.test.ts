@@ -141,4 +141,30 @@ describe("runProspectResearch", () => {
 
     expect(vi.mocked(runHermesCompletion).mock.calls[0][0].client).toBeUndefined();
   });
+
+  // STEP 2 (Nemotron routing fix): Research previously sent no explicit
+  // model at all, silently inheriting whatever OPENROUTER_MODEL happened to
+  // resolve to. It must now explicitly name Nemotron on openrouter only —
+  // exactly like Lead Discovery's two Nemotron stages — so a fallback still
+  // requests Groq's own configured model, never Nemotron's id.
+  it("explicitly pins Nemotron on the openrouter provider only, never touching a genuine fallback's own model", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_RESEARCH), provider: "openrouter", model: "nvidia/nemotron-3-ultra-550b-a55b:free" });
+
+    await runProspectResearch(baseInput);
+
+    const call = vi.mocked(runHermesCompletion).mock.calls[0][0];
+    expect(call.modelByProvider).toEqual({ openrouter: "nvidia/nemotron-3-ultra-550b-a55b:free" });
+    // No blanket `model` override — that would also get sent to a
+    // fallback provider that has no such model id (see modelByProvider's
+    // own doc comment in hermes-service.ts).
+    expect(call.model).toBeUndefined();
+  });
+
+  it("requests the reasoning effort Nemotron 3 Ultra's own published spec actually supports, not OpenRouterProvider's own default — the same fix already applied to Lead Discovery, needed to avoid this call silently reasoning at 'high' and risking a timeout", async () => {
+    vi.mocked(runHermesCompletion).mockResolvedValue({ ok: true, text: JSON.stringify(VALID_RESEARCH), provider: "openrouter", model: "nvidia/nemotron-3-ultra-550b-a55b:free" });
+
+    await runProspectResearch(baseInput);
+
+    expect(vi.mocked(runHermesCompletion).mock.calls[0][0].reasoningEffort).toBe("medium");
+  });
 });
