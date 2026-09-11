@@ -7,9 +7,9 @@ import { LogoMark } from "@/components/ui/icons";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; redirectTo?: string }>;
+  searchParams: Promise<{ error?: string; redirectTo?: string; message?: string }>;
 }) {
-  const { error, redirectTo } = await searchParams;
+  const { error, redirectTo, message } = await searchParams;
 
   return (
     <div className="flex min-h-full flex-1 flex-col items-center justify-center bg-slate-50 px-4 py-16">
@@ -32,6 +32,11 @@ export default async function LoginPage({
               <Alert variant="error">{error}</Alert>
             </div>
           ) : null}
+          {message === "password-updated" ? (
+            <div className="mb-4">
+              <Alert variant="success">Your password has been updated. Log in with your new password.</Alert>
+            </div>
+          ) : null}
 
           <form action={signIn} className="flex flex-col gap-4">
             <input type="hidden" name="redirectTo" value={redirectTo ?? "/dashboard"} />
@@ -52,9 +57,14 @@ export default async function LoginPage({
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="password" className="text-sm font-medium text-slate-700">
-                Password
-              </label>
+              <div className="flex items-center justify-between">
+                <label htmlFor="password" className="text-sm font-medium text-slate-700">
+                  Password
+                </label>
+                <Link href="/forgot-password" className="text-sm font-medium text-slate-500 hover:text-slate-900">
+                  Forgot password?
+                </Link>
+              </div>
               <input
                 id="password"
                 name="password"
