@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/layout/page-header";
 import { DashButton } from "@/components/dashboard-ui/button";
@@ -18,13 +19,12 @@ export type LeadRow = {
   score: number | null;
   intent: string | null;
   nextAction: string | null;
-  campaignName: string | null;
   createdAt: string;
 };
 
 const STATUS_FILTERS = ["All", "new", "contacted", "qualified", "unqualified", "converted", "lost"];
 
-export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
+export function LeadsListClient({ leads, campaignName, backHref }: { leads: LeadRow[]; campaignName: string; backHref: string }) {
   const router = useRouter();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
@@ -37,9 +37,14 @@ export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
 
   return (
     <div className="bb-animate-fade-in flex flex-1 flex-col gap-5 p-4 sm:p-6">
+      <div>
+        <Link href={backHref} className="bb-press inline-block text-sm text-bb-indigo transition-colors hover:text-bb-indigo-3">
+          ← Back to Campaigns
+        </Link>
+      </div>
       <PageHeader
-        title="Leads"
-        description="Qualified prospects ready for outreach"
+        title={campaignName}
+        description={`${leads.length.toLocaleString("en-IN")} ${leads.length === 1 ? "lead" : "leads"}`}
         action={
           <DashButton variant="outline" disabled title="Coming soon">
             Find More Leads
@@ -74,14 +79,14 @@ export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
         <DarkEmptyState
           icon={LeadsIcon}
           title="No leads yet"
-          description="Leads you add or discover will show up here with their contact details and status."
+          description="Leads discovered for this campaign will show up here with their contact details and status."
         />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-bb-border">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-bb-border bg-bb-navy-2">
-                {["Name", "Score", "Intent", "Status", "Qualification", "Campaign", "Next Action", "Added", ""].map((h) => (
+                {["Name", "Score", "Intent", "Status", "Qualification", "Next Action", "Added", ""].map((h) => (
                   <th key={h} className="whitespace-nowrap px-4 py-3 text-left text-xs font-medium text-bb-text-3">
                     {h}
                   </th>
@@ -116,7 +121,6 @@ export function LeadsListClient({ leads }: { leads: LeadRow[] }) {
                   <td className="px-4 py-3">
                     <QualificationBadge status={lead.qualificationStatus} />
                   </td>
-                  <td className="px-4 py-3 text-xs text-bb-text-3">{lead.campaignName ?? "—"}</td>
                   <td className="px-4 py-3 text-xs text-bb-text-2">{lead.nextAction ?? "—"}</td>
                   <td className="px-4 py-3 text-xs text-bb-text-3">{formatRelativeTime(lead.createdAt)}</td>
                   <td className="px-4 py-3">
