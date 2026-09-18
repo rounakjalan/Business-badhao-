@@ -470,23 +470,17 @@ describe("runBatchedDiscovery", () => {
     });
   });
 
-  // Instagram as a REAL, ADDITIVE lead-discovery source (2026-09 expansion):
-  // discover() itself may now return candidates whose sourceProvider is
-  // "instagram" (set by finalizeDiscoveryResult in discovery.ts, from a
-  // SearchHit an InstagramBrowserDiscoveryTool actually produced) alongside
-  // Tavily/Exa ones in the SAME DiscoveryResult.prospects array — this test
-  // group proves persistence, source tagging, cross-source deduplication,
-  // and the immediate-research handoff all treat such a candidate exactly
-  // like a Tavily one, with zero source-specific branching.
-  describe("Instagram as a real discovery source (additive, not the Meta Graph API verification step above)", () => {
-    it("persists an Instagram-sourced candidate with discoverySource reflecting the real tool that found it, and fires onLeadPersisted exactly like a Tavily candidate", async () => {
-      const igProspect = prospect({
-        companyName: "Sunrise Public School",
-        website: null,
-        sourceUrl: "https://www.instagram.com/sunrise_public_school/",
-        sourceProvider: "instagram",
-      });
-      const discoverMock = vi.fn().mockResolvedValueOnce(okResult([igProspect])).mockResolvedValue(okResult([]));
+  // Per-candidate source tagging fix (2026-09): a candidate's discoverySource
+  // now reflects the real tool that found IT (DiscoveredProspect.sourceProvider,
+  // set by finalizeDiscoveryResult in discovery.ts from the grounded
+  // SearchHit.source) rather than the batch-level provider.name, which was
+  // always "tavily" even for a candidate a specific query's Exa fallback
+  // actually served. Proves the fix end-to-end through persistence, and that
+  // it never disturbs onLeadPersisted/research triggering either way.
+  describe("per-candidate discoverySource (tavily vs. exa's same-query fallback)", () => {
+    it("persists a candidate's real per-candidate source, and fires onLeadPersisted regardless of which source found it", async () => {
+      const exaProspect = prospect({ companyName: "Rao Web Studio", website: "raowebstudio.example", sourceProvider: "exa" });
+      const discoverMock = vi.fn().mockResolvedValueOnce(okResult([exaProspect])).mockResolvedValue(okResult([]));
 
       const { tables, params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 2 });
       const persistedLeadIds: string[] = [];
@@ -495,66 +489,25 @@ describe("runBatchedDiscovery", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.newLeadsCreated).toBe(1);
-      // Immediate research: onLeadPersisted fired for this lead exactly as
-      // it does for a Tavily-sourced one — no source-conditional branching.
       expect(persistedLeadIds).toHaveLength(1);
       expect(persistedLeadIds[0]).toBe((tables.leads ?? [])[0]?.id);
 
-      const savedProspect = (tables.prospects ?? []).find((p) => p.company_name === "Sunrise Public School");
-      expect((savedProspect?.raw_data as { discoverySource?: string })?.discoverySource).toBe("instagram");
+      const savedProspect = (tables.prospects ?? []).find((p) => p.company_name === "Rao Web Studio");
+      expect((savedProspect?.raw_data as { discoverySource?: string })?.discoverySource).toBe("exa");
     });
 
-    it("recognizes the same business found by Tavily (with an Instagram link in its extracted contact info) and later by Instagram discovery natively — one prospect, not two, even with no shared website", async () => {
-      // The existing prospect: found by Tavily, no website of its own, but
-      // contact enrichment already recorded its Instagram handle.
-      const discoverMock = vi
-        .fn()
-        .mockResolvedValueOnce(
-          okResult([
-            prospect({
-              companyName: "Sunrise Academy", // Deliberately a DIFFERENT display name than the existing row's "Sunrise Public School" — proves this isn't just name-matching.
-              website: null,
-              sourceUrl: "https://www.instagram.com/sunrise_public_school/",
-              sourceProvider: "instagram",
-            }),
-          ])
-        )
-        .mockResolvedValue(okResult([]));
+    it("falls back to the batch-level provider name for a candidate missing sourceProvider (defensive, shouldn't happen for a real discover() result)", async () => {
+      const legacyShapedProspect = prospect({ companyName: "Legacy Co", website: "legacyco.example" });
+      delete (legacyShapedProspect as Partial<DiscoveredProspect>).sourceProvider;
+      const discoverMock = vi.fn().mockResolvedValueOnce(okResult([legacyShapedProspect])).mockResolvedValue(okResult([]));
 
       const { tables, params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 2 });
-      tables.prospects = [
-        {
-          id: "prospect-existing",
-          organization_id: "org-1",
-          company_name: "Sunrise Public School",
-          website: null,
-          raw_data: { contact: { instagram: { value: "https://www.instagram.com/sunrise_public_school/", source: "https://sunrisepublicschool.example", confidence: "medium" } } },
-        },
-      ];
-
       const result = await runBatchedDiscovery(params);
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      // Recognized as the same business via the Instagram-handle key, even
-      // though neither row has a shared website and the names differ.
-      expect(result.newLeadsCreated).toBe(0);
-      expect(result.duplicatesSkipped).toBe(1);
-      expect((tables.leads ?? []).length).toBe(0);
-    });
-
-    it("still deduplicates two Instagram-native candidates found in different batches of the SAME run via the handle key", async () => {
-      const same = () =>
-        prospect({ companyName: "Sunrise Public School", website: null, sourceUrl: "https://www.instagram.com/sunrise_public_school/", sourceProvider: "instagram" });
-      const discoverMock = vi.fn().mockResolvedValueOnce(okResult([same()])).mockResolvedValueOnce(okResult([same()])).mockResolvedValueOnce(okResult([same()]));
-
-      const { tables, params } = baseParams(discoverMock, { targetNewLeads: 25, maxBatches: 6 });
-      const result = await runBatchedDiscovery(params);
-
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      expect(result.newLeadsCreated).toBe(1);
-      expect((tables.leads ?? []).length).toBe(1);
+      const savedProspect = (tables.prospects ?? []).find((p) => p.company_name === "Legacy Co");
+      expect((savedProspect?.raw_data as { discoverySource?: string })?.discoverySource).toBe("tavily");
     });
   });
 });

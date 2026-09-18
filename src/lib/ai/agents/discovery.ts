@@ -6,8 +6,6 @@ import { runHermesCompletion, type HermesResult } from "@/lib/ai/hermes/hermes-s
 import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
-import { isInstagramDiscoveryConfigured, InstagramBrowserDiscoveryTool } from "@/lib/discovery/instagram-browser-discovery";
-import { extractInstagramUsername } from "@/lib/instagram/business-discovery";
 import type { Database } from "@/types/database.types";
 
 /**
@@ -162,13 +160,13 @@ export type DiscoveredProspect = {
   searchQuery: string;
   /**
    * Which search tool actually produced the real hit this prospect was
-   * grounded against ("tavily" | "exa" | "instagram") — set by
-   * finalizeDiscoveryResult from the grounded SearchHit.source, never
-   * invented. Optional/undefined only for candidates constructed directly
-   * in tests without going through finalizeDiscoveryResult; every real
-   * discovery run sets it. Distinct from the batch-level `provider.name`
-   * TavilyDiscoveryProvider reports — that was always "tavily" even for a
-   * hit Exa actually served; this is the real, per-candidate source.
+   * grounded against ("tavily" | "exa") — set by finalizeDiscoveryResult
+   * from the grounded SearchHit.source, never invented. Optional/undefined
+   * only for candidates constructed directly in tests without going through
+   * finalizeDiscoveryResult; every real discovery run sets it. Distinct from
+   * the batch-level `provider.name` TavilyDiscoveryProvider reports — that
+   * was always "tavily" even for a hit Exa's own same-query fallback
+   * actually served; this is the real, per-candidate source.
    */
   sourceProvider?: string;
 };
@@ -202,17 +200,6 @@ export type DiscoveryCriteria = {
 export type ProviderTelemetry = {
   tavily: { requests: number; succeeded: number; failed: number; results: number };
   exa: { requests: number; succeeded: number; failed: number; results: number };
-  /**
-   * Instagram DISCOVERY search telemetry (InstagramBrowserDiscoveryTool,
-   * src/lib/discovery/instagram-browser-discovery.ts) — an ADDITIVE search
-   * source contributing candidates alongside Tavily/Exa, not a fallback for
-   * either. Entirely distinct from InstagramEnrichmentSummary
-   * (discovery-batch.ts) / the `instagram` field elsewhere in this codebase,
-   * which tallies the separate Meta Graph API Business Discovery
-   * verification step (src/lib/instagram/*) that only confirms a handle
-   * another source already found — never confuse the two.
-   */
-  instagramDiscovery: { requests: number; succeeded: number; failed: number; results: number };
   /** Queries whose results came from Exa because Tavily failed for that query. */
   servedByExa: string[];
   extracted: number;
@@ -259,7 +246,6 @@ export function newTelemetry(): ProviderTelemetry {
   return {
     tavily: { requests: 0, succeeded: 0, failed: 0, results: 0 },
     exa: { requests: 0, succeeded: 0, failed: 0, results: 0 },
-    instagramDiscovery: { requests: 0, succeeded: 0, failed: 0, results: 0 },
     servedByExa: [],
     extracted: 0,
     finalValidationInput: 0,
@@ -553,7 +539,7 @@ export type SearchHit = {
   title: string;
   url: string;
   content: string;
-  /** Which tool actually produced this hit ("tavily" | "exa" | "instagram") — carried through to DiscoveredProspect.sourceProvider once grounded. Optional so existing test fixtures built without it keep working; finalizeDiscoveryResult falls back to "tavily" when absent. */
+  /** Which tool actually produced this hit ("tavily" | "exa") — carried through to DiscoveredProspect.sourceProvider once grounded. Optional so existing test fixtures built without it keep working; finalizeDiscoveryResult falls back to "tavily" when absent. */
   source?: string;
 };
 
@@ -1271,37 +1257,13 @@ export function prospectDedupeKey(prospect: Pick<DiscoveredProspect, "website" |
   return normalizeWebsite(prospect.website) ?? `name:${prospect.companyName.trim().toLowerCase()}`;
 }
 
-/**
- * Secondary cross-source identity signal, checked ALONGSIDE (never instead
- * of) prospectDedupeKey above — for the case a website/name key can't catch:
- * the same business found once by Tavily/Exa (with an Instagram link in its
- * extracted contact info) and once natively by Instagram discovery (whose
- * sourceUrl IS the profile URL), with no shared website and a differently
- * formatted company name on each side. Returns null whenever there's
- * genuinely no handle to key on, in which case a candidate is deduped on the
- * website/name key alone, exactly as before this existed.
- */
-export function instagramHandleDedupeKey(handleOrUrl: string | null | undefined): string | null {
-  if (!handleOrUrl) return null;
-  const username = extractInstagramUsername(handleOrUrl);
-  return username ? `ig:${username.toLowerCase()}` : null;
-}
-
 export function dedupeProspects(prospects: DiscoveredProspect[]): DiscoveredProspect[] {
   const seen = new Set<string>();
   const deduped: DiscoveredProspect[] = [];
   for (const prospect of prospects) {
-    // The Instagram handle key only ever applies to a candidate Instagram
-    // discovery itself produced (sourceUrl IS the profile URL in that case)
-    // — Tavily/Exa candidates gain a known handle only later, once
-    // discoverProspectContacts runs at persistence (see
-    // discovery-batch.ts's own dedupeKeysFor, which is where that
-    // cross-source case is actually caught).
-    const igKey = prospect.sourceProvider === "instagram" ? instagramHandleDedupeKey(prospect.sourceUrl) : null;
     const key = prospectDedupeKey(prospect);
-    if (seen.has(key) || (igKey && seen.has(igKey))) continue;
+    if (seen.has(key)) continue;
     seen.add(key);
-    if (igKey) seen.add(igKey);
     deduped.push(prospect);
   }
   return deduped;
@@ -1372,10 +1334,10 @@ export function finalizeDiscoveryResult(
       companyName,
       sourceUrl: realHit.url,
       evidenceSnippet: quoteIsReal || !realHit.content ? quote : truncate(realHit.content, 300),
-      // The real tool that produced this hit ("tavily" | "exa" | "instagram")
-      // — never the batch-level provider.name, which was always "tavily"
-      // even for a hit Exa actually served. Falls back to "tavily" only for
-      // a SearchHit built without `source` (pre-existing test fixtures).
+      // The real tool that produced this hit ("tavily" | "exa") — never the
+      // batch-level provider.name, which was always "tavily" even for a hit
+      // Exa actually served. Falls back to "tavily" only for a SearchHit
+      // built without `source` (pre-existing test fixtures).
       sourceProvider: realHit.source ?? "tavily",
     });
   }
@@ -1447,21 +1409,29 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider, DiscoverySear
       };
     }
 
-    // Instagram is an ADDITIVE second source, never a fallback for Tavily/Exa
-    // and never required for Tavily/Exa discovery to run — see
-    // instagram-browser-discovery.ts. Absent (unconfigured) here exactly like
-    // Exa is absent above when EXA_API_KEY isn't set: this provider stays
-    // Tavily-only, unaffected. A fresh instance is built per discover() call
-    // (one call = one batch, see runBatchedDiscovery) so its own per-batch
-    // query cap resets every batch rather than persisting across the whole run.
-    const additionalSearchTools: DiscoverySearchTool[] = isInstagramDiscoveryConfigured()
-      ? [new InstagramBrowserDiscoveryTool(criteria)]
-      : [];
-
     // The real orchestrator. See HermesLeadDiscoveryAgent's own doc comment
     // (hermes-lead-discovery-agent.ts) for why this class no longer contains
     // the plan -> search -> extract -> review -> validate sequence itself.
-    return new HermesLeadDiscoveryAgent(this, additionalSearchTools).discover(criteria, trackingClient);
+    //
+    // Instagram (2026-09 investigation): HermesLeadDiscoveryAgent's
+    // constructor accepts an optional array of additional DiscoverySearchTool
+    // instances specifically so a genuine second discovery channel could run
+    // alongside Tavily/Exa here, additively, the moment one exists — that
+    // capability is real and covered by tests using controlled fake tools.
+    // No Instagram tool is constructed or passed here, because there is no
+    // real execution path for it: this repository's entire dependency tree
+    // (package.json) contains no browser-automation runtime, "Hermes"
+    // throughout this codebase names LLM-routing/orchestration functions
+    // only (runHermesCompletion, the Independent Hermes Reviewer) and has no
+    // browser-control capability of its own, and neither Playwright nor any
+    // production TinyFish dependency may be introduced. Wiring in an
+    // Instagram-shaped adapter without a real backend behind it would only
+    // be a fabricated integration that never actually runs — see this
+    // session's own audit findings for the full reasoning. A genuine second
+    // source can be added here (`new HermesLeadDiscoveryAgent(this, [realTool])`)
+    // once an actual browser-execution boundary is stood up and its real,
+    // documented API is known.
+    return new HermesLeadDiscoveryAgent(this).discover(criteria, trackingClient);
   }
 }
 

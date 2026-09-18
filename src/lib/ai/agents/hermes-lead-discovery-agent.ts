@@ -70,16 +70,22 @@ export interface DiscoverySearchTool {
  * that turns that into real prospects/leads and immediate Research, exactly
  * as it already does.
  *
- * ADDITIVE second source (2026-09, Instagram expansion): `additionalSearchTools`
- * lets a second, independent DiscoverySearchTool (e.g.
- * InstagramBrowserDiscoveryTool, instagram-browser-discovery.ts) contribute
- * candidates ALONGSIDE the primary tool for every planned query — never as
- * a fallback relationship between them (that stays Tavily→Exa, entirely
- * inside the primary tool's own .search()), and never gating one on the
- * other's success or failure. See runSearchProviders below for exactly how
- * the two are merged per query. Defaults to none, so every existing
+ * ADDITIVE second source (2026-09 investigation): `additionalSearchTools`
+ * lets a second, independent DiscoverySearchTool contribute candidates
+ * ALONGSIDE the primary tool for every planned query — never as a fallback
+ * relationship between them (that stays Tavily→Exa, entirely inside the
+ * primary tool's own .search()), and never gating one on the other's
+ * success or failure. See runSearchProviders below for exactly how the two
+ * are merged per query. Defaults to none, so every existing
  * `new HermesLeadDiscoveryAgent(tool)` call site behaves identically to
- * before this existed.
+ * before this existed. This is real, tested, general-purpose orchestration
+ * infrastructure — no concrete second-source implementation is wired into
+ * this codebase today (see TavilyDiscoveryProvider.discover in discovery.ts
+ * for exactly why: no browser-automation runtime exists anywhere in this
+ * repository's dependency tree, "Hermes" throughout this codebase names
+ * LLM-routing/orchestration functions only and has no browser-control
+ * capability of its own, and neither Playwright nor a production TinyFish
+ * dependency may be introduced).
  */
 export class HermesLeadDiscoveryAgent {
   private readonly searchTools: DiscoverySearchTool[];
@@ -150,7 +156,7 @@ export class HermesLeadDiscoveryAgent {
    * Step 2: run every planned query against EVERY configured search tool —
    * the primary tool (Tavily, with Exa as its own same-query fallback,
    * entirely untouched by this agent) always, plus any additionalSearchTools
-   * (Instagram, when configured) additively. A query counts as succeeded the
+   * (none, in this deployment today) additively. A query counts as succeeded the
    * moment ANY tool returns a real (ok:true) result for it, and its merged
    * results are the union of every tool that succeeded — so one source's
    * failure for a query never discards another source's real results for
