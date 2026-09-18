@@ -69,9 +69,24 @@ export interface DiscoverySearchTool {
  * within-run-deduped DiscoveryResult — runBatchedDiscovery is the caller
  * that turns that into real prospects/leads and immediate Research, exactly
  * as it already does.
+ *
+ * ADDITIVE second source (2026-09, Instagram expansion): `additionalSearchTools`
+ * lets a second, independent DiscoverySearchTool (e.g.
+ * InstagramBrowserDiscoveryTool, instagram-browser-discovery.ts) contribute
+ * candidates ALONGSIDE the primary tool for every planned query — never as
+ * a fallback relationship between them (that stays Tavily→Exa, entirely
+ * inside the primary tool's own .search()), and never gating one on the
+ * other's success or failure. See runSearchProviders below for exactly how
+ * the two are merged per query. Defaults to none, so every existing
+ * `new HermesLeadDiscoveryAgent(tool)` call site behaves identically to
+ * before this existed.
  */
 export class HermesLeadDiscoveryAgent {
-  constructor(private readonly searchTool: DiscoverySearchTool) {}
+  private readonly searchTools: DiscoverySearchTool[];
+
+  constructor(searchTool: DiscoverySearchTool, additionalSearchTools: DiscoverySearchTool[] = []) {
+    this.searchTools = [searchTool, ...additionalSearchTools];
+  }
 
   /**
    * Runs one full discovery round for the given campaign + ICP: plan ->
@@ -131,7 +146,18 @@ export class HermesLeadDiscoveryAgent {
     return generateDiscoveryQueries(criteria, trackingClient);
   }
 
-  /** Step 2: run every planned query against the injected search tool (Tavily, with Exa as its own same-query fallback — unchanged, untouched by this agent). */
+  /**
+   * Step 2: run every planned query against EVERY configured search tool —
+   * the primary tool (Tavily, with Exa as its own same-query fallback,
+   * entirely untouched by this agent) always, plus any additionalSearchTools
+   * (Instagram, when configured) additively. A query counts as succeeded the
+   * moment ANY tool returns a real (ok:true) result for it, and its merged
+   * results are the union of every tool that succeeded — so one source's
+   * failure for a query never discards another source's real results for
+   * that same query. With a single tool (the default, and every existing
+   * caller before this existed) this reduces to exactly the prior
+   * one-tool-per-query behavior.
+   */
   private async runSearchProviders(
     queries: string[],
     telemetry: ProviderTelemetry
@@ -140,17 +166,27 @@ export class HermesLeadDiscoveryAgent {
     queriesFailed: string[];
     firstError: string | null;
   }> {
-    const outcomes = await Promise.all(
-      queries.map(async (query) => ({ query, result: await this.searchTool.search(query, telemetry) }))
+    const perQuery = await Promise.all(
+      queries.map(async (query) => {
+        const toolOutcomes = await Promise.all(this.searchTools.map((tool) => tool.search(query, telemetry)));
+        const succeededTools = toolOutcomes.filter(
+          (result): result is { ok: true; results: SearchHit[] } => result.ok
+        );
+        const firstFailure = toolOutcomes.find((result): result is { ok: false; message: string } => !result.ok);
+        return {
+          query,
+          ok: succeededTools.length > 0,
+          results: succeededTools.flatMap((result) => result.results),
+          error: firstFailure?.message ?? null,
+        };
+      })
     );
 
-    const succeeded = outcomes
-      .filter((o): o is { query: string; result: { ok: true; results: SearchHit[] } } => o.result.ok)
-      .map((o) => ({ query: o.query, results: o.result.results }));
-    const queriesFailed = outcomes.filter((o) => !o.result.ok).map((o) => o.query);
-    const firstFailed = outcomes.find((o) => !o.result.ok)?.result as { ok: false; message: string } | undefined;
+    const succeeded = perQuery.filter((p) => p.ok).map((p) => ({ query: p.query, results: p.results }));
+    const queriesFailed = perQuery.filter((p) => !p.ok).map((p) => p.query);
+    const firstError = perQuery.find((p) => !p.ok)?.error ?? null;
 
-    return { succeeded, queriesFailed, firstError: firstFailed?.message ?? null };
+    return { succeeded, queriesFailed, firstError };
   }
 
   /** Step 3: real search results -> candidate prospects, via Nemotron again (same explicit pinning as planning). */

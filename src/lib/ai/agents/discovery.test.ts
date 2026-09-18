@@ -8,6 +8,7 @@ import {
   dedupeProspects,
   finalizeDiscoveryResult,
   getDiscoveryProvider,
+  instagramHandleDedupeKey,
   isCompetitorSeekingQuery,
   isNonBusinessName,
   isSourceSiteName,
@@ -591,6 +592,47 @@ describe("lead discovery", () => {
       expect(dedupeProspects([a, b])).toHaveLength(2);
     });
 
+    describe("instagramHandleDedupeKey — cross-source identity signal (Instagram expansion)", () => {
+      it("extracts a normalized handle key from a real profile URL", () => {
+        expect(instagramHandleDedupeKey("https://www.instagram.com/sunrise_public_school/")).toBe("ig:sunrise_public_school");
+      });
+
+      it("normalizes case and an @-prefixed bare handle to the same key", () => {
+        expect(instagramHandleDedupeKey("@Sunrise_Public_School")).toBe(instagramHandleDedupeKey("https://instagram.com/sunrise_public_school"));
+      });
+
+      it("returns null for a post/reel path, not a profile — never a false identity match", () => {
+        expect(instagramHandleDedupeKey("https://www.instagram.com/p/Cabc123/")).toBeNull();
+      });
+
+      it("returns null when there is genuinely no handle to key on", () => {
+        expect(instagramHandleDedupeKey(null)).toBeNull();
+        expect(instagramHandleDedupeKey(undefined)).toBeNull();
+        expect(instagramHandleDedupeKey("")).toBeNull();
+      });
+
+      it("an Instagram-native candidate with no website is deduped against another with the same handle but a different display name", () => {
+        const a: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: null, companyName: "Sunrise Public School", sourceUrl: "https://www.instagram.com/sunrise_public_school/", sourceProvider: "instagram" };
+        const b: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: null, companyName: "Sunrise Academy — Official", sourceUrl: "https://www.instagram.com/sunrise_public_school/", sourceProvider: "instagram" };
+
+        // Different companyName means prospectDedupeKey alone would treat
+        // these as distinct — the handle key is what catches this pair.
+        expect(prospectDedupeKey(a)).not.toBe(prospectDedupeKey(b));
+        expect(dedupeProspects([a, b])).toHaveLength(1);
+      });
+
+      it("never affects a Tavily/Exa candidate — the handle key only applies to a sourceProvider: 'instagram' candidate", () => {
+        const a: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: null, companyName: "Sharma Boutique", sourceUrl: "https://www.instagram.com/sharma_boutique/", sourceProvider: "tavily" };
+        const b: DiscoveredProspect = { ...EXTRACTION_RESPONSE.prospects[0], website: null, companyName: "Different Boutique Entirely", sourceUrl: "https://www.instagram.com/sharma_boutique/", sourceProvider: "tavily" };
+
+        // Same sourceUrl, but neither is Instagram-native (sourceProvider !==
+        // "instagram") — the handle key never applies, so these stay distinct
+        // on the existing website/name key alone, exactly as before this
+        // feature existed.
+        expect(dedupeProspects([a, b])).toHaveLength(2);
+      });
+    });
+
     it("caps a single discover() run at 20 prospects even when extraction legitimately finds more distinct businesses", async () => {
       process.env.TAVILY_API_KEY = "test-key";
       const query = "retail store owners in Jaipur";
@@ -660,7 +702,12 @@ describe("lead discovery", () => {
 
       expect(result).toEqual({
         ok: true,
-        prospects: [candidate()],
+        // Grounded against a real hit with no explicit `source` (this
+        // suite's groundingMap() fixture predates the Instagram-expansion
+        // source-tagging) — finalizeDiscoveryResult's own documented
+        // fallback applies: "tavily" when the grounded SearchHit carries no
+        // source of its own.
+        prospects: [candidate({ sourceProvider: "tavily" })],
         queriesRun: ["retail store owners in Jaipur"],
         queriesFailed: [],
         telemetry: expect.objectContaining({ verified: 1 }),

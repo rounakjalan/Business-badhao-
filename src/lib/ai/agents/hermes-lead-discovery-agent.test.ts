@@ -329,3 +329,165 @@ describe("HermesLeadDiscoveryAgent — Independent Hermes Reviewer verification 
     expect(reviewerCall.userPrompt).toContain(JSON.stringify(criteria.icpCriteria));
   });
 });
+
+// Instagram expansion (2026-09): Instagram is an ADDITIVE second
+// DiscoverySearchTool, never a fallback for the primary (Tavily/Exa) tool
+// and never gated on it. These tests exercise HermesLeadDiscoveryAgent with
+// TWO injected fake tools — proving the combination, failure isolation, and
+// common-pipeline guarantees the business requirement demands, without any
+// real HTTP/browser automation involved.
+describe("HermesLeadDiscoveryAgent — Instagram as an additive second search tool", () => {
+  const INSTAGRAM_HIT: SearchHit = {
+    title: "Sunrise Public School (@sunrise_public_school)",
+    url: "https://www.instagram.com/sunrise_public_school/",
+    content: "CBSE school in Jaipur. Admissions open.",
+    source: "instagram",
+  };
+
+  function igCandidate(overrides: Record<string, unknown> = {}) {
+    return {
+      companyName: "Sunrise Public School",
+      website: null,
+      location: "Jaipur",
+      industry: "Education",
+      businessType: "School",
+      email: null,
+      phone: null,
+      matchedIcpCriteria: ["location: Jaipur"],
+      evidenceSnippet: "CBSE school in Jaipur. Admissions open.",
+      sourceUrl: INSTAGRAM_HIT.url,
+      searchQuery: "schools in Jaipur",
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    process.env.TAVILY_API_KEY = "unused-in-this-file";
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("combines Tavily and Instagram results for the same query into one candidate pool reaching extraction — additive, not a fallback relationship", async () => {
+    const tavilyTool = fakeSearchTool({ "schools in Jaipur": [REAL_HIT] });
+    const instagramTool = fakeSearchTool({ "schools in Jaipur": [INSTAGRAM_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["schools in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate(), igCandidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate(), igCandidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tavilyTool, [instagramTool]).discover(criteria);
+
+    expect(tavilyTool.calls).toEqual(["schools in Jaipur"]);
+    expect(instagramTool.calls).toEqual(["schools in Jaipur"]);
+    // Both real hits reached the extraction prompt — a genuinely combined pool.
+    const extractionCall = vi.mocked(runHermesCompletion).mock.calls[1][0];
+    expect(extractionCall.userPrompt).toContain(REAL_HIT.url);
+    expect(extractionCall.userPrompt).toContain(INSTAGRAM_HIT.url);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName).sort()).toEqual(["Sharma Boutique", "Sunrise Public School"]);
+    // Source tagging: each candidate carries the tool that actually found it.
+    expect(result.prospects.find((p) => p.companyName === "Sharma Boutique")?.sourceProvider).toBe("tavily");
+    expect(result.prospects.find((p) => p.companyName === "Sunrise Public School")?.sourceProvider).toBe("instagram");
+  });
+
+  it("Instagram failing for a query never discards Tavily's real results for that same query — failure isolation", async () => {
+    const tavilyTool = fakeSearchTool({ "schools in Jaipur": [REAL_HIT] });
+    const failingInstagramTool: DiscoverySearchTool = { name: "instagram", search: vi.fn().mockResolvedValue({ ok: false, message: "Instagram discovery isn't connected to a browser-automation backend yet." }) };
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["schools in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tavilyTool, [failingInstagramTool]).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+  });
+
+  it("a slow/timing-out Instagram tool never blocks Tavily's own results from proceeding — timeout isolation", async () => {
+    const tavilyTool = fakeSearchTool({ "schools in Jaipur": [REAL_HIT] });
+    const timingOutInstagramTool: DiscoverySearchTool = {
+      name: "instagram",
+      search: vi.fn().mockResolvedValue({ ok: false, message: 'Instagram discovery failed for "schools in Jaipur": The operation was aborted due to timeout' }),
+    };
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["schools in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tavilyTool, [timingOutInstagramTool]).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects).toHaveLength(1);
+  });
+
+  it("Instagram returning zero candidates never blocks Tavily's own results — zero-result isolation", async () => {
+    const tavilyTool = fakeSearchTool({ "schools in Jaipur": [REAL_HIT] });
+    const emptyInstagramTool = fakeSearchTool({ "schools in Jaipur": [] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["schools in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tavilyTool, [emptyInstagramTool]).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+  });
+
+  it("Tavily failing entirely never blocks Instagram from still contributing candidates — the inverse isolation direction", async () => {
+    const failingTavilyTool: DiscoverySearchTool = { name: "tavily", search: vi.fn().mockResolvedValue({ ok: false, message: "Tavily is down" }) };
+    const instagramTool = fakeSearchTool({ "schools in Jaipur": [INSTAGRAM_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["schools in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [igCandidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [igCandidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(failingTavilyTool, [instagramTool]).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sunrise Public School"]);
+  });
+
+  it("an Instagram-sourced candidate is rejected by the SAME Deterministic Validator grounding check as a Tavily one — never bypasses the common quality gate", async () => {
+    const ungroundedIgCandidate = igCandidate({ companyName: "Fabricated Academy", sourceUrl: "https://never-searched.example/fake" });
+    const tavilyTool = fakeSearchTool({ "schools in Jaipur": [REAL_HIT] });
+    const instagramTool = fakeSearchTool({ "schools in Jaipur": [INSTAGRAM_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["schools in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [ungroundedIgCandidate] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [ungroundedIgCandidate] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tavilyTool, [instagramTool]).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Cited a URL neither tool ever actually returned — rejected exactly as
+    // an ungrounded Tavily candidate would be (see the "rejects an ungrounded
+    // candidate" test above), never a separate/weaker Instagram standard.
+    expect(result.prospects).toEqual([]);
+    expect(result.telemetry?.rejectedNotGrounded).toBe(1);
+  });
+
+  it("with no additionalSearchTools passed (the default), behavior is byte-for-byte identical to before this feature existed", async () => {
+    const tool = fakeSearchTool({ "retail store owners in Jaipur": [REAL_HIT] });
+    vi.mocked(runHermesCompletion)
+      .mockResolvedValueOnce(hermesOk({ queries: ["retail store owners in Jaipur"] }))
+      .mockResolvedValueOnce(hermesOk({ prospects: [candidate()] }))
+      .mockResolvedValueOnce(hermesOk({ accepted: [candidate()] }, "nousresearch/hermes-3-llama-3.1-70b"));
+
+    const result = await new HermesLeadDiscoveryAgent(tool).discover(criteria);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.prospects.map((p) => p.companyName)).toEqual(["Sharma Boutique"]);
+  });
+});

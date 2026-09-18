@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getDiscoveryProvider,
+  instagramHandleDedupeKey,
   prospectDedupeKey,
   type DiscoveredProspect,
   type DiscoveryProvider,
@@ -10,6 +11,7 @@ import {
 import { type AgentRunHandle, recordAgentAction } from "@/lib/ai/tracking/agent-runs";
 import type { BusinessContext } from "@/lib/business-context";
 import { discoverProspectContacts, mergeContactIntoRawData, type ContactDiscoveryOutcome } from "@/lib/discovery/contact-enrichment";
+import { parseProspectRawData } from "@/lib/prospects";
 import type { Database, Json } from "@/types/database.types";
 
 type Client = SupabaseClient<Database>;
@@ -179,7 +181,11 @@ async function persistDiscoveredProspect(
           evidenceSnippet: prospect.evidenceSnippet,
           sourceUrl: prospect.sourceUrl,
           searchQuery: prospect.searchQuery,
-          discoverySource: discoverySourceName,
+          // The real tool that found THIS candidate ("tavily" | "exa" |
+          // "instagram") — falls back to the batch-level provider name only
+          // for a candidate somehow missing it (shouldn't happen for a real
+          // discover() result; finalizeDiscoveryResult always sets it).
+          discoverySource: prospect.sourceProvider ?? discoverySourceName,
           discoveredAt: new Date().toISOString(),
         },
         contactOutcome
@@ -312,8 +318,29 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
     return { ok: false, code: "not_configured", message: "Lead discovery isn't connected to a data source yet.", batchesRun: 0, queriesFailed: [] };
   }
 
-  const { data: existingProspects } = await supabase.from("prospects").select("website, company_name").eq("organization_id", organizationId);
-  const seenKeys = new Set((existingProspects ?? []).map((p) => prospectDedupeKey({ website: p.website, companyName: p.company_name ?? "" })));
+  // raw_data is read alongside website/company_name purely to recover an
+  // already-known Instagram handle (contact.instagram, or a verified
+  // instagramProfile.username) for the cross-source dedup key below — an
+  // existing Tavily-found prospect whose contact info happens to include an
+  // Instagram link must be recognized as the same business a later
+  // Instagram-discovery batch finds natively, even when neither side has a
+  // website to key on (see instagramHandleDedupeKey's own doc comment).
+  const { data: existingProspects } = await supabase.from("prospects").select("website, company_name, raw_data").eq("organization_id", organizationId);
+  const seenKeys = new Set<string>();
+  for (const p of existingProspects ?? []) {
+    seenKeys.add(prospectDedupeKey({ website: p.website, companyName: p.company_name ?? "" }));
+    const existingRaw = parseProspectRawData(p.raw_data);
+    const igKey = instagramHandleDedupeKey(existingRaw.contact?.instagram?.value ?? existingRaw.instagramProfile?.username ?? null);
+    if (igKey) seenKeys.add(igKey);
+  }
+
+  /** Every identity key a candidate is known by — the primary website/name key, plus an Instagram-handle key when this candidate is itself Instagram-native (sourceUrl IS its profile URL in that case). A candidate is a duplicate if ANY of its keys was already seen. */
+  function dedupeKeysFor(prospect: DiscoveredProspect): string[] {
+    const keys = [prospectDedupeKey(prospect)];
+    const igKey = prospect.sourceProvider === "instagram" ? instagramHandleDedupeKey(prospect.sourceUrl) : null;
+    if (igKey) keys.push(igKey);
+    return keys;
+  }
 
   let leadSourceId: string | null = null;
   async function ensureLeadSourceId(): Promise<string | null> {
@@ -400,14 +427,14 @@ export async function runBatchedDiscovery(params: BatchDiscoveryParams): Promise
     allQueriesTried.push(...result.queriesRun, ...result.queriesFailed);
     prospectsFound += result.prospects.length;
 
-    const newInThisBatch = result.prospects.filter((p) => !seenKeys.has(prospectDedupeKey(p)));
+    const newInThisBatch = result.prospects.filter((p) => !dedupeKeysFor(p).some((key) => seenKeys.has(key)));
     duplicatesSkipped += result.prospects.length - newInThisBatch.length;
 
     let newLeadsThisBatch = 0;
     if (newInThisBatch.length > 0) {
       const sourceId = await ensureLeadSourceId();
       for (const prospect of newInThisBatch) {
-        seenKeys.add(prospectDedupeKey(prospect));
+        for (const key of dedupeKeysFor(prospect)) seenKeys.add(key);
         const persisted = await persistDiscoveredProspect(supabase, organizationId, campaignId, sourceId, provider.name, prospect, agentRun);
         if (!persisted) continue;
         newLeadIds.push(persisted.leadId);
