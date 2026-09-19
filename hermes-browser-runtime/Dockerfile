@@ -12,11 +12,15 @@ FROM node:22-bookworm-slim
 # fonts-liberation: without at least one real font package, Chromium renders
 # pages with missing glyphs, which can shift layouts enough to break the
 # selectors in lib/instagram.mjs.
+# gosu: lets the entrypoint fix a bind-mounted PROFILES_DIR's ownership as
+# root, then drop to the non-root `hermes` user for the actual process —
+# see docker-entrypoint.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     ca-certificates \
     curl \
     fonts-liberation \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
@@ -37,13 +41,16 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY . .
-RUN mkdir -p /data/profiles && chown -R hermes:hermes /data /app
-
-USER hermes
+RUN mkdir -p /data/profiles && chown -R hermes:hermes /data /app \
+    && chmod +x docker-entrypoint.sh
 
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:8787/health || exit 1
 
+# Starts as root (fixes PROFILES_DIR ownership for whatever host bind mount
+# is there — see docker-entrypoint.sh) and immediately drops to the
+# non-root `hermes` user via gosu for the actual worker process.
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["node", "worker.mjs"]
