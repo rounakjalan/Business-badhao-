@@ -83,9 +83,11 @@ export function SettingsSections({
   disconnectInstagramAction,
   instagramDiscoveryStatus,
   instagramDiscoveryRuntimeConfigured,
+  instagramDiscoveryOrganizationId,
   instagramDiscoveryNotice,
   requestInstagramDiscoveryConnectionAction,
   disconnectInstagramDiscoveryConnectionAction,
+  testInstagramDiscoveryConnectionAction,
 }: {
   error?: string;
   message?: string;
@@ -108,9 +110,11 @@ export function SettingsSections({
   disconnectInstagramAction: () => void;
   instagramDiscoveryStatus: InstagramDiscoveryStatus;
   instagramDiscoveryRuntimeConfigured: boolean;
+  instagramDiscoveryOrganizationId: string;
   instagramDiscoveryNotice: InstagramDiscoveryNotice;
   requestInstagramDiscoveryConnectionAction: () => void;
   disconnectInstagramDiscoveryConnectionAction: () => void;
+  testInstagramDiscoveryConnectionAction: () => void;
 }) {
   const [section, setSection] = useState<(typeof SECTIONS)[number]>(isSection(initialTab) ? initialTab : "Account");
   const [showWhatsAppForm, setShowWhatsAppForm] = useState(false);
@@ -455,8 +459,10 @@ export function SettingsSections({
               <InstagramDiscoveryCard
                 status={instagramDiscoveryStatus}
                 runtimeConfigured={instagramDiscoveryRuntimeConfigured}
+                organizationId={instagramDiscoveryOrganizationId}
                 requestConnectionAction={requestInstagramDiscoveryConnectionAction}
                 disconnectAction={disconnectInstagramDiscoveryConnectionAction}
+                testConnectionAction={testInstagramDiscoveryConnectionAction}
               />
             </div>
           </Section>
@@ -541,16 +547,54 @@ const STATUS_BADGE_CLASSES: Record<"neutral" | "amber" | "success" | "error", st
  * guaranteed to work right now" (see connection.ts's own isInstagramDiscoveryRuntimeConfigured
  * doc comment for why these are genuinely separate axes).
  */
+/** A one-line "reason" hint for a state that needs an operator's attention, distinct from status.lastError (the runtime's own raw message, shown separately above this). */
+const INSTAGRAM_DISCOVERY_STATE_HINT: Partial<Record<InstagramDiscoveryConnectionStatus, string>> = {
+  browser_unavailable: "Instagram may require manual verification (CAPTCHA/2FA), or the browser runtime hit an error. Complete any verification in the runtime's own browser window, then reconnect below.",
+  session_expired: "The saved Instagram session is no longer authenticated. Reconnect below to restore discovery.",
+  authentication_required: "Run the login command below on your Hermes browser runtime machine to finish connecting.",
+};
+
+/** A copyable exact command, so an operator never has to guess the right organization id — click, paste into the runtime machine's terminal. */
+function LoginCommandHint({ organizationId }: { organizationId: string }) {
+  const [copied, setCopied] = useState(false);
+  const command = `node login.mjs --org ${organizationId}`;
+
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <code className="rounded bg-bb-navy-3 px-2 py-1 text-xs text-bb-text">{command}</code>
+      <button
+        type="button"
+        className="text-xs text-bb-text-3 underline hover:text-bb-text"
+        onClick={() => {
+          navigator.clipboard
+            ?.writeText(command)
+            .then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2000);
+            })
+            .catch(() => {});
+        }}
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
 function InstagramDiscoveryCard({
   status,
   runtimeConfigured,
+  organizationId,
   requestConnectionAction,
   disconnectAction,
+  testConnectionAction,
 }: {
   status: InstagramDiscoveryStatus;
   runtimeConfigured: boolean;
+  organizationId: string;
   requestConnectionAction: () => void;
   disconnectAction: () => void;
+  testConnectionAction: () => void;
 }) {
   const hasConnection = status.status !== "not_connected";
   const canReconnect =
@@ -558,6 +602,9 @@ function InstagramDiscoveryCard({
     status.status === "session_expired" ||
     status.status === "browser_unavailable" ||
     status.status === "error";
+  const showLoginCommand =
+    runtimeConfigured &&
+    (status.status === "authentication_required" || status.status === "session_expired" || status.status === "browser_unavailable");
 
   return (
     <div className="bb-stagger-item rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
@@ -566,14 +613,25 @@ function InstagramDiscoveryCard({
           <div className="text-sm font-medium text-bb-text">Instagram Discovery (Browser)</div>
           <div className="text-xs text-bb-text-3">
             {(status.status === "connected" || status.status === "ready") && status.connectedUsername
-              ? `Connected as @${status.connectedUsername}`
+              ? `Connected as @${status.connectedUsername} — Discovery access: Ready`
               : "Discover new prospects on Instagram via a dedicated authenticated browser account — separate from the Instagram connection above."}
           </div>
           {status.lastError ? <div className="mt-1 text-xs text-bb-rose">{status.lastError}</div> : null}
+          {INSTAGRAM_DISCOVERY_STATE_HINT[status.status] ? (
+            <div className="mt-1 text-xs text-bb-text-3">{INSTAGRAM_DISCOVERY_STATE_HINT[status.status]}</div>
+          ) : null}
+          {showLoginCommand ? <LoginCommandHint organizationId={organizationId} /> : null}
         </div>
         <span className={`rounded-full border px-2 py-0.5 text-xs ${STATUS_BADGE_CLASSES[INSTAGRAM_DISCOVERY_STATUS_VARIANT[status.status]]}`}>
           {INSTAGRAM_DISCOVERY_STATUS_LABEL[status.status]}
         </span>
+        {hasConnection && runtimeConfigured ? (
+          <form action={testConnectionAction}>
+            <DashButton type="submit" variant="outline">
+              Test Connection
+            </DashButton>
+          </form>
+        ) : null}
         {hasConnection ? (
           <form action={disconnectAction}>
             <DashButton type="submit" variant="outline">

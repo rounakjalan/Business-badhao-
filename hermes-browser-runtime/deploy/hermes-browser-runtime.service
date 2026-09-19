@@ -1,0 +1,37 @@
+# systemd unit for running worker.mjs as a persistent, auto-restarting,
+# auto-starting-on-boot service on a bare-metal/VM Linux host (the
+# alternative to Docker — use whichever you already operate).
+#
+# Install:
+#   sudo cp deploy/hermes-browser-runtime.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hermes-browser-runtime
+#
+# Adjust User, WorkingDirectory and the node path below to your host. Create
+# /opt/hermes-browser-runtime/.env from .env.example first (see README.md).
+#
+# Logs: journalctl -u hermes-browser-runtime -f
+[Unit]
+Description=Hermes Browser Runtime (Instagram discovery worker for Business Badhao)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+WorkingDirectory=/opt/hermes-browser-runtime
+EnvironmentFile=/opt/hermes-browser-runtime/.env
+ExecStart=/usr/bin/node /opt/hermes-browser-runtime/worker.mjs
+# Machine restart -> systemd starts this unit automatically (After=network-online.target
+# plus `enable`, below). Worker crash -> systemd restarts it after 5s.
+Restart=always
+RestartSec=5
+# The worker's own graceful-shutdown handler (SIGTERM) gets this long to
+# finish an in-flight job before systemd escalates to SIGKILL — keep this
+# at or above WORKER_SHUTDOWN_GRACE_MS in your .env.
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

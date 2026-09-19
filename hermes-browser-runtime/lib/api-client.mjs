@@ -1,15 +1,16 @@
 /**
- * Thin client for the three server-to-server endpoints this runtime calls on
+ * Thin client for the server-to-server endpoints this runtime calls on
  * Business Badhao's own deployment — all bearer-secret authenticated with
  * the same INSTAGRAM_DISCOVERY_RUNTIME_TOKEN the deployment itself is
  * configured with. This file makes no assumption about what Business Badhao
- * does with these calls; it only knows the three real, already-implemented
- * routes:
+ * does with these calls; it only knows the real, already-implemented routes:
  *   - POST /api/instagram-discovery/session-report  (login.mjs, and worker.mjs
  *     when it discovers a saved session no longer works)
  *   - POST /api/instagram-discovery/jobs/claim       (worker.mjs's poll loop)
  *   - POST /api/instagram-discovery/jobs/complete    (worker.mjs, after a real
- *     search)
+ *     search or verification)
+ *   - GET  /api/instagram-discovery/jobs/status      (worker.mjs's own health
+ *     endpoint, for a safe-to-expose queue-depth summary)
  */
 
 function baseUrl() {
@@ -24,11 +25,11 @@ function token() {
   return value;
 }
 
-async function post(path, body) {
+async function request(method, path, body) {
   const response = await fetch(`${baseUrl()}${path}`, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
-    body: JSON.stringify(body ?? {}),
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const data = await response.json().catch(() => null);
   return { status: response.status, data };
@@ -36,15 +37,20 @@ async function post(path, body) {
 
 /** organizationId (required), status, and optionally username/profileRef/error — see connection.ts's InstagramDiscoveryRuntimeReport for the exact accepted shape. */
 export function reportSession(report) {
-  return post("/api/instagram-discovery/session-report", report);
+  return request("POST", "/api/instagram-discovery/session-report", report);
 }
 
 /** Polls for the next pending job. `data.job` is null when there is nothing to do right now — not an error. */
 export function claimJob() {
-  return post("/api/instagram-discovery/jobs/claim", {});
+  return request("POST", "/api/instagram-discovery/jobs/claim", {});
 }
 
 /** outcome is either {status:"completed", candidates:[...]} or {status:"failed", error:"..."}. */
 export function completeJob(jobId, outcome) {
-  return post("/api/instagram-discovery/jobs/complete", { jobId, ...outcome });
+  return request("POST", "/api/instagram-discovery/jobs/complete", { jobId, ...outcome });
+}
+
+/** A safe, counts-only queue summary — used by this runtime's own /health endpoint, not required for normal job processing. */
+export function getQueueStatus() {
+  return request("GET", "/api/instagram-discovery/jobs/status");
 }

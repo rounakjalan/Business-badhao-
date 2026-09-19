@@ -52,12 +52,13 @@ describe("POST /api/instagram-discovery/jobs/claim", () => {
     expect(body).toEqual({ ok: true, job: null });
   });
 
-  it("returns a real claimed job's fields, scoped to its own organization", async () => {
+  it("returns a real claimed search job's fields, scoped to its own organization", async () => {
     process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "real-runtime-secret";
     vi.mocked(isInstagramDiscoveryRuntimeConfigured).mockReturnValue(true);
     vi.mocked(claimNextInstagramDiscoveryJob).mockResolvedValue({
       id: "job-1",
       organizationId: "org-1",
+      type: "search",
       query: "retail shops Jaipur",
       browserProfileRef: "org-1",
     });
@@ -66,7 +67,27 @@ describe("POST /api/instagram-discovery/jobs/claim", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toEqual({ ok: true, job: { id: "job-1", organizationId: "org-1", query: "retail shops Jaipur", browserProfileRef: "org-1" } });
+    expect(body).toEqual({
+      ok: true,
+      job: { id: "job-1", organizationId: "org-1", type: "search", query: "retail shops Jaipur", browserProfileRef: "org-1" },
+    });
+  });
+
+  it("returns a real claimed verify job with no query field", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "real-runtime-secret";
+    vi.mocked(isInstagramDiscoveryRuntimeConfigured).mockReturnValue(true);
+    vi.mocked(claimNextInstagramDiscoveryJob).mockResolvedValue({
+      id: "job-2",
+      organizationId: "org-1",
+      type: "verify",
+      browserProfileRef: "org-1",
+    });
+
+    const response = await POST(claimRequest({ authorization: "Bearer real-runtime-secret" }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ ok: true, job: { id: "job-2", organizationId: "org-1", type: "verify", browserProfileRef: "org-1" } });
   });
 
   it("never echoes the runtime token back in any response", async () => {

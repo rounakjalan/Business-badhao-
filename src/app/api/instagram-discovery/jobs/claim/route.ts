@@ -37,6 +37,9 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     ok: true,
-    job: { id: job.id, organizationId: job.organizationId, query: job.query, browserProfileRef: job.browserProfileRef },
+    job:
+      job.type === "search"
+        ? { id: job.id, organizationId: job.organizationId, type: "search", query: job.query, browserProfileRef: job.browserProfileRef }
+        : { id: job.id, organizationId: job.organizationId, type: "verify", browserProfileRef: job.browserProfileRef },
   });
 }

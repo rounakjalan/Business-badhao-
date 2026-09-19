@@ -1,0 +1,29 @@
+# Runs the persistent worker as a long-lived container with automatic
+# restart. `login.mjs` (the one-time, interactive, visible-browser step) is
+# NOT run through this compose file — it needs a real, visible browser
+# window, which a headless container can't give you without adding a whole
+# VNC/X11 stack this task doesn't call for. Run `node login.mjs --org <id>`
+# directly on this same host (see README.md) — it uses the same
+# ./profiles directory this container mounts below, so a profile it creates
+# is immediately visible to the worker.
+services:
+  worker:
+    build: .
+    image: hermes-browser-runtime:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Only needed if you want to reach /health from outside this host.
+      - "8787:8787"
+    volumes:
+      # The organization-isolated Chromium profiles — MUST be a persistent
+      # volume/bind mount. Losing this directory means every connected
+      # organization has to log in again.
+      - ./profiles:/data/profiles
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

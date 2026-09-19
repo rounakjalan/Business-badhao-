@@ -5,6 +5,7 @@ import {
   disconnectInstagramDiscoveryConnectionAction,
   disconnectWhatsAppAction,
   requestInstagramDiscoveryConnectionAction,
+  testInstagramDiscoveryConnectionAction,
   updateOrganization,
   updateProfile,
   updateWhatsAppTemplateAction,
@@ -110,9 +111,11 @@ export default async function SettingsPage({
       disconnectInstagramAction={disconnectInstagramAction}
       instagramDiscoveryStatus={instagramDiscoveryStatus}
       instagramDiscoveryRuntimeConfigured={instagramDiscoveryRuntimeConfigured}
+      instagramDiscoveryOrganizationId={currentOrg.organizationId}
       instagramDiscoveryNotice={instagramDiscovery ? { status: instagramDiscovery, detail: instagramDiscoveryMessage } : null}
       requestInstagramDiscoveryConnectionAction={requestInstagramDiscoveryConnectionAction}
       disconnectInstagramDiscoveryConnectionAction={disconnectInstagramDiscoveryConnectionAction}
+      testInstagramDiscoveryConnectionAction={testInstagramDiscoveryConnectionAction}
     />
   );
 }

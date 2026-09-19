@@ -13,17 +13,28 @@ import { getUsableInstagramDiscoveryProfileRef } from "@/lib/instagram-discovery
  * Business Badhao cannot call the runtime directly (it isn't a service this
  * deployment has an address for, and Vercel cannot receive an inbound
  * connection to a serverless invocation that's still running). Instead:
- *   1. createInstagramDiscoveryJob writes a `pending` row.
- *   2. The runtime polls claimInstagramDiscoveryJob (its own bearer-secret
+ *   1. createInstagramDiscoveryJob (a real search) or
+ *      createInstagramDiscoveryVerificationJob (Settings' "Test Connection")
+ *      writes a `pending` row.
+ *   2. The runtime polls claimNextInstagramDiscoveryJob (its own bearer-secret
  *      authenticated endpoint, api/instagram-discovery/jobs/claim) for work.
- *   3. The runtime performs one real Instagram search using this
- *      organization's own authenticated Chromium profile and calls
- *      completeInstagramDiscoveryJob's endpoint (jobs/complete) with real,
- *      structured results (or a real failure).
- *   4. pollInstagramDiscoveryJobResult (called from InstagramDiscoveryTool,
- *      the DiscoverySearchTool implementation) reads this same row back,
- *      bounded to a fixed timeout — if the runtime never answers in time,
- *      this honestly reports a failure/timeout, never a fabricated result.
+ *   3. The runtime performs the real work (a search, or just re-checking its
+ *      saved session) using this organization's own authenticated Chromium
+ *      profile and calls completeInstagramDiscoveryJob's endpoint
+ *      (jobs/complete) with real, structured results (or a real failure).
+ *   4. pollInstagramDiscoveryJobResult (called from InstagramDiscoveryTool
+ *      and from the Test Connection server action) reads this same row
+ *      back, bounded to a fixed timeout — if the runtime never answers in
+ *      time, this honestly reports a failure/timeout, never a fabricated
+ *      result.
+ *
+ * Two job types share this one table (never a second, parallel job schema —
+ * see this task's own "reuse existing tables" instruction):
+ *   - "search": a real discovery query, exactly as before.
+ *   - "verify": Settings' "Test Connection" button — no search, just a real
+ *     re-check that the saved session is still authenticated, used to give
+ *     an operator an on-demand answer instead of waiting for the next
+ *     scheduled discovery run to (maybe) reveal a dead session.
  */
 
 export type InstagramDiscoveryCandidate = {
@@ -35,11 +46,13 @@ export type InstagramDiscoveryCandidate = {
   externalUrl?: string | null;
 };
 
+type JobCriteria = { type: "search"; query: string } | { type: "verify" };
+
 type JobRow = {
   id: string;
   organization_id: string;
   status: string;
-  criteria: { query: string };
+  criteria: JobCriteria;
   candidates: InstagramDiscoveryCandidate[] | null;
   error: string | null;
 };
@@ -47,13 +60,7 @@ type JobRow = {
 /** How long a dispatched job stays claimable before it's considered abandoned by whatever request created it. Kept well inside a single Vercel invocation's own budget (see module doc comment) since nothing waits longer than that anyway. */
 const JOB_TTL_MS = 120_000;
 
-/**
- * Called from InstagramDiscoveryTool.search() — one query in, one job row
- * created. Returns null (never throws) when automation isn't configured in
- * this deployment, the same "degrade to off" convention as every other
- * admin-client-backed function in this codebase.
- */
-export async function createInstagramDiscoveryJob(organizationId: string, query: string): Promise<{ jobId: string } | null> {
+async function insertJob(organizationId: string, criteria: JobCriteria): Promise<{ jobId: string } | null> {
   const admin = createAdminClient();
   if (!admin) return null;
 
@@ -61,7 +68,7 @@ export async function createInstagramDiscoveryJob(organizationId: string, query:
     .from("instagram_discovery_jobs")
     .insert({
       organization_id: organizationId,
-      criteria: { query },
+      criteria,
       expires_at: new Date(Date.now() + JOB_TTL_MS).toISOString(),
     })
     .select("id")
@@ -71,13 +78,48 @@ export async function createInstagramDiscoveryJob(organizationId: string, query:
   return { jobId: data.id };
 }
 
-export type ClaimedInstagramDiscoveryJob = {
-  id: string;
-  organizationId: string;
-  query: string;
-  /** The dedicated local Chromium profile this job's org has authenticated — never a credential itself, just the runtime's own name for its profile directory. Null only if the connection isn't actually usable, which claim excludes below. */
-  browserProfileRef: string | null;
-};
+/**
+ * Called from InstagramDiscoveryTool.search() — one query in, one job row
+ * created. Returns null (never throws) when automation isn't configured in
+ * this deployment, the same "degrade to off" convention as every other
+ * admin-client-backed function in this codebase.
+ */
+export function createInstagramDiscoveryJob(organizationId: string, query: string): Promise<{ jobId: string } | null> {
+  return insertJob(organizationId, { type: "search", query });
+}
+
+/** Called from Settings' "Test Connection" action — a real job the runtime answers by re-checking its saved session, not by searching anything. */
+export function createInstagramDiscoveryVerificationJob(organizationId: string): Promise<{ jobId: string } | null> {
+  return insertJob(organizationId, { type: "verify" });
+}
+
+export type ClaimedInstagramDiscoveryJob =
+  | { id: string; organizationId: string; type: "search"; query: string; browserProfileRef: string }
+  | { id: string; organizationId: string; type: "verify"; browserProfileRef: string };
+
+/**
+ * Marks any `pending`/`claimed` job whose expires_at has already passed as
+ * `expired` — the real fix for "jobs cannot remain permanently stuck": a
+ * worker that crashes mid-job leaves its claim behind forever otherwise.
+ * Uses the job lifecycle's EXISTING `expired` status (see this table's own
+ * migration) rather than inventing a new one. Called at the start of every
+ * claim attempt so the queue never accumulates dead rows; also safe to call
+ * on its own (e.g. from a health check) since it only ever moves already-
+ * timed-out rows, never a live one.
+ */
+export async function reclaimStaleInstagramDiscoveryJobs(): Promise<number> {
+  const admin = createAdminClient();
+  if (!admin) return 0;
+
+  const { data } = await admin
+    .from("instagram_discovery_jobs")
+    .update({ status: "expired" })
+    .in("status", ["pending", "claimed"])
+    .lt("expires_at", new Date().toISOString())
+    .select("id");
+
+  return data?.length ?? 0;
+}
 
 /**
  * The runtime's own poll loop calls this (via jobs/claim's API route) to get
@@ -85,11 +127,16 @@ export type ClaimedInstagramDiscoveryJob = {
  * whose connection isn't actually reporting usable ("connected"/"ready") —
  * getUsableInstagramDiscoveryProfileRef below re-checks the connection at
  * claim time (not just at job-creation time, since a session can expire in
- * between).
+ * between). The organization a claimed job belongs to always comes from this
+ * table's own row, never from anything the calling runtime supplies — the
+ * claim endpoint takes no organization-scoped input at all (see its own
+ * route file), so there is nothing here for an untrusted caller to spoof.
  */
 export async function claimNextInstagramDiscoveryJob(): Promise<ClaimedInstagramDiscoveryJob | null> {
   const admin = createAdminClient();
   if (!admin) return null;
+
+  await reclaimStaleInstagramDiscoveryJobs();
 
   const { data: pending } = await admin
     .from("instagram_discovery_jobs")
@@ -115,8 +162,10 @@ export async function claimNextInstagramDiscoveryJob(): Promise<ClaimedInstagram
 
     if (!claimed) continue;
 
-    const criteria = claimed.criteria as { query: string };
-    return { id: claimed.id, organizationId: claimed.organization_id, query: criteria.query, browserProfileRef };
+    const criteria = claimed.criteria as JobCriteria;
+    return criteria.type === "search"
+      ? { id: claimed.id, organizationId: claimed.organization_id, type: "search", query: criteria.query, browserProfileRef }
+      : { id: claimed.id, organizationId: claimed.organization_id, type: "verify", browserProfileRef };
   }
 
   return null;
@@ -155,10 +204,11 @@ export async function completeInstagramDiscoveryJob(input: CompleteInstagramDisc
 }
 
 /**
- * Bounded polling read for InstagramDiscoveryTool — never blocks longer than
- * timeoutMs regardless of whether the runtime ever answers. A timeout is
- * reported exactly like any other real failure (ok:false); this never
- * fabricates candidates for a job nobody actually completed.
+ * Bounded polling read for InstagramDiscoveryTool and the Test Connection
+ * action — never blocks longer than timeoutMs regardless of whether the
+ * runtime ever answers. A timeout is reported exactly like any other real
+ * failure (ok:false); this never fabricates candidates for a job nobody
+ * actually completed.
  */
 export async function pollInstagramDiscoveryJobResult(
   jobId: string,
@@ -184,4 +234,43 @@ export async function pollInstagramDiscoveryJobResult(
   }
 
   return { ok: false, message: "The Instagram discovery runtime did not respond within the allotted time." };
+}
+
+export type InstagramDiscoveryQueueStats = {
+  pending: number;
+  claimed: number;
+  completedLast24h: number;
+  failedLast24h: number;
+  expiredLast24h: number;
+};
+
+/**
+ * A safe-for-monitoring aggregate — counts only, never a job's own criteria
+ * or candidates — for the runtime's own /health endpoint and any future
+ * operator-facing dashboard. `pending`/`claimed` are current-state counts
+ * (unbounded by time: a stuck job from hours ago is exactly what this needs
+ * to surface); the completed/failed/expired counts are bounded to the last
+ * 24h so this never scans the table's entire history as it grows.
+ */
+export async function getInstagramDiscoveryQueueStats(): Promise<InstagramDiscoveryQueueStats | null> {
+  const admin = createAdminClient();
+  if (!admin) return null;
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const [{ data: active }, { data: recent }] = await Promise.all([
+    admin.from("instagram_discovery_jobs").select("status").in("status", ["pending", "claimed"]),
+    admin.from("instagram_discovery_jobs").select("status").gte("created_at", since).in("status", ["completed", "failed", "expired"]),
+  ]);
+
+  const activeRows = active ?? [];
+  const recentRows = recent ?? [];
+
+  return {
+    pending: activeRows.filter((r) => r.status === "pending").length,
+    claimed: activeRows.filter((r) => r.status === "claimed").length,
+    completedLast24h: recentRows.filter((r) => r.status === "completed").length,
+    failedLast24h: recentRows.filter((r) => r.status === "failed").length,
+    expiredLast24h: recentRows.filter((r) => r.status === "expired").length,
+  };
 }

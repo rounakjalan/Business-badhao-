@@ -4,7 +4,13 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { disconnectAccount } from "@/lib/gmail/tokens";
 import { disconnectAccount as disconnectInstagramAccount } from "@/lib/instagram/tokens";
-import { disconnectInstagramDiscoveryConnection, requestInstagramDiscoveryConnection } from "@/lib/instagram-discovery/connection";
+import {
+  disconnectInstagramDiscoveryConnection,
+  getInstagramDiscoveryConnectionStatus,
+  isInstagramDiscoveryRuntimeConfigured,
+  requestInstagramDiscoveryConnection,
+} from "@/lib/instagram-discovery/connection";
+import { createInstagramDiscoveryVerificationJob, pollInstagramDiscoveryJobResult } from "@/lib/instagram-discovery/jobs";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { disconnectWhatsAppAccount, saveWhatsAppAccount, updateWhatsAppTemplate } from "@/lib/whatsapp/tokens";
@@ -118,6 +124,69 @@ export async function disconnectInstagramDiscoveryConnectionAction() {
 
   revalidatePath("/settings");
   redirect("/settings?tab=Integrations&instagramDiscovery=disconnected");
+}
+
+/**
+ * How this deployment's runtime-execution boundary bounds a live check
+ * before giving up honestly, rather than leaving the operator staring at a
+ * spinner indefinitely. Comfortably inside a Server Action's own execution
+ * budget on this platform, and generous relative to the runtime's own
+ * default poll interval (WORKER_POLL_INTERVAL_MS, 4s) — a running worker
+ * has several chances to claim and answer within this window.
+ */
+const TEST_CONNECTION_TIMEOUT_MS = 20_000;
+
+/**
+ * Behind Settings' "Test Connection" — an on-demand real check of whether an
+ * organization's saved Instagram session is still usable, instead of
+ * silently waiting for the next scheduled discovery run to (maybe) reveal a
+ * dead session. Reuses the EXISTING job queue (instagram_discovery_jobs) and
+ * polling helper (pollInstagramDiscoveryJobResult) — a "verify" job is not a
+ * second parallel mechanism, just the same real dispatch/claim/complete
+ * contract a search job already uses, with no query to search. The
+ * connection's own status (not the job's own completion) is what's reported
+ * back, since that's what the runtime actually updates via session-report
+ * while processing the job — see hermes-browser-runtime/worker.mjs.
+ */
+export async function testInstagramDiscoveryConnectionAction() {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  if (!isInstagramDiscoveryRuntimeConfigured()) {
+    redirect(
+      `/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent(
+        "No Instagram discovery browser runtime is configured for this deployment yet."
+      )}`
+    );
+  }
+
+  const job = await createInstagramDiscoveryVerificationJob(currentOrg.organizationId);
+  if (!job) {
+    redirect(
+      `/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent("Could not start a connection test. Please try again.")}`
+    );
+  }
+
+  const polled = await pollInstagramDiscoveryJobResult(job.jobId, TEST_CONNECTION_TIMEOUT_MS);
+
+  revalidatePath("/settings");
+
+  if (!polled.ok) {
+    redirect(
+      `/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent(
+        "No response from the Instagram browser runtime. Confirm worker.mjs is running and polling this deployment."
+      )}`
+    );
+  }
+
+  const status = await getInstagramDiscoveryConnectionStatus(currentOrg.organizationId);
+
+  const message =
+    status.status === "connected" || status.status === "ready"
+      ? `Connection verified — session is authenticated${status.connectedUsername ? ` as @${status.connectedUsername}` : ""}.`
+      : (status.lastError ?? "The runtime reported the session is not currently usable.");
+
+  redirect(`/settings?tab=Integrations&instagramDiscovery=tested&instagramDiscoveryMessage=${encodeURIComponent(message)}`);
 }
 
 /**
