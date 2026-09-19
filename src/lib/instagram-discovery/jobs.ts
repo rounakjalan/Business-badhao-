@@ -81,11 +81,11 @@ export type ClaimedInstagramDiscoveryJob = {
 
 /**
  * The runtime's own poll loop calls this (via jobs/claim's API route) to get
- * the oldest unclaimed, unexpired job. Real work only — never invents a job
- * for an organization whose connection isn't actually reporting usable
- * ("connected"/"ready"), which excludeConnectionCheck below enforces by
- * re-checking the connection at claim time (not just at job-creation time,
- * since a session can expire in between).
+ * the oldest unclaimed, unexpired job. Never claims a job for an organization
+ * whose connection isn't actually reporting usable ("connected"/"ready") —
+ * getUsableInstagramDiscoveryProfileRef below re-checks the connection at
+ * claim time (not just at job-creation time, since a session can expire in
+ * between).
  */
 export async function claimNextInstagramDiscoveryJob(): Promise<ClaimedInstagramDiscoveryJob | null> {
   const admin = createAdminClient();
