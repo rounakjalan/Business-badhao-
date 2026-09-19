@@ -6,6 +6,8 @@ import { runHermesCompletion, type HermesResult } from "@/lib/ai/hermes/hermes-s
 import { DEFAULT_OPENROUTER_MODEL } from "@/lib/ai/providers/openrouter";
 import { parseAiJson } from "@/lib/ai/schema";
 import type { BusinessContext } from "@/lib/business-context";
+import { getInstagramDiscoveryConnectionStatus } from "@/lib/instagram-discovery/connection";
+import { InstagramDiscoveryTool } from "@/lib/instagram-discovery/instagram-discovery-tool";
 import type { Database } from "@/types/database.types";
 
 /**
@@ -1413,31 +1415,30 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider, DiscoverySear
     // (hermes-lead-discovery-agent.ts) for why this class no longer contains
     // the plan -> search -> extract -> review -> validate sequence itself.
     //
-    // Instagram (2026-09 investigation): HermesLeadDiscoveryAgent's
-    // constructor accepts an optional array of additional DiscoverySearchTool
-    // instances specifically so a genuine second discovery channel could run
-    // alongside Tavily/Exa here, additively, the moment one exists — that
-    // capability is real and covered by tests using controlled fake tools.
-    // No Instagram tool is constructed or passed here, because there is
-    // still no real execution path for it: this repository's entire
-    // dependency tree (package.json) contains no browser-automation runtime,
-    // "Hermes" throughout this codebase names LLM-routing/orchestration
-    // functions only (runHermesCompletion, the Independent Hermes Reviewer)
-    // and has no browser-control capability of its own, and neither
-    // Playwright nor any production TinyFish dependency may be introduced.
-    //
-    // What DOES now exist (see src/lib/instagram-discovery/connection.ts) is
-    // the organization-scoped CONNECTION foundation: a real, tested,
-    // RLS-isolated record of whether an org has requested an Instagram
-    // discovery connection, and a real authenticated webhook
-    // (api/instagram-discovery/session-report) an operator's own external
-    // browser runtime would report real session state back through. Once
-    // such a runtime exists and a specific organization's connection reaches
-    // getInstagramDiscoveryConnectionStatus(...).status === "connected", a
-    // genuine DiscoverySearchTool implementation belongs here, gated on
-    // exactly that check — never constructed speculatively, and never for an
-    // organization whose own connection isn't actually reporting success.
-    return new HermesLeadDiscoveryAgent(this).discover(criteria, trackingClient);
+    // Instagram (2026-09): a real, additive second DiscoverySearchTool — see
+    // src/lib/instagram-discovery/instagram-discovery-tool.ts — is now wired
+    // in here, but ONLY for an organization whose own Instagram discovery
+    // connection is genuinely reporting "connected" or "ready" right now.
+    // This is never constructed speculatively: a deployment with no runtime
+    // configured, or an organization that never connected, or one whose
+    // session has expired, runs exactly as before — Tavily/Exa only. The
+    // tool itself never opens a browser or talks to Instagram from inside
+    // this Vercel deployment; it dispatches one real job per query to
+    // hermes-browser-runtime (a separate, always-available process this
+    // application does not host — see that package's own README) and waits,
+    // bounded, for a real answer. Instagram runs ALONGSIDE Tavily for every
+    // query (additionalSearchTools, below) — never as a fallback gated on
+    // Tavily failing, and its own absence/timeout never fails a query that
+    // Tavily/Exa already answered (see HermesLeadDiscoveryAgent.runSearchProviders).
+    const additionalSearchTools: DiscoverySearchTool[] = [];
+    if (process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN) {
+      const connection = await getInstagramDiscoveryConnectionStatus(criteria.organizationId);
+      if (connection.status === "connected" || connection.status === "ready") {
+        additionalSearchTools.push(new InstagramDiscoveryTool(criteria.organizationId));
+      }
+    }
+
+    return new HermesLeadDiscoveryAgent(this, additionalSearchTools).discover(criteria, trackingClient);
   }
 }
 

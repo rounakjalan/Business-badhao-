@@ -65,6 +65,20 @@ describe("POST /api/instagram-discovery/session-report", () => {
     );
   });
 
+  it("accepts the runtime's 'ready' and 'browser_unavailable' states — not just the original four", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "real-runtime-secret";
+    vi.mocked(isInstagramDiscoveryRuntimeConfigured).mockReturnValue(true);
+    vi.mocked(applyInstagramDiscoveryRuntimeReport).mockResolvedValue({ ok: true });
+
+    const ready = await POST(postRequest({ organizationId: "org-1", status: "ready" }, { authorization: "Bearer real-runtime-secret" }));
+    expect(ready.status).toBe(200);
+
+    const browserUnavailable = await POST(
+      postRequest({ organizationId: "org-1", status: "browser_unavailable", error: "Chromium crashed" }, { authorization: "Bearer real-runtime-secret" })
+    );
+    expect(browserUnavailable.status).toBe(200);
+  });
+
   it("rejects a malformed body (invalid status enum) without calling apply", async () => {
     process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "real-runtime-secret";
     vi.mocked(isInstagramDiscoveryRuntimeConfigured).mockReturnValue(true);

@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
 
 const ReportSchema = z.object({
   organizationId: z.string().min(1),
-  status: z.enum(["connecting", "connected", "session_expired", "error"]),
+  status: z.enum(["authentication_required", "connecting", "connected", "session_expired", "browser_unavailable", "ready", "error"]),
   username: z.string().min(1).nullable().optional(),
   profileRef: z.string().min(1).nullable().optional(),
   error: z.string().min(1).nullable().optional(),

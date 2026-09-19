@@ -20,7 +20,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * functions.
  */
 
-export type InstagramDiscoveryConnectionStatus = "not_connected" | "authentication_required" | "connecting" | "connected" | "session_expired" | "error";
+export type InstagramDiscoveryConnectionStatus =
+  | "not_connected"
+  | "authentication_required"
+  | "connecting"
+  | "connected"
+  | "session_expired"
+  | "browser_unavailable"
+  | "ready"
+  | "error";
 
 export type InstagramDiscoveryConnection = {
   status: InstagramDiscoveryConnectionStatus;
@@ -113,7 +121,10 @@ export async function disconnectInstagramDiscoveryConnection(organizationId: str
 
 export type InstagramDiscoveryRuntimeReport = {
   organizationId: string;
-  status: Extract<InstagramDiscoveryConnectionStatus, "connecting" | "connected" | "session_expired" | "error">;
+  status: Extract<
+    InstagramDiscoveryConnectionStatus,
+    "authentication_required" | "connecting" | "connected" | "session_expired" | "browser_unavailable" | "ready" | "error"
+  >;
   username?: string | null;
   profileRef?: string | null;
   error?: string | null;
@@ -147,7 +158,7 @@ export async function applyInstagramDiscoveryRuntimeReport(report: InstagramDisc
       connected_username: report.username ?? null,
       browser_profile_ref: report.profileRef ?? null,
       last_error: report.error ?? null,
-      last_verified_at: report.status === "connected" ? new Date().toISOString() : null,
+      last_verified_at: report.status === "connected" || report.status === "ready" ? new Date().toISOString() : null,
     })
     .eq("organization_id", report.organizationId)
     .select("id")
@@ -156,4 +167,28 @@ export async function applyInstagramDiscoveryRuntimeReport(report: InstagramDisc
   if (error) return { ok: false, code: "db_error", message: error.message };
   if (!data) return { ok: false, code: "no_pending_connection", message: "No Instagram discovery connection was requested for this organization." };
   return { ok: true };
+}
+
+/**
+ * Internal use only (src/lib/instagram-discovery/jobs.ts, when dispatching a
+ * discovery job to the runtime) — never exposed through
+ * getInstagramDiscoveryConnectionStatus or any API response reachable from a
+ * browser. Returns the organization's own browser_profile_ref, but only when
+ * its connection is actually usable for discovery ("connected" or "ready");
+ * otherwise null, so a job is never dispatched against a profile the runtime
+ * hasn't confirmed is authenticated.
+ */
+export async function getUsableInstagramDiscoveryProfileRef(organizationId: string): Promise<string | null> {
+  const admin = createAdminClient();
+  if (!admin) return null;
+
+  const { data } = await admin
+    .from("instagram_discovery_connections")
+    .select("status, browser_profile_ref")
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+
+  if (!data) return null;
+  if (data.status !== "connected" && data.status !== "ready") return null;
+  return data.browser_profile_ref;
 }

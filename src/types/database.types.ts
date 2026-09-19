@@ -720,6 +720,45 @@ export interface Database {
         };
         Relationships: [];
       };
+      instagram_discovery_jobs: {
+        Row: {
+          id: string;
+          organization_id: string;
+          status: string;
+          criteria: Json;
+          candidates: Json | null;
+          error: string | null;
+          created_at: string;
+          claimed_at: string | null;
+          completed_at: string | null;
+          expires_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          status?: string;
+          criteria: Json;
+          candidates?: Json | null;
+          error?: string | null;
+          created_at?: string;
+          claimed_at?: string | null;
+          completed_at?: string | null;
+          expires_at: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          status?: string;
+          criteria?: Json;
+          candidates?: Json | null;
+          error?: string | null;
+          created_at?: string;
+          claimed_at?: string | null;
+          completed_at?: string | null;
+          expires_at?: string;
+        };
+        Relationships: [];
+      };
       whatsapp_accounts: {
         Row: {
           id: string;

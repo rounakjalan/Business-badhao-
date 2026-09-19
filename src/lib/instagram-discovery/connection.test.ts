@@ -13,6 +13,7 @@ import {
   applyInstagramDiscoveryRuntimeReport,
   disconnectInstagramDiscoveryConnection,
   getInstagramDiscoveryConnectionStatus,
+  getUsableInstagramDiscoveryProfileRef,
   isInstagramDiscoveryRuntimeConfigured,
   requestInstagramDiscoveryConnection,
 } from "@/lib/instagram-discovery/connection";
@@ -234,5 +235,65 @@ describe("applyInstagramDiscoveryRuntimeReport", () => {
     expect(row.status).toBe("error");
     expect(row.last_error).toBe("Instagram presented a login challenge the runtime could not complete");
     expect(row.connected_username).toBeNull();
+  });
+
+  it("accepts the runtime's 'ready' state (an already-authenticated profile, not a fresh login) and stamps last_verified_at", async () => {
+    const admin = makeFakeAdmin([{ organization_id: "org-1", status: "connected", connected_username: "biz_official" }]);
+    vi.mocked(createAdminClient).mockReturnValue(admin);
+
+    const result = await applyInstagramDiscoveryRuntimeReport({ organizationId: "org-1", status: "ready", username: "biz_official", profileRef: "org-1" });
+
+    expect(result.ok).toBe(true);
+    const row = admin.__rows()[0];
+    expect(row.status).toBe("ready");
+    expect(row.last_verified_at).toBeTruthy();
+  });
+
+  it("records a real runtime infrastructure failure ('browser_unavailable') distinctly from an Instagram-side error", async () => {
+    const admin = makeFakeAdmin([{ organization_id: "org-1", status: "connected" }]);
+    vi.mocked(createAdminClient).mockReturnValue(admin);
+
+    const result = await applyInstagramDiscoveryRuntimeReport({ organizationId: "org-1", status: "browser_unavailable", error: "Chromium binary crashed on launch" });
+
+    expect(result.ok).toBe(true);
+    expect(admin.__rows()[0]).toMatchObject({ status: "browser_unavailable", last_error: "Chromium binary crashed on launch" });
+  });
+});
+
+describe("getUsableInstagramDiscoveryProfileRef", () => {
+  afterEach(() => vi.resetAllMocks());
+
+  it("returns the real profile ref for a connection that is actually usable ('connected' or 'ready')", async () => {
+    const admin = makeFakeAdmin([
+      { organization_id: "org-1", status: "connected", browser_profile_ref: "org-1" },
+      { organization_id: "org-2", status: "ready", browser_profile_ref: "org-2" },
+    ]);
+    vi.mocked(createAdminClient).mockReturnValue(admin);
+
+    expect(await getUsableInstagramDiscoveryProfileRef("org-1")).toBe("org-1");
+    expect(await getUsableInstagramDiscoveryProfileRef("org-2")).toBe("org-2");
+  });
+
+  it("returns null for a connection that exists but isn't currently usable — never dispatches a job against a dead session", async () => {
+    const admin = makeFakeAdmin([{ organization_id: "org-1", status: "session_expired", browser_profile_ref: "org-1" }]);
+    vi.mocked(createAdminClient).mockReturnValue(admin);
+
+    expect(await getUsableInstagramDiscoveryProfileRef("org-1")).toBeNull();
+  });
+
+  it("returns null for an organization with no connection at all", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(makeFakeAdmin([]));
+    expect(await getUsableInstagramDiscoveryProfileRef("org-1")).toBeNull();
+  });
+
+  it("never returns another organization's profile ref", async () => {
+    const admin = makeFakeAdmin([
+      { organization_id: "org-1", status: "connected", browser_profile_ref: "org-1-ref" },
+      { organization_id: "org-2", status: "connected", browser_profile_ref: "org-2-ref" },
+    ]);
+    vi.mocked(createAdminClient).mockReturnValue(admin);
+
+    expect(await getUsableInstagramDiscoveryProfileRef("org-1")).toBe("org-1-ref");
+    expect(await getUsableInstagramDiscoveryProfileRef("org-2")).toBe("org-2-ref");
   });
 });

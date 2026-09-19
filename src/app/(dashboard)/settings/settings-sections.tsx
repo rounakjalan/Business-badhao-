@@ -45,7 +45,15 @@ type WhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null; t
 type WhatsAppNotice = { status: string; detail?: string } | null;
 type InstagramStatus = { connected: boolean; username: string | null };
 type InstagramNotice = { status: string; detail?: string } | null;
-type InstagramDiscoveryConnectionStatus = "not_connected" | "authentication_required" | "connecting" | "connected" | "session_expired" | "error";
+type InstagramDiscoveryConnectionStatus =
+  | "not_connected"
+  | "authentication_required"
+  | "connecting"
+  | "connected"
+  | "session_expired"
+  | "browser_unavailable"
+  | "ready"
+  | "error";
 type InstagramDiscoveryStatus = { status: InstagramDiscoveryConnectionStatus; connectedUsername: string | null; lastError: string | null };
 type InstagramDiscoveryNotice = { status: string; detail?: string } | null;
 
@@ -493,7 +501,9 @@ const INSTAGRAM_DISCOVERY_STATUS_LABEL: Record<InstagramDiscoveryConnectionStatu
   authentication_required: "Authentication Required",
   connecting: "Connecting…",
   connected: "Connected",
+  ready: "Ready",
   session_expired: "Session Expired",
+  browser_unavailable: "Browser Unavailable",
   error: "Error",
 };
 
@@ -502,7 +512,9 @@ const INSTAGRAM_DISCOVERY_STATUS_VARIANT: Record<InstagramDiscoveryConnectionSta
   authentication_required: "amber",
   connecting: "amber",
   connected: "success",
+  ready: "success",
   session_expired: "error",
+  browser_unavailable: "error",
   error: "error",
 };
 
@@ -541,7 +553,11 @@ function InstagramDiscoveryCard({
   disconnectAction: () => void;
 }) {
   const hasConnection = status.status !== "not_connected";
-  const canReconnect = status.status === "not_connected" || status.status === "session_expired" || status.status === "error";
+  const canReconnect =
+    status.status === "not_connected" ||
+    status.status === "session_expired" ||
+    status.status === "browser_unavailable" ||
+    status.status === "error";
 
   return (
     <div className="bb-stagger-item rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">

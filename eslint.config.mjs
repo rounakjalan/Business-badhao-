@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // A separate, standalone Node.js package (its own puppeteer-core
+    // runtime, never built/shipped by this Next.js app) — lints/typechecks
+    // independently, not against this project's Next-specific config.
+    "hermes-browser-runtime/**",
   ]),
 ]);
 
