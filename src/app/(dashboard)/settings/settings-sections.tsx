@@ -15,7 +15,13 @@ const MESSAGES: Record<string, string> = {
 const INTEGRATIONS = [
   { name: "WhatsApp Business", desc: "Send and receive WhatsApp messages" },
   { name: "Gmail / Google Workspace", desc: "Email outreach and conversations" },
-  { name: "Instagram", desc: "Verify a discovered lead's Instagram profile" },
+  // Deliberately NOT named plain "Instagram" — that label belongs to the
+  // InstagramDiscoveryCard below (the real, Hermes-browser-backed "connect
+  // your account to discover prospects" experience). This is a narrower,
+  // read-only Meta Graph API lookup used to verify a lead ALREADY found
+  // elsewhere; a UX audit found users clicking this card expecting the
+  // discovery flow and hitting its unrelated "not configured" message.
+  { name: "Instagram Profile Lookup", desc: "Verify a discovered lead's Instagram profile — read-only, not a discovery source" },
   { name: "Outlook", desc: "Microsoft email integration" },
   { name: "Google Calendar", desc: "Sync tasks and follow-up reminders" },
   { name: "Salesforce", desc: "Sync deals and contacts" },
@@ -415,7 +421,7 @@ export function SettingsSections({
                       </>
                     )}
                   </div>
-                ) : int.name === "Instagram" ? (
+                ) : int.name === "Instagram Profile Lookup" ? (
                   <div key={int.name} className="bb-stagger-item flex items-center gap-4 rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
                     <div className="flex-1">
                       <div className="text-sm font-medium text-bb-text">{int.name}</div>
@@ -533,12 +539,17 @@ const STATUS_BADGE_CLASSES: Record<"neutral" | "amber" | "success" | "error", st
 
 /**
  * A CORE lead-discovery source, deliberately presented as its own card,
- * separate from the "Instagram" (Meta Graph API Business Discovery
- * enrichment) card above it — the two are genuinely different capabilities
- * backed by genuinely different credentials (see
- * src/lib/instagram-discovery/connection.ts's own doc comment), and
- * conflating them in the UI would misrepresent which one a connection
- * actually enables.
+ * separate from "Instagram Profile Lookup" (Meta Graph API Business
+ * Discovery enrichment, a narrower read-only feature listed above) — the
+ * two are genuinely different capabilities backed by genuinely different
+ * credentials (see src/lib/instagram-discovery/connection.ts's own doc
+ * comment), and conflating them in the UI would misrepresent which one a
+ * connection actually enables. This card is titled plain "Instagram" (not
+ * "Instagram Discovery (Browser)") since it's the primary, real "connect
+ * your account" experience most users mean by "Instagram" — the Lookup
+ * card was renamed instead, after real users were found clicking it
+ * expecting this flow and hitting its unrelated Meta-app "not configured"
+ * message.
  *
  * Deliberately shows TWO independent facts rather than one combined
  * "Connected" badge: this organization's own connection status, and whether
@@ -610,11 +621,11 @@ function InstagramDiscoveryCard({
     <div className="bb-stagger-item rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
       <div className="flex items-center gap-4">
         <div className="flex-1">
-          <div className="text-sm font-medium text-bb-text">Instagram Discovery (Browser)</div>
+          <div className="text-sm font-medium text-bb-text">Instagram</div>
           <div className="text-xs text-bb-text-3">
             {(status.status === "connected" || status.status === "ready") && status.connectedUsername
               ? `Connected as @${status.connectedUsername} — Discovery access: Ready`
-              : "Discover new prospects on Instagram via a dedicated authenticated browser account — separate from the Instagram connection above."}
+              : "Connect a dedicated Instagram account to discover new prospects — separate from Instagram Profile Lookup above, which only verifies a lead already found elsewhere."}
           </div>
           {status.lastError ? <div className="mt-1 text-xs text-bb-rose">{status.lastError}</div> : null}
           {INSTAGRAM_DISCOVERY_STATE_HINT[status.status] ? (
