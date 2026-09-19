@@ -565,11 +565,11 @@ function InstagramDiscoveryCard({
         <div className="flex-1">
           <div className="text-sm font-medium text-bb-text">Instagram Discovery (Browser)</div>
           <div className="text-xs text-bb-text-3">
-            {status.status === "connected" && status.connectedUsername
+            {(status.status === "connected" || status.status === "ready") && status.connectedUsername
               ? `Connected as @${status.connectedUsername}`
               : "Discover new prospects on Instagram via a dedicated authenticated browser account — separate from the Instagram connection above."}
           </div>
-          {status.status === "error" && status.lastError ? <div className="mt-1 text-xs text-bb-rose">{status.lastError}</div> : null}
+          {status.lastError ? <div className="mt-1 text-xs text-bb-rose">{status.lastError}</div> : null}
         </div>
         <span className={`rounded-full border px-2 py-0.5 text-xs ${STATUS_BADGE_CLASSES[INSTAGRAM_DISCOVERY_STATUS_VARIANT[status.status]]}`}>
           {INSTAGRAM_DISCOVERY_STATUS_LABEL[status.status]}
