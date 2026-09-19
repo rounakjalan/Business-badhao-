@@ -2,7 +2,9 @@ import {
   connectWhatsAppAction,
   disconnectGmailAction,
   disconnectInstagramAction,
+  disconnectInstagramDiscoveryConnectionAction,
   disconnectWhatsAppAction,
+  requestInstagramDiscoveryConnectionAction,
   updateOrganization,
   updateProfile,
   updateWhatsAppTemplateAction,
@@ -10,6 +12,7 @@ import {
 import { SettingsSections } from "@/app/(dashboard)/settings/settings-sections";
 import { getConnectionStatus } from "@/lib/gmail/tokens";
 import { getConnectionStatus as getInstagramConnectionStatus } from "@/lib/instagram/tokens";
+import { getInstagramDiscoveryConnectionStatus, isInstagramDiscoveryRuntimeConfigured } from "@/lib/instagram-discovery/connection";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { getWhatsAppConnectionStatus } from "@/lib/whatsapp/tokens";
@@ -27,18 +30,34 @@ export default async function SettingsPage({
     whatsappMessage?: string;
     instagram?: string;
     instagramMessage?: string;
+    instagramDiscovery?: string;
+    instagramDiscoveryMessage?: string;
   }>;
 }) {
-  const { error, message, tab, gmail, gmailMessage, whatsapp, whatsappMessage, instagram, instagramMessage } = await searchParams;
+  const {
+    error,
+    message,
+    tab,
+    gmail,
+    gmailMessage,
+    whatsapp,
+    whatsappMessage,
+    instagram,
+    instagramMessage,
+    instagramDiscovery,
+    instagramDiscoveryMessage,
+  } = await searchParams;
 
   const currentOrg = await getCurrentOrg();
   if (!currentOrg) return null;
 
-  const [gmailStatus, whatsappStatus, instagramStatus] = await Promise.all([
+  const [gmailStatus, whatsappStatus, instagramStatus, instagramDiscoveryStatus] = await Promise.all([
     getConnectionStatus(currentOrg.organizationId),
     getWhatsAppConnectionStatus(currentOrg.organizationId),
     getInstagramConnectionStatus(currentOrg.organizationId),
+    getInstagramDiscoveryConnectionStatus(currentOrg.organizationId),
   ]);
+  const instagramDiscoveryRuntimeConfigured = isInstagramDiscoveryRuntimeConfigured();
 
   const supabase = await createClient();
   const {
@@ -89,6 +108,11 @@ export default async function SettingsPage({
       instagramStatus={instagramStatus}
       instagramNotice={instagram ? { status: instagram, detail: instagramMessage } : null}
       disconnectInstagramAction={disconnectInstagramAction}
+      instagramDiscoveryStatus={instagramDiscoveryStatus}
+      instagramDiscoveryRuntimeConfigured={instagramDiscoveryRuntimeConfigured}
+      instagramDiscoveryNotice={instagramDiscovery ? { status: instagramDiscovery, detail: instagramDiscoveryMessage } : null}
+      requestInstagramDiscoveryConnectionAction={requestInstagramDiscoveryConnectionAction}
+      disconnectInstagramDiscoveryConnectionAction={disconnectInstagramDiscoveryConnectionAction}
     />
   );
 }

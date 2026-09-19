@@ -1418,19 +1418,25 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider, DiscoverySear
     // instances specifically so a genuine second discovery channel could run
     // alongside Tavily/Exa here, additively, the moment one exists — that
     // capability is real and covered by tests using controlled fake tools.
-    // No Instagram tool is constructed or passed here, because there is no
-    // real execution path for it: this repository's entire dependency tree
-    // (package.json) contains no browser-automation runtime, "Hermes"
-    // throughout this codebase names LLM-routing/orchestration functions
-    // only (runHermesCompletion, the Independent Hermes Reviewer) and has no
-    // browser-control capability of its own, and neither Playwright nor any
-    // production TinyFish dependency may be introduced. Wiring in an
-    // Instagram-shaped adapter without a real backend behind it would only
-    // be a fabricated integration that never actually runs — see this
-    // session's own audit findings for the full reasoning. A genuine second
-    // source can be added here (`new HermesLeadDiscoveryAgent(this, [realTool])`)
-    // once an actual browser-execution boundary is stood up and its real,
-    // documented API is known.
+    // No Instagram tool is constructed or passed here, because there is
+    // still no real execution path for it: this repository's entire
+    // dependency tree (package.json) contains no browser-automation runtime,
+    // "Hermes" throughout this codebase names LLM-routing/orchestration
+    // functions only (runHermesCompletion, the Independent Hermes Reviewer)
+    // and has no browser-control capability of its own, and neither
+    // Playwright nor any production TinyFish dependency may be introduced.
+    //
+    // What DOES now exist (see src/lib/instagram-discovery/connection.ts) is
+    // the organization-scoped CONNECTION foundation: a real, tested,
+    // RLS-isolated record of whether an org has requested an Instagram
+    // discovery connection, and a real authenticated webhook
+    // (api/instagram-discovery/session-report) an operator's own external
+    // browser runtime would report real session state back through. Once
+    // such a runtime exists and a specific organization's connection reaches
+    // getInstagramDiscoveryConnectionStatus(...).status === "connected", a
+    // genuine DiscoverySearchTool implementation belongs here, gated on
+    // exactly that check — never constructed speculatively, and never for an
+    // organization whose own connection isn't actually reporting success.
     return new HermesLeadDiscoveryAgent(this).discover(criteria, trackingClient);
   }
 }

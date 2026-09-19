@@ -678,6 +678,48 @@ export interface Database {
         };
         Relationships: [];
       };
+      instagram_discovery_connections: {
+        Row: {
+          id: string;
+          organization_id: string;
+          requested_by: string | null;
+          status: string;
+          browser_profile_ref: string | null;
+          connected_username: string | null;
+          last_error: string | null;
+          requested_at: string;
+          last_verified_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          requested_by?: string | null;
+          status?: string;
+          browser_profile_ref?: string | null;
+          connected_username?: string | null;
+          last_error?: string | null;
+          requested_at?: string;
+          last_verified_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          requested_by?: string | null;
+          status?: string;
+          browser_profile_ref?: string | null;
+          connected_username?: string | null;
+          last_error?: string | null;
+          requested_at?: string;
+          last_verified_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       whatsapp_accounts: {
         Row: {
           id: string;

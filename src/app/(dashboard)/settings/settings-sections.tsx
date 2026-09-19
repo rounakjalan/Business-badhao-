@@ -45,6 +45,9 @@ type WhatsAppStatus = { connected: boolean; displayPhoneNumber: string | null; t
 type WhatsAppNotice = { status: string; detail?: string } | null;
 type InstagramStatus = { connected: boolean; username: string | null };
 type InstagramNotice = { status: string; detail?: string } | null;
+type InstagramDiscoveryConnectionStatus = "not_connected" | "authentication_required" | "connecting" | "connected" | "session_expired" | "error";
+type InstagramDiscoveryStatus = { status: InstagramDiscoveryConnectionStatus; connectedUsername: string | null; lastError: string | null };
+type InstagramDiscoveryNotice = { status: string; detail?: string } | null;
 
 function isSection(value: string | undefined): value is (typeof SECTIONS)[number] {
   return Boolean(value) && (SECTIONS as readonly string[]).includes(value as string);
@@ -70,6 +73,11 @@ export function SettingsSections({
   instagramStatus,
   instagramNotice,
   disconnectInstagramAction,
+  instagramDiscoveryStatus,
+  instagramDiscoveryRuntimeConfigured,
+  instagramDiscoveryNotice,
+  requestInstagramDiscoveryConnectionAction,
+  disconnectInstagramDiscoveryConnectionAction,
 }: {
   error?: string;
   message?: string;
@@ -90,6 +98,11 @@ export function SettingsSections({
   instagramStatus: InstagramStatus;
   instagramNotice: InstagramNotice;
   disconnectInstagramAction: () => void;
+  instagramDiscoveryStatus: InstagramDiscoveryStatus;
+  instagramDiscoveryRuntimeConfigured: boolean;
+  instagramDiscoveryNotice: InstagramDiscoveryNotice;
+  requestInstagramDiscoveryConnectionAction: () => void;
+  disconnectInstagramDiscoveryConnectionAction: () => void;
 }) {
   const [section, setSection] = useState<(typeof SECTIONS)[number]>(isSection(initialTab) ? initialTab : "Account");
   const [showWhatsAppForm, setShowWhatsAppForm] = useState(false);
@@ -231,6 +244,17 @@ export function SettingsSections({
                     : instagramNotice.status === "disconnected"
                       ? "Instagram disconnected."
                       : (instagramNotice.detail ?? "Something went wrong connecting Instagram.")}
+                </DarkAlert>
+              </div>
+            ) : null}
+            {instagramDiscoveryNotice ? (
+              <div className="mb-1">
+                <DarkAlert variant={instagramDiscoveryNotice.status === "error" ? "error" : "success"}>
+                  {instagramDiscoveryNotice.status === "requested"
+                    ? "Instagram discovery connection requested — see status below."
+                    : instagramDiscoveryNotice.status === "disconnected"
+                      ? "Instagram discovery connection removed."
+                      : (instagramDiscoveryNotice.detail ?? "Something went wrong requesting the Instagram discovery connection.")}
                 </DarkAlert>
               </div>
             ) : null}
@@ -420,6 +444,12 @@ export function SettingsSections({
                   </div>
                 )
               )}
+              <InstagramDiscoveryCard
+                status={instagramDiscoveryStatus}
+                runtimeConfigured={instagramDiscoveryRuntimeConfigured}
+                requestConnectionAction={requestInstagramDiscoveryConnectionAction}
+                disconnectAction={disconnectInstagramDiscoveryConnectionAction}
+              />
             </div>
           </Section>
         ) : null}
@@ -452,6 +482,102 @@ export function SettingsSections({
               </DashButton>
             </div>
           </Section>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+const INSTAGRAM_DISCOVERY_STATUS_LABEL: Record<InstagramDiscoveryConnectionStatus, string> = {
+  not_connected: "Not Connected",
+  authentication_required: "Authentication Required",
+  connecting: "Connecting…",
+  connected: "Connected",
+  session_expired: "Session Expired",
+  error: "Error",
+};
+
+const INSTAGRAM_DISCOVERY_STATUS_VARIANT: Record<InstagramDiscoveryConnectionStatus, "neutral" | "amber" | "success" | "error"> = {
+  not_connected: "neutral",
+  authentication_required: "amber",
+  connecting: "amber",
+  connected: "success",
+  session_expired: "error",
+  error: "error",
+};
+
+const STATUS_BADGE_CLASSES: Record<"neutral" | "amber" | "success" | "error", string> = {
+  neutral: "border-bb-text-3/25 bg-bb-text-3/10 text-bb-text-3",
+  amber: "border-bb-amber/25 bg-bb-amber/10 text-bb-amber",
+  success: "border-bb-emerald/25 bg-bb-emerald/10 text-bb-emerald",
+  error: "border-bb-rose/25 bg-bb-rose/10 text-bb-rose",
+};
+
+/**
+ * A CORE lead-discovery source, deliberately presented as its own card,
+ * separate from the "Instagram" (Meta Graph API Business Discovery
+ * enrichment) card above it — the two are genuinely different capabilities
+ * backed by genuinely different credentials (see
+ * src/lib/instagram-discovery/connection.ts's own doc comment), and
+ * conflating them in the UI would misrepresent which one a connection
+ * actually enables.
+ *
+ * Deliberately shows TWO independent facts rather than one combined
+ * "Connected" badge: this organization's own connection status, and whether
+ * ANY browser runtime is provisioned for this deployment at all — "Connected"
+ * has always meant "the runtime last reported success," never "discovery is
+ * guaranteed to work right now" (see connection.ts's own isInstagramDiscoveryRuntimeConfigured
+ * doc comment for why these are genuinely separate axes).
+ */
+function InstagramDiscoveryCard({
+  status,
+  runtimeConfigured,
+  requestConnectionAction,
+  disconnectAction,
+}: {
+  status: InstagramDiscoveryStatus;
+  runtimeConfigured: boolean;
+  requestConnectionAction: () => void;
+  disconnectAction: () => void;
+}) {
+  const hasConnection = status.status !== "not_connected";
+  const canReconnect = status.status === "not_connected" || status.status === "session_expired" || status.status === "error";
+
+  return (
+    <div className="bb-stagger-item rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
+      <div className="flex items-center gap-4">
+        <div className="flex-1">
+          <div className="text-sm font-medium text-bb-text">Instagram Discovery (Browser)</div>
+          <div className="text-xs text-bb-text-3">
+            {status.status === "connected" && status.connectedUsername
+              ? `Connected as @${status.connectedUsername}`
+              : "Discover new prospects on Instagram via a dedicated authenticated browser account — separate from the Instagram connection above."}
+          </div>
+          {status.status === "error" && status.lastError ? <div className="mt-1 text-xs text-bb-rose">{status.lastError}</div> : null}
+        </div>
+        <span className={`rounded-full border px-2 py-0.5 text-xs ${STATUS_BADGE_CLASSES[INSTAGRAM_DISCOVERY_STATUS_VARIANT[status.status]]}`}>
+          {INSTAGRAM_DISCOVERY_STATUS_LABEL[status.status]}
+        </span>
+        {hasConnection ? (
+          <form action={disconnectAction}>
+            <DashButton type="submit" variant="outline">
+              Disconnect
+            </DashButton>
+          </form>
+        ) : null}
+        {canReconnect ? (
+          <form action={requestConnectionAction}>
+            <DashButton type="submit" variant="gradient">
+              {status.status === "not_connected" ? "Connect Instagram Discovery" : "Reconnect"}
+            </DashButton>
+          </form>
+        ) : null}
+      </div>
+      <div className="mt-3 border-t border-bb-border pt-3 text-xs text-bb-text-3">
+        Browser runtime:{" "}
+        <span className={runtimeConfigured ? "text-bb-emerald" : "text-bb-text-3"}>{runtimeConfigured ? "Configured" : "Not configured"}</span>
+        {!runtimeConfigured ? (
+          <span> — this deployment has no Instagram browser runtime connected yet. A connection request stays pending until an operator sets one up.</span>
         ) : null}
       </div>
     </div>

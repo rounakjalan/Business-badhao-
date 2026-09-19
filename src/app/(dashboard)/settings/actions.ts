@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { disconnectAccount } from "@/lib/gmail/tokens";
 import { disconnectAccount as disconnectInstagramAccount } from "@/lib/instagram/tokens";
+import { disconnectInstagramDiscoveryConnection, requestInstagramDiscoveryConnection } from "@/lib/instagram-discovery/connection";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { disconnectWhatsAppAccount, saveWhatsAppAccount, updateWhatsAppTemplate } from "@/lib/whatsapp/tokens";
@@ -78,6 +79,45 @@ export async function disconnectInstagramAction() {
 
   revalidatePath("/settings");
   redirect("/settings?tab=Integrations&instagram=disconnected");
+}
+
+/**
+ * The real action behind "Connect Instagram Discovery" — separate from
+ * disconnectInstagramAction/the Meta Graph API OAuth flow above, which is
+ * enrichment-only and unrelated to discovery (see
+ * src/lib/instagram-discovery/connection.ts's own doc comment). This never
+ * opens a browser itself; it only records that this organization wants a
+ * connection, for an operator's own external browser runtime to pick up.
+ */
+export async function requestInstagramDiscoveryConnectionAction() {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const result = await requestInstagramDiscoveryConnection(currentOrg.organizationId, user.id);
+  if (!result.ok) {
+    redirect(
+      `/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent("Could not record the Instagram discovery connection request. Please try again.")}`
+    );
+  }
+
+  revalidatePath("/settings");
+  redirect("/settings?tab=Integrations&instagramDiscovery=requested");
+}
+
+export async function disconnectInstagramDiscoveryConnectionAction() {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  await disconnectInstagramDiscoveryConnection(currentOrg.organizationId);
+
+  revalidatePath("/settings");
+  redirect("/settings?tab=Integrations&instagramDiscovery=disconnected");
 }
 
 /**
