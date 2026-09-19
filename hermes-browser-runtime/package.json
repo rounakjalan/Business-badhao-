@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Standalone Hermes browser runtime: drives a real, locally-installed Chromium via puppeteer-core (Chrome DevTools Protocol) to perform real Instagram lead discovery on behalf of one Business Badhao organization's own dedicated, manually-authenticated Instagram account. Runs outside Vercel, on a separate, always-available machine you provision and operate yourself. Never a cloud browser service, never Playwright, never TinyFish.",
+  "description": "Standalone Hermes browser runtime: drives a real, locally-installed Chromium via puppeteer-core (Chrome DevTools Protocol) to perform real Instagram lead discovery on behalf of one Business Badhao organization's own dedicated, manually-authenticated Instagram account. By default, Business Badhao runs this itself on demand in its own Vercel Sandbox (see src/lib/instagram-discovery/sandbox-runtime.ts) — no operator-run machine required. Can still be run yourself on a separate always-available machine (Docker/systemd, see README.md) if you'd rather not use the Sandbox runtime. Never a cloud browser service, never Playwright, never TinyFish.",
   "engines": {
     "node": ">=22.12.0"
   },
@@ -12,6 +12,7 @@
     "worker": "node worker.mjs"
   },
   "dependencies": {
+    "@vercel/sandbox": "^3.3.0",
     "puppeteer-core": "^25.0.0"
   }
 }

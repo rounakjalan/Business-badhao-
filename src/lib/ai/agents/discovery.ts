@@ -1424,9 +1424,11 @@ export class TavilyDiscoveryProvider implements DiscoveryProvider, DiscoverySear
     // session has expired, runs exactly as before — Tavily/Exa only. The
     // tool itself never opens a browser or talks to Instagram from inside
     // this Vercel deployment; it dispatches one real job per query to
-    // hermes-browser-runtime (a separate, always-available process this
-    // application does not host — see that package's own README) and waits,
-    // bounded, for a real answer. Instagram runs ALONGSIDE Tavily for every
+    // hermes-browser-runtime (a separate process — by default one Business
+    // Badhao itself wakes on demand in its own Vercel Sandbox, see
+    // sandbox-runtime.ts; that package's own README covers running it
+    // yourself instead) and waits, bounded, for a real answer. Instagram
+    // runs ALONGSIDE Tavily for every
     // query (additionalSearchTools, below) — never as a fallback gated on
     // Tavily failing, and its own absence/timeout never fails a query that
     // Tavily/Exa already answered (see HermesLeadDiscoveryAgent.runSearchProviders).

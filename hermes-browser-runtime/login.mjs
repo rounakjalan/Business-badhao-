@@ -15,9 +15,11 @@
  * Instagram account belongs to (visible in Settings → Integrations once
  * "Connect Instagram Discovery" has been clicked there).
  */
+import path from "node:path";
 import { openProfile } from "./lib/browser.mjs";
 import { waitForManualLogin } from "./lib/instagram.mjs";
 import { reportSession } from "./lib/api-client.mjs";
+import { pushProfileToSandbox, sandboxPushConfigured } from "./lib/sandbox-push.mjs";
 
 function arg(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -61,10 +63,31 @@ async function main() {
     process.exitCode = 1;
   } else {
     console.log("Reported the connection to Business Badhao. Settings → Integrations should now show 'Connected'.");
-    console.log("You can close this browser window — worker.mjs will reuse this saved profile for future discovery jobs.");
   }
 
   await browser.close();
+
+  // Optional: push this profile into Business Badhao's own shared, on-demand
+  // Sandbox runtime (see lib/sandbox-push.mjs's own doc comment) so it's
+  // usable there too, not only by a worker.mjs run on this exact machine.
+  // Silently skipped when VERCEL_TOKEN/VERCEL_TEAM_ID/VERCEL_PROJECT_ID
+  // aren't set — see README.md's "Connecting to the on-demand Sandbox
+  // runtime" section.
+  if (sandboxPushConfigured()) {
+    const profileDir = path.resolve(process.env.PROFILES_DIR || "./profiles", organizationId);
+    console.log("Pushing this profile to Business Badhao's on-demand Sandbox runtime...");
+    try {
+      const pushed = await pushProfileToSandbox(organizationId, profileDir);
+      console.log(`Pushed ${pushed.fileCount} profile file(s) to the Sandbox runtime. It will use this session on its next discovery run.`);
+    } catch (error) {
+      console.error("Could not push this profile to the Sandbox runtime:", error instanceof Error ? error.message : error);
+      console.error("This machine's own worker.mjs (if you run one) can still use this profile directly.");
+    }
+  } else {
+    console.log("You can close this browser window.");
+    console.log("worker.mjs will reuse this saved profile for future discovery jobs — either run here, or (if this deployment uses the");
+    console.log("on-demand Sandbox runtime) set VERCEL_TOKEN/VERCEL_TEAM_ID/VERCEL_PROJECT_ID and re-run this command to push it there.");
+  }
 }
 
 main().catch((error) => {

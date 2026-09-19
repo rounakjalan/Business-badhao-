@@ -5,17 +5,23 @@ import { getUsableInstagramDiscoveryProfileRef } from "@/lib/instagram-discovery
 /**
  * The dispatch/result queue between a real discovery run (running inside
  * this Vercel deployment, synchronously, with a bounded time budget — see
- * TOTAL_REQUEST_BUDGET_MS in campaigns/actions.ts) and an organization's own
- * external Hermes browser runtime (hermes-browser-runtime/, a separate,
- * always-available process this application does not host — see
- * instagram_discovery_jobs' own migration for why).
+ * TOTAL_REQUEST_BUDGET_MS in campaigns/actions.ts) and a real Hermes browser
+ * runtime (hermes-browser-runtime/, a separate Node.js process this
+ * application never bundles into its own serverless functions — see
+ * instagram_discovery_jobs' own migration for why). By default that process
+ * is one Business Badhao itself starts on demand, in its own Vercel Sandbox
+ * (see src/lib/instagram-discovery/sandbox-runtime.ts) — not something an
+ * operator has to provision or keep running, though running it yourself
+ * (Docker/systemd) remains supported (INSTAGRAM_DISCOVERY_SANDBOX_DISABLED).
+ * Either way it's the exact same worker.mjs, talking to this same queue.
  *
- * Business Badhao cannot call the runtime directly (it isn't a service this
- * deployment has an address for, and Vercel cannot receive an inbound
- * connection to a serverless invocation that's still running). Instead:
+ * Business Badhao cannot call the runtime directly (Vercel cannot receive an
+ * inbound connection to a serverless invocation that's still running, and a
+ * Sandbox worker only ever makes outbound calls). Instead:
  *   1. createInstagramDiscoveryJob (a real search) or
  *      createInstagramDiscoveryVerificationJob (Settings' "Test Connection")
- *      writes a `pending` row.
+ *      writes a `pending` row, and (by default) wakeHermesSandboxRuntime
+ *      ensures a real worker is actively polling for it.
  *   2. The runtime polls claimNextInstagramDiscoveryJob (its own bearer-secret
  *      authenticated endpoint, api/instagram-discovery/jobs/claim) for work.
  *   3. The runtime performs the real work (a search, or just re-checking its

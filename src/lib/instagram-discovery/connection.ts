@@ -9,15 +9,18 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * and never sees an Instagram password — it only tracks CONNECTION STATE in
  * instagram_discovery_connections (see that migration's own doc comment).
  *
- * The actual authenticated browser session lives on a separate,
- * always-available runtime an organization's operator runs outside this
- * Vercel deployment (see isInstagramDiscoveryRuntimeConfigured below) —
- * Vercel's serverless execution model cannot host a persistent authenticated
- * browser session. That runtime is the only thing that ever moves a
- * connection's status to "connected": see
- * applyInstagramDiscoveryRuntimeReport, called from the authenticated
- * session-report API route, never from this module's own request/disconnect
- * functions.
+ * The actual authenticated browser session lives on a separate Hermes
+ * browser runtime process (see isInstagramDiscoveryRuntimeConfigured below)
+ * — Vercel's serverless execution model cannot host a persistent
+ * authenticated browser session inside one request. By default Business
+ * Badhao starts that process itself, on demand, in its own Vercel Sandbox
+ * (see src/lib/instagram-discovery/sandbox-runtime.ts) rather than requiring
+ * an operator to provision and run it; an operator can still run their own
+ * instead (hermes-browser-runtime/README.md's "Advanced" section). Either
+ * way, that runtime is the only thing that ever moves a connection's status
+ * to "connected": see applyInstagramDiscoveryRuntimeReport, called from the
+ * authenticated session-report API route, never from this module's own
+ * request/disconnect functions.
  */
 
 export type InstagramDiscoveryConnectionStatus =

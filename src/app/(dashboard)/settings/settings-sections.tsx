@@ -562,10 +562,10 @@ const STATUS_BADGE_CLASSES: Record<"neutral" | "amber" | "success" | "error", st
 const INSTAGRAM_DISCOVERY_STATE_HINT: Partial<Record<InstagramDiscoveryConnectionStatus, string>> = {
   browser_unavailable: "Instagram may require manual verification (CAPTCHA/2FA), or the browser runtime hit an error. Complete any verification in the runtime's own browser window, then reconnect below.",
   session_expired: "The saved Instagram session is no longer authenticated. Reconnect below to restore discovery.",
-  authentication_required: "Run the login command below on your Hermes browser runtime machine to finish connecting.",
+  authentication_required: "Run the login command below once, on any machine with a real browser, to finish connecting — see hermes-browser-runtime/README.md.",
 };
 
-/** A copyable exact command, so an operator never has to guess the right organization id — click, paste into the runtime machine's terminal. */
+/** A copyable exact command for the one-time login step (see hermes-browser-runtime/README.md) — click, paste into a terminal on whatever machine runs it. */
 function LoginCommandHint({ organizationId }: { organizationId: string }) {
   const [copied, setCopied] = useState(false);
   const command = `node login.mjs --org ${organizationId}`;
@@ -662,7 +662,11 @@ function InstagramDiscoveryCard({
         Browser runtime:{" "}
         <span className={runtimeConfigured ? "text-bb-emerald" : "text-bb-text-3"}>{runtimeConfigured ? "Configured" : "Not configured"}</span>
         {!runtimeConfigured ? (
-          <span> — this deployment has no Instagram browser runtime connected yet. A connection request stays pending until an operator sets one up.</span>
+          <span>
+            {" "}
+            — this deployment has no Instagram browser runtime configured yet. A connection request stays pending until an operator sets
+            INSTAGRAM_DISCOVERY_RUNTIME_TOKEN (this alone turns on Business Badhao&apos;s own automatic runtime — no separate infrastructure to run).
+          </span>
         ) : null}
       </div>
     </div>

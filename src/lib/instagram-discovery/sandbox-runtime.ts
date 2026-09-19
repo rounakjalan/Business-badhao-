@@ -1,0 +1,226 @@
+import "server-only";
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import { Sandbox } from "@vercel/sandbox";
+import { getSiteUrl } from "@/lib/site-url";
+
+/**
+ * Business Badhao's own hosting for hermes-browser-runtime's existing
+ * worker.mjs — the piece the rest of this task's requirement calls "the
+ * hosting/runtime issue": Vercel's serverless request model cannot keep a
+ * persistent, authenticated Chromium process running, so something has to
+ * actually run worker.mjs somewhere real. Before this module, that
+ * "somewhere" had to be a machine an operator provisioned and ran Docker/
+ * systemd on by hand (see hermes-browser-runtime/README.md). This module
+ * makes Business Badhao provision and run it instead, using Vercel Sandbox
+ * (real Linux MicroVMs Vercel already offers this project's own deployment,
+ * authenticated automatically via this function's own ambient Vercel OIDC
+ * token — see README's Authentication section) — so the person operating a
+ * Business Badhao deployment never runs a docker/systemd command, and the
+ * org admin who clicks "Find Leads" never sees any of this exists.
+ *
+ * What actually changes vs. the manually-operated deployment: nothing about
+ * worker.mjs's own job-processing logic, Chromium driving, or organization
+ * profile isolation (PROFILES_DIR/<organizationId>, lib/browser.mjs's
+ * SAFE_PROFILE_REF check) — this module only answers "who starts worker.mjs,
+ * and where." One shared, persistent, named Sandbox hosts the exact same
+ * worker.mjs for every organization (mirroring the existing Docker/systemd
+ * deployment, which is also one process serving every organization's own
+ * profile subdirectory) — never one Sandbox per organization: organization
+ * isolation already comes from the profile directory, not from the VM
+ * boundary, and reusing one Sandbox is what keeps this from provisioning and
+ * paying for N idle Linux VMs.
+ *
+ * Since a Sandbox session is a bounded-duration VM, not a perpetual daemon
+ * (its filesystem persists across stop/resume; a running process does not —
+ * see Vercel's own Sandbox persistence docs), this wakes the sandbox and
+ * (re)starts worker.mjs on demand, right when a real job exists for it to
+ * do, and lets worker.mjs's own existing graceful-shutdown handling
+ * (WORKER_MAX_RUNTIME_MS, added alongside this module — see worker.mjs) end
+ * that run once the queue is drained rather than trying to keep a VM
+ * running forever. This is deliberately called from the SAME places that
+ * already create a job (InstagramDiscoveryTool.search,
+ * testInstagramDiscoveryConnectionAction) — never a new schedule/cron of its
+ * own — so a Sandbox only ever spins up because a real discovery or
+ * connection-test run needs one answered.
+ *
+ * What this module still cannot do, and does not attempt: perform the
+ * one-time interactive Instagram login itself. That requires a real human
+ * to see Instagram's own page and complete it (password entry, 2FA,
+ * whatever challenge Instagram shows) — automating that away is exactly the
+ * kind of thing this project's own security requirements forbid, and Vercel
+ * Sandbox has no attached display for a human to use even if it were
+ * allowed. login.mjs is unchanged and still the one real one-time step,
+ * still never sees or transmits the password — see its own doc comment and
+ * README.md's "One-time login" section for exactly how to run it against
+ * this same shared runtime.
+ */
+
+const SANDBOX_NAME = "hermes-instagram-runtime";
+const HERMES_DIR = "/vercel/sandbox/hermes";
+const CHROMIUM_EXECUTABLE_PATH = "/usr/bin/google-chrome-stable";
+const SANDBOX_VCPUS = 2;
+/** How long the underlying Sandbox VM session stays allocated once woken — comfortably longer than WORKER_RUN_WINDOW_MS so back-to-back wakes from the same "Find Leads" run (several queries, each its own job) reuse the same warm session instead of paying a fresh resume/setup cost each time. */
+const SANDBOX_SESSION_TIMEOUT_MS = 10 * 60_000;
+/** How long a woken worker.mjs drains the queue before exiting gracefully (WORKER_MAX_RUNTIME_MS) — generous relative to a single job's own bounded poll (InstagramDiscoveryTool's default 60s, jobs.ts's own JOB_TTL_MS 120s) so it has real room to claim and finish the job(s) that just triggered this wake, plus whatever else is already queued, without staying up indefinitely once idle. */
+const WORKER_RUN_WINDOW_MS = 150_000;
+const SETUP_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Escape hatch for an operator who wants to run their own external runtime
+ * (the original Docker/systemd deployment, e.g. for more control or a
+ * dedicated machine) instead of this on-demand Sandbox — never required,
+ * unset by default. Named distinctly from
+ * INSTAGRAM_DISCOVERY_RUNTIME_TOKEN so turning this off can never be
+ * confused with turning Instagram discovery off entirely.
+ */
+function sandboxHostingDisabled(): boolean {
+  return process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED === "1" || process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED === "true";
+}
+
+/**
+ * hermes-browser-runtime's own source files, read off this deployment's own
+ * filesystem (see next.config.ts's outputFileTracingIncludes for why they're
+ * present in production at all) and uploaded into the Sandbox verbatim —
+ * the exact same worker.mjs/lib code the manually-operated Docker/systemd
+ * deployment runs, never a reimplementation. Only source files: node_modules
+ * is deliberately excluded (the Sandbox runs `npm ci` itself, against its
+ * own OS/architecture — see runSetup) and login.mjs is deliberately excluded
+ * (it is never meant to run unattended inside this on-demand Sandbox; see
+ * this module's own doc comment).
+ */
+async function collectRuntimeFiles(): Promise<{ path: string; content: Buffer }[]> {
+  const root = path.join(process.cwd(), "hermes-browser-runtime");
+  const files: { path: string; content: Buffer }[] = [];
+
+  for (const name of ["worker.mjs", "package.json", "package-lock.json"]) {
+    files.push({ path: name, content: await readFile(path.join(root, name)) });
+  }
+
+  const libDir = path.join(root, "lib");
+  for (const entry of await readdir(libDir)) {
+    if (!entry.endsWith(".mjs")) continue;
+    files.push({ path: `lib/${entry}`, content: await readFile(path.join(libDir, entry)) });
+  }
+
+  return files;
+}
+
+async function ensureSandbox(): Promise<Sandbox> {
+  return Sandbox.getOrCreate({
+    name: SANDBOX_NAME,
+    timeout: SANDBOX_SESSION_TIMEOUT_MS,
+    resources: { vcpus: SANDBOX_VCPUS },
+  });
+}
+
+/** Re-uploads the current deployment's runtime source on every wake (cheap — a handful of small text files) so a Sandbox that has been sitting idle for days still runs whatever worker.mjs this deployment currently ships, never a stale copy from whenever the Sandbox happened to be created. */
+async function syncRuntimeFiles(sandbox: Sandbox): Promise<void> {
+  const files = await collectRuntimeFiles();
+  await sandbox.mkDir(`${HERMES_DIR}/lib`);
+  await sandbox.writeFiles(files.map((f) => ({ path: `${HERMES_DIR}/${f.path}`, content: f.content })));
+}
+
+/**
+ * One-time-per-sandbox-filesystem setup: a real Google Chrome binary (the
+ * `chromium` apt package resolves to a broken snap-stub on this Sandbox
+ * image's Ubuntu release — installing Google's own .deb directly is the
+ * fix that was actually verified working) and this package's one real
+ * dependency (puppeteer-core, via the checked-in package-lock.json).
+ * Guarded by a marker file so a normal wake never re-runs it — but the
+ * marker is only written after every step below succeeds, so a wake that
+ * follows a previously-failed/partial setup retries it rather than being
+ * permanently stuck.
+ */
+async function runSetupIfNeeded(sandbox: Sandbox): Promise<void> {
+  const check = await sandbox.runCommand("test", ["-f", `${HERMES_DIR}/.setup-complete`], { timeoutMs: 10_000 });
+  if (check.exitCode === 0) return;
+
+  const script = [
+    "set -e",
+    "sudo apt-get update -qq",
+    "sudo apt-get install -y -qq wget ca-certificates fonts-liberation",
+    "wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+    "sudo apt-get install -y -qq /tmp/google-chrome.deb",
+    "rm -f /tmp/google-chrome.deb",
+    `cd ${HERMES_DIR} && npm ci --omit=dev --loglevel=error`,
+    `touch ${HERMES_DIR}/.setup-complete`,
+  ].join(" && ");
+
+  const result = await sandbox.runCommand("bash", ["-lc", script], { timeoutMs: SETUP_TIMEOUT_MS });
+  if (result.exitCode !== 0) {
+    const stderr = await result.stderr().catch(() => "");
+    throw new Error(`Sandbox setup failed (exit ${result.exitCode}): ${stderr.slice(-2000)}`);
+  }
+}
+
+/**
+ * True if a worker.mjs launched by an earlier wake (possibly from a
+ * different serverless invocation entirely — nothing about a `Command`
+ * handle survives across those) is still alive. Checked against the
+ * Sandbox's real process table, not any bookkeeping file this module
+ * writes, so a worker that exited for any reason (its own
+ * WORKER_MAX_RUNTIME_MS, a crash, the Sandbox session having restarted) is
+ * correctly seen as "not running" with nothing to reconcile.
+ */
+async function workerAlreadyRunning(sandbox: Sandbox): Promise<boolean> {
+  const check = await sandbox.runCommand("pgrep", ["-f", "node worker.mjs"], { timeoutMs: 10_000 });
+  return check.exitCode === 0;
+}
+
+/**
+ * Launches the existing worker.mjs detached — the SDK's own documented
+ * mechanism for a command that must outlive this call (see @vercel/sandbox's
+ * README) — bounded by WORKER_MAX_RUNTIME_MS so it drains the current queue
+ * and exits (worker.mjs's own graceful shutdown — see that file) rather than
+ * trying to run forever inside a Sandbox session that will itself eventually
+ * stop. The bearer token is passed via `env` — never interpolated into a
+ * shell command string, which would otherwise leak it into this Sandbox's
+ * own command-history/log metadata.
+ */
+async function startWorker(sandbox: Sandbox, runtimeToken: string): Promise<void> {
+  await sandbox.runCommand({
+    cmd: "node",
+    args: ["worker.mjs"],
+    cwd: HERMES_DIR,
+    detached: true,
+    env: {
+      BUSINESS_BADHAO_API_URL: getSiteUrl(),
+      INSTAGRAM_DISCOVERY_RUNTIME_TOKEN: runtimeToken,
+      CHROMIUM_EXECUTABLE_PATH,
+      CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage",
+      PROFILES_DIR: `${HERMES_DIR}/profiles`,
+      WORKER_MAX_RUNTIME_MS: String(WORKER_RUN_WINDOW_MS),
+      WORKER_CONCURRENCY: "2",
+    },
+  });
+}
+
+/**
+ * Called right after a real discovery/verification job is created
+ * (InstagramDiscoveryTool.search, testInstagramDiscoveryConnectionAction) —
+ * never on any schedule of its own. Ensures a real worker.mjs is actively
+ * polling for that job, hosted by this deployment's own Sandbox, with no
+ * operator action required. Never throws: a Sandbox problem must degrade to
+ * "the job sits pending until it expires, honestly reported as a timeout by
+ * pollInstagramDiscoveryJobResult" — exactly the existing failure mode when
+ * no runtime answers in time — never break the job-creation call it's
+ * attached to.
+ */
+export async function wakeHermesSandboxRuntime(): Promise<void> {
+  const runtimeToken = process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN;
+  if (!runtimeToken || sandboxHostingDisabled()) return;
+
+  try {
+    const sandbox = await ensureSandbox();
+    await syncRuntimeFiles(sandbox);
+    await runSetupIfNeeded(sandbox);
+    if (!(await workerAlreadyRunning(sandbox))) {
+      await startWorker(sandbox, runtimeToken);
+    }
+  } catch (error) {
+    console.error("[instagram-discovery] wakeHermesSandboxRuntime failed — falling back to whatever external runtime (if any) is polling", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}

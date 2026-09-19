@@ -34,6 +34,18 @@ const SHUTDOWN_GRACE_MS = Number(process.env.WORKER_SHUTDOWN_GRACE_MS) || 15_000
 const HEALTH_CHECK_PORT = Number(process.env.HEALTH_CHECK_PORT) || 0;
 const QUEUE_STATUS_CACHE_MS = 30_000;
 const MAX_CONSECUTIVE_FAILURES_BEFORE_WARNING = Number(process.env.WORKER_MAX_CONSECUTIVE_FAILURES) || 5;
+/**
+ * Optional bounded lifetime, unset (run forever) on a normal Docker/systemd
+ * deployment. Set by Business Badhao's own on-demand Sandbox runtime
+ * (src/lib/instagram-discovery/sandbox-runtime.ts) when it wakes this exact
+ * worker.mjs inside a short-lived Vercel Sandbox to drain the queue for one
+ * discovery run, so that process doesn't sit polling forever after its job
+ * is done — it exits the same graceful way a real SIGTERM would (finishing
+ * any in-flight job first), never a hard kill. Nothing else in this file
+ * changes: an always-on deployment that never sets this env var behaves
+ * exactly as before.
+ */
+const MAX_RUNTIME_MS = Number(process.env.WORKER_MAX_RUNTIME_MS) || 0;
 
 const SEARCH_OPTIONS = {
   maxResults: Number(process.env.INSTAGRAM_MAX_PROFILES_PER_JOB) || 15,
@@ -271,10 +283,19 @@ function setupGracefulShutdown(healthServer) {
 
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  if (MAX_RUNTIME_MS > 0) {
+    setTimeout(() => shutdown("WORKER_MAX_RUNTIME_MS elapsed"), MAX_RUNTIME_MS).unref();
+  }
 }
 
 async function main() {
-  logger.info("Hermes browser runtime worker starting.", { concurrency: CONCURRENCY, pollIntervalMs: BASE_POLL_INTERVAL_MS, jobTimeoutMs: JOB_TIMEOUT_MS });
+  logger.info("Hermes browser runtime worker starting.", {
+    concurrency: CONCURRENCY,
+    pollIntervalMs: BASE_POLL_INTERVAL_MS,
+    jobTimeoutMs: JOB_TIMEOUT_MS,
+    maxRuntimeMs: MAX_RUNTIME_MS || "unbounded",
+  });
 
   const healthServer = startHealthServer(HEALTH_CHECK_PORT, () => {
     // Fire-and-forget refresh for next time — /health itself must stay

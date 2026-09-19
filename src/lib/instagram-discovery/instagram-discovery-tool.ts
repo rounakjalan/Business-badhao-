@@ -2,6 +2,7 @@ import "server-only";
 import type { DiscoverySearchTool } from "@/lib/ai/agents/hermes-lead-discovery-agent";
 import type { SearchHit } from "@/lib/ai/agents/discovery";
 import { createInstagramDiscoveryJob, pollInstagramDiscoveryJobResult, type InstagramDiscoveryCandidate } from "@/lib/instagram-discovery/jobs";
+import { wakeHermesSandboxRuntime } from "@/lib/instagram-discovery/sandbox-runtime";
 
 /**
  * The REAL DiscoverySearchTool backed by Hermes + local Chromium — real,
@@ -40,6 +41,16 @@ export class InstagramDiscoveryTool implements DiscoverySearchTool {
     if (!job) {
       return { ok: false, message: "Could not dispatch an Instagram discovery job — automation isn't configured in this deployment." };
     }
+
+    // Fire-and-forget: ensures a real worker.mjs is actually polling for
+    // this job (see sandbox-runtime.ts's own doc comment for why this is
+    // needed at all). Runs concurrently with the poll below rather than
+    // being awaited first — pollInstagramDiscoveryJobResult already waits
+    // up to this.timeoutMs regardless of when the worker actually picks the
+    // job up, so serializing the two would only add latency, never safety.
+    // Never rejects (wakeHermesSandboxRuntime catches its own errors); the
+    // .catch() here is defense in depth only.
+    void wakeHermesSandboxRuntime().catch(() => {});
 
     const result = await pollInstagramDiscoveryJobResult(job.jobId, this.timeoutMs);
     if (!result.ok) return result;

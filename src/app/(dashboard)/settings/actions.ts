@@ -11,6 +11,7 @@ import {
   requestInstagramDiscoveryConnection,
 } from "@/lib/instagram-discovery/connection";
 import { createInstagramDiscoveryVerificationJob, pollInstagramDiscoveryJobResult } from "@/lib/instagram-discovery/jobs";
+import { wakeHermesSandboxRuntime } from "@/lib/instagram-discovery/sandbox-runtime";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { disconnectWhatsAppAccount, saveWhatsAppAccount, updateWhatsAppTemplate } from "@/lib/whatsapp/tokens";
@@ -166,6 +167,10 @@ export async function testInstagramDiscoveryConnectionAction() {
       `/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent("Could not start a connection test. Please try again.")}`
     );
   }
+
+  // See instagram-discovery-tool.ts's identical call for why this runs
+  // concurrently with the poll below rather than being awaited first.
+  void wakeHermesSandboxRuntime().catch(() => {});
 
   const polled = await pollInstagramDiscoveryJobResult(job.jobId, TEST_CONNECTION_TIMEOUT_MS);
 

@@ -1,18 +1,33 @@
 # Hermes Browser Runtime
 
-The real, separate, persistent process that performs Instagram lead
-discovery for Business Badhao using a genuine local Chromium browser — this
-is the "Hermes runtime" the discovery architecture refers to. It is **not**
-part of the Next.js app and is **never deployed to Vercel**: Vercel's
-serverless execution model cannot host a persistent, authenticated browser
-session (functions are short-lived and stateless), so this runs instead as
-an ordinary long-lived process — a container or a systemd service — on a
-machine you provision and operate yourself. This repository does not choose
-or provision that machine for you.
+The real, separate process that performs Instagram lead discovery for
+Business Badhao using a genuine local Chromium browser — this is the "Hermes
+runtime" the discovery architecture refers to. It is **not** part of the
+Next.js app's own request handling and is **never bundled into a Vercel
+serverless function**: Vercel's serverless execution model cannot host a
+persistent, authenticated browser session inside one HTTP request.
+
+**By default, you don't provision or operate anything.** Business Badhao
+runs this exact code itself, on demand, in its own Vercel Sandbox (a real
+Linux VM Vercel provisions automatically — see
+`src/lib/instagram-discovery/sandbox-runtime.ts` on the main app side): the
+moment a real discovery job needs it, that Sandbox wakes, runs `worker.mjs`
+until the queue is drained, and stops — no server to keep running, no
+Docker/systemd to babysit, no terminal command for day-to-day use. You still
+run one real, human-supervised command **once per organization** to log
+that organization's own Instagram account in (see "Connect an organization"
+below) — Instagram's own security requires a real human for that, and this
+project won't try to automate around it — but nothing beyond that.
+
+If you'd rather run this yourself on your own always-available machine
+instead of using Business Badhao's on-demand Sandbox (e.g. for your own
+infra control), that's still fully supported — see "Advanced: running your
+own persistent worker" below.
 
 Uses **puppeteer-core** (Chrome DevTools Protocol) driving a **real,
-locally-installed** Chrome or Chromium binary. Not Playwright, not
-Browserbase, not any cloud browser service, not TinyFish — genuinely local.
+locally-installed** Chrome or Chromium binary, whether hosted by Business
+Badhao's Sandbox or by you. Not Playwright, not Browserbase, not any cloud
+browser service, not TinyFish — genuinely local.
 
 ## Architecture
 
@@ -29,10 +44,14 @@ Hermes Lead Discovery Orchestrator
       |                                           |     (instagram_discovery_jobs table)
    Exa (fallback only)                            |
       |                                           v
+      |                        sandbox-runtime.ts wakes the Sandbox on demand
+      |                                           |
       |                              Hermes Browser Runtime (this package)
-      |                              persistent worker, polls & claims jobs
+      |                              worker.mjs, claims & processes jobs
       |                              organization's own Chromium profile
       |                              real Instagram navigation/search
+      |                              (hosted in a Vercel Sandbox by default —
+      |                               or by you, if you opt out — see below)
       |                                           |
       +---------------------+---------------------+
                     Combined candidates (source: "tavily" | "exa" | "instagram")
@@ -85,15 +104,94 @@ backfilled with an Exa result.
 
 ## ONE-TIME ADMIN SETUP
 
-You do this once per deployment (plus once more per organization, for its
-own login). After this, discovery runs automatically — see "Normal user
-flow" below.
+By default there is nothing to provision — `INSTAGRAM_DISCOVERY_RUNTIME_TOKEN`
+being set on your Vercel project is what turns on Business Badhao's own
+on-demand Sandbox hosting (`sandbox-runtime.ts`); if it's already set (Settings
+→ Integrations will say "not configured" if it isn't), skip straight to
+"Connect an organization" below. The rest of this section covers connecting
+that one-time login to the Sandbox runtime, and the fully self-hosted
+alternative for operators who'd rather not use it.
 
-### 1–5. Provision the persistent worker
+### Connect an organization (once per organization)
 
-Pick **one** of these two paths.
+1. In Business Badhao → Settings → Integrations, click **"Connect Instagram
+   Discovery"** for that organization. This creates the pending connection
+   record the login step attaches to.
+2. Run, on any machine with Node 22+ and a real display (your own laptop, or
+   any Linux machine/container — see "Which machine to run login.mjs on"
+   below):
+   ```bash
+   cd hermes-browser-runtime
+   npm install
+   cp .env.example .env   # edit: BUSINESS_BADHAO_API_URL, INSTAGRAM_DISCOVERY_RUNTIME_TOKEN
+   node login.mjs --org <organizationId>
+   ```
+   (Settings shows the exact command with the real organization id filled
+   in, with a Copy button, once a connection is requested.)
+3. A real, visible Chromium window opens on `instagram.com/accounts/login`.
+   Log in manually with that organization's dedicated Instagram account —
+   this script never reads, stores, or transmits the password; it only
+   detects, by watching the page Instagram itself renders, that login
+   succeeded. If Instagram shows a CAPTCHA or 2FA challenge, complete it in
+   the same window; the script keeps waiting (up to 10 minutes).
+4. The authenticated session is saved to that organization's own local
+   profile directory and reported to Business Badhao. Settings now shows
+   **Connected** as `@<account>`.
+5. If `VERCEL_TOKEN`/`VERCEL_TEAM_ID`/`VERCEL_PROJECT_ID` are set (see
+   "Connecting to the on-demand Sandbox runtime" below), `login.mjs`
+   automatically pushes this profile into Business Badhao's Sandbox runtime
+   as its last step — nothing further to do. Otherwise it tells you so, and
+   this profile is only usable by a `worker.mjs` you run on this same
+   machine (see "Advanced" below).
 
-#### Option A — Docker (recommended)
+That's it — every subsequent "Find Leads" / "Start Discovery" in Business
+Badhao automatically wakes the Sandbox runtime and runs real Instagram
+discovery for this organization alongside Tavily/Exa. No terminal, Docker,
+or worker command for normal, day-to-day use.
+
+### Connecting to the on-demand Sandbox runtime
+
+`login.mjs` pushes the profile it just created straight into the same
+Sandbox `sandbox-runtime.ts` wakes on demand, using the Sandbox SDK
+directly — no new endpoint on the Business Badhao deployment itself. Set,
+once, in this package's own `.env` (see `.env.example`):
+
+- `VERCEL_TOKEN` — a personal access token from
+  https://vercel.com/account/tokens, scoped to the team below.
+- `VERCEL_TEAM_ID` — your Vercel team ID (Team Settings → General).
+- `VERCEL_PROJECT_ID` — your Business Badhao deployment's own Vercel project
+  ID (Project Settings → General) — the same project
+  `INSTAGRAM_DISCOVERY_RUNTIME_TOKEN` is set on.
+
+**Which machine to run `login.mjs` on:** Chromium's cookie/session
+encryption can be tied to the OS keyring of the machine that created the
+profile. To keep that consistent with the Sandbox's own plain Linux
+environment (no keyring), run `login.mjs` on a plain Linux machine or a
+throwaway container rather than a desktop OS with a real keyring — for
+example:
+
+```bash
+docker run --rm -it -v "$PWD:/app" -w /app node:22-bookworm-slim bash
+# inside the container:
+apt-get update && apt-get install -y chromium ca-certificates fonts-liberation
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium npm install && node login.mjs --org <organizationId>
+```
+
+This container never needs a GUI of its own — `login.mjs`'s `headless:false`
+browser still needs a real X display, so run this on a Linux desktop (most
+distros already have one) rather than a completely headless server; the
+container above is for keeping the *profile's own* OS/keyring environment
+consistent with the Sandbox, not for solving the display requirement.
+
+### Advanced: running your own persistent worker
+
+If you'd rather operate your own always-on runtime instead of Business
+Badhao's on-demand Sandbox (e.g. for your own infra control), set
+`INSTAGRAM_DISCOVERY_SANDBOX_DISABLED=1` on your Vercel project (this only
+stops Business Badhao from waking its own Sandbox — it never disables
+Instagram discovery itself), then pick **one** of:
+
+#### Option A — Docker
 
 ```bash
 cd hermes-browser-runtime
@@ -125,37 +223,10 @@ sudo systemctl enable --now hermes-browser-runtime
 in the unit file makes systemd restart it if it ever crashes. Logs:
 `journalctl -u hermes-browser-runtime -f`.
 
-### 6–8. Connect an organization (once per organization)
-
-1. In Business Badhao → Settings → Integrations, click **"Connect Instagram
-   Discovery"** for that organization. This creates the pending connection
-   record the login step attaches to.
-2. On **this same machine** (not inside the Docker container — see
-   "Login and Docker" below), run:
-   ```bash
-   node login.mjs --org <organizationId>
-   ```
-   (Settings now shows the exact command with the real organization id
-   filled in, with a Copy button, once a connection is requested.)
-3. A real, visible Chromium window opens on `instagram.com/accounts/login`.
-   Log in manually with that organization's dedicated Instagram account —
-   this script never reads, stores, or transmits the password; it only
-   detects, by watching the page Instagram itself renders, that login
-   succeeded. If Instagram shows a CAPTCHA or 2FA challenge, complete it in
-   the same window; the script keeps waiting (up to 10 minutes).
-4. The authenticated session is saved to that organization's own profile
-   directory under `PROFILES_DIR` and reported to Business Badhao. Settings
-   now shows **Connected** as `@<account>`.
-
-### Login and Docker
-
-`login.mjs` opens a **real, visible** browser window — something a headless
-container can't give you without a whole VNC/X11 stack this project doesn't
-add. Run `node login.mjs --org <id>` **directly on the host** (with Node
-installed there — `npm install` once, same as Option B above), even if
-`worker.mjs` itself runs inside Docker. Both share the same `./profiles`
-directory (the Docker Compose file bind-mounts it), so a profile `login.mjs`
-creates on the host is immediately visible to the containerized worker.
+With either option, run `node login.mjs --org <id>` **directly on that same
+host** (not inside the Docker container itself, unless you exec into it —
+`login.mjs` needs a real display either way), sharing the same `./profiles`
+directory the worker reads.
 
 ---
 
@@ -168,10 +239,11 @@ Connect Instagram → Login once → Connected → Start Discovery
 ```
 
 Starting a campaign's discovery in Business Badhao automatically creates
-Instagram discovery jobs for every connected, authenticated organization;
-the already-running worker claims and executes them within seconds. **No
-terminal command is required for each discovery** — the worker is already
-running, continuously, from the one-time setup above.
+Instagram discovery jobs for every connected, authenticated organization and
+(by default) wakes the Sandbox runtime to process them, within seconds — or,
+if you opted into "Advanced: running your own persistent worker", the
+already-running worker claims and executes them the same way. **No terminal
+command is required for each discovery**, either way.
 
 ### Test Connection
 
@@ -195,6 +267,13 @@ required" with the exact `login.mjs` command to run again.
 ---
 
 ## Health check
+
+This applies to "Advanced: running your own persistent worker" — the
+default Sandbox-hosted runtime doesn't expose a public port at all (nothing
+inbound is needed for it: it only makes outbound calls to Business Badhao's
+own API); use Settings → Integrations → **Test Connection** instead, which
+works identically either way (it dispatches a real job and reports the real
+result, regardless of which runtime answers it).
 
 `GET http://<runtime-host>:8787/health` (port from `HEALTH_CHECK_PORT`)
 returns JSON, safe for any monitoring tool:
@@ -227,11 +306,12 @@ healthcheck can act on it directly — the provided `Dockerfile` and
 Run one `login.mjs --org <id>` per organization once (each gets its own
 profile directory under `PROFILES_DIR`, named after its `organizationId` —
 never shared). A single `worker.mjs` process serves every organization that
-has a `connected`/`ready` status: it claims whichever job is oldest across
-all of them and opens that job's own organization's profile — profiles are
-never mixed. Raise `WORKER_CONCURRENCY` to process more than one
-organization's job at the same time (each concurrent loop owns its own
-Chromium process).
+has a `connected`/`ready` status — whether that process is the one Business
+Badhao's Sandbox runtime wakes on demand, or one you run yourself: it claims
+whichever job is oldest across all of them and opens that job's own
+organization's profile — profiles are never mixed. Raise `WORKER_CONCURRENCY`
+to process more than one organization's job at the same time (each
+concurrent loop owns its own Chromium process).
 
 ## Anti-abuse / safety bounds
 
