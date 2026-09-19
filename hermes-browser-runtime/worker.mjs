@@ -46,6 +46,18 @@ const MAX_CONSECUTIVE_FAILURES_BEFORE_WARNING = Number(process.env.WORKER_MAX_CO
  * exactly as before.
  */
 const MAX_RUNTIME_MS = Number(process.env.WORKER_MAX_RUNTIME_MS) || 0;
+/**
+ * Optional idle-exit, unset (never exit early) on a normal Docker/systemd
+ * deployment. Set alongside WORKER_MAX_RUNTIME_MS by the on-demand Sandbox
+ * runtime so a woken worker stops as soon as the queue it was woken for is
+ * actually drained — "when discovery finishes, stop the active Instagram
+ * discovery job cleanly" — rather than sitting idle, polling, for the rest
+ * of its bounded runtime window. Measured from the last time ANY loop
+ * actually claimed a job (see state.lastJobActivityAt below), not from
+ * process start, so a worker that's genuinely busy the whole time never
+ * exits early no matter how small this is set.
+ */
+const IDLE_EXIT_MS = Number(process.env.WORKER_IDLE_EXIT_MS) || 0;
 
 const SEARCH_OPTIONS = {
   maxResults: Number(process.env.INSTAGRAM_MAX_PROFILES_PER_JOB) || 15,
@@ -74,6 +86,10 @@ const state = {
   consecutiveFailures: 0,
   shuttingDown: false,
   queueStatusCache: { fetchedAt: 0, data: null },
+  /** Updated every time any loop actually claims a job — see IDLE_EXIT_MS's own doc comment. Starts at process start so a worker woken for a queue that's already empty still exits after IDLE_EXIT_MS rather than never triggering the check. */
+  lastJobActivityAt: Date.now(),
+  /** Set by setupGracefulShutdown once defined — runLoop calls this directly for an idle-exit, reusing the exact same graceful-shutdown path SIGTERM/SIGINT/MAX_RUNTIME_MS already use, never a separate/duplicate shutdown routine. */
+  requestShutdown: null,
 };
 
 async function getCachedQueueStatus() {
@@ -235,11 +251,18 @@ async function runLoop(loopId) {
       state.consecutiveFailures = 0;
 
       if (claimed.status === 200 && claimed.data?.job) {
+        state.lastJobActivityAt = Date.now();
         await processJob(loopId, claimed.data.job);
         continue; // Check immediately for another queued job rather than waiting a full interval.
       }
       if (claimed.status !== 200) {
         logger.error(`[loop ${loopId}] unexpected response claiming a job`, { status: claimed.status, data: claimed.data });
+      }
+
+      if (IDLE_EXIT_MS > 0 && state.currentJobs.size === 0 && Date.now() - state.lastJobActivityAt >= IDLE_EXIT_MS) {
+        logger.info(`[loop ${loopId}] queue has been empty for ${IDLE_EXIT_MS}ms (WORKER_IDLE_EXIT_MS) — stopping.`);
+        state.requestShutdown?.("idle timeout");
+        break;
       }
     } catch (error) {
       state.businessBadhaoApiReachable = false;
@@ -287,6 +310,10 @@ function setupGracefulShutdown(healthServer) {
   if (MAX_RUNTIME_MS > 0) {
     setTimeout(() => shutdown("WORKER_MAX_RUNTIME_MS elapsed"), MAX_RUNTIME_MS).unref();
   }
+
+  // Lets runLoop's own idle-exit check (IDLE_EXIT_MS) trigger this exact
+  // same graceful path — never a second, separate shutdown routine.
+  state.requestShutdown = shutdown;
 }
 
 async function main() {
@@ -295,6 +322,7 @@ async function main() {
     pollIntervalMs: BASE_POLL_INTERVAL_MS,
     jobTimeoutMs: JOB_TIMEOUT_MS,
     maxRuntimeMs: MAX_RUNTIME_MS || "unbounded",
+    idleExitMs: IDLE_EXIT_MS || "disabled",
   });
 
   const healthServer = startHealthServer(HEALTH_CHECK_PORT, () => {

@@ -59,6 +59,12 @@ describe("wakeHermesSandboxRuntime", () => {
     expect(lastCall).toMatchObject({ cmd: "node", args: ["worker.mjs"], detached: true });
     expect(lastCall.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN).toBe("secret-token");
     expect(JSON.stringify({ cmd: lastCall.cmd, args: lastCall.args })).not.toContain("secret-token");
+    // WORKER_IDLE_EXIT_MS is what makes the woken worker stop promptly once
+    // the queue actually empties, instead of idling for the rest of
+    // WORKER_MAX_RUNTIME_MS — both must be set so "when discovery finishes,
+    // stop the active Instagram job cleanly" actually holds.
+    expect(Number(lastCall.env.WORKER_IDLE_EXIT_MS)).toBeGreaterThan(0);
+    expect(Number(lastCall.env.WORKER_MAX_RUNTIME_MS)).toBeGreaterThan(Number(lastCall.env.WORKER_IDLE_EXIT_MS));
   });
 
   it("skips starting a second worker when one is already running", async () => {

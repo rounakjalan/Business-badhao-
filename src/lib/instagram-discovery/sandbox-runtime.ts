@@ -35,11 +35,14 @@ import { getSiteUrl } from "@/lib/site-url";
  * (its filesystem persists across stop/resume; a running process does not —
  * see Vercel's own Sandbox persistence docs), this wakes the sandbox and
  * (re)starts worker.mjs on demand, right when a real job exists for it to
- * do, and lets worker.mjs's own existing graceful-shutdown handling
- * (WORKER_MAX_RUNTIME_MS, added alongside this module — see worker.mjs) end
- * that run once the queue is drained rather than trying to keep a VM
- * running forever. This is deliberately called from the SAME places that
- * already create a job (InstagramDiscoveryTool.search,
+ * do. worker.mjs's own graceful-shutdown handling then ends that one run in
+ * either of two ways, both added alongside this module (see worker.mjs):
+ * WORKER_IDLE_EXIT_MS stops it within ~30s of the queue actually going empty
+ * (the common case — "when discovery finishes, stop the active Instagram
+ * job cleanly"), and WORKER_MAX_RUNTIME_MS is the outer safety ceiling in
+ * case jobs keep arriving. Either way it exits on its own; nothing tries to
+ * keep a VM running forever. This is deliberately called from the SAME
+ * places that already create a job (InstagramDiscoveryTool.search,
  * testInstagramDiscoveryConnectionAction) — never a new schedule/cron of its
  * own — so a Sandbox only ever spins up because a real discovery or
  * connection-test run needs one answered.
@@ -64,6 +67,8 @@ const SANDBOX_VCPUS = 2;
 const SANDBOX_SESSION_TIMEOUT_MS = 10 * 60_000;
 /** How long a woken worker.mjs drains the queue before exiting gracefully (WORKER_MAX_RUNTIME_MS) — generous relative to a single job's own bounded poll (InstagramDiscoveryTool's default 60s, jobs.ts's own JOB_TTL_MS 120s) so it has real room to claim and finish the job(s) that just triggered this wake, plus whatever else is already queued, without staying up indefinitely once idle. */
 const WORKER_RUN_WINDOW_MS = 150_000;
+/** How long the woken worker waits with an empty queue before exiting early (WORKER_IDLE_EXIT_MS) — "when discovery finishes, stop the active Instagram discovery job cleanly" — rather than idling for the rest of WORKER_RUN_WINDOW_MS. Comfortably longer than a poll interval (worker.mjs's own default 4s) so a brief lull between two queries of the same batch is never mistaken for the run being over. */
+const WORKER_IDLE_EXIT_MS = 30_000;
 const SETUP_TIMEOUT_MS = 5 * 60_000;
 
 /**
@@ -191,6 +196,7 @@ async function startWorker(sandbox: Sandbox, runtimeToken: string): Promise<void
       CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage",
       PROFILES_DIR: `${HERMES_DIR}/profiles`,
       WORKER_MAX_RUNTIME_MS: String(WORKER_RUN_WINDOW_MS),
+      WORKER_IDLE_EXIT_MS: String(WORKER_IDLE_EXIT_MS),
       WORKER_CONCURRENCY: "2",
     },
   });
