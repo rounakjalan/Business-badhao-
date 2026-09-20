@@ -106,6 +106,22 @@ export async function waitForManualLogin(page, { timeoutMs = 10 * 60 * 1000, pol
 export async function submitCredentialLogin(page, username, password, { timeoutMs = 45_000, pollIntervalMs = 1500 } = {}) {
   await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
 
+  // A real, observed failure mode during live verification: enough
+  // navigations to instagram.com from one Sandbox in a short window
+  // triggered Instagram's own real rate limiting, which Chrome renders as
+  // its own internal error page (chrome-error://...) rather than any real
+  // Instagram markup — waitForSelector below would otherwise just time out
+  // 15s later with a generic, unhelpful "unexpected error". Caught here so
+  // that specific, real, expected condition gets its own honest message
+  // instead — never retried or worked around, exactly like isChallenged.
+  if (page.url().startsWith("chrome-error://")) {
+    return {
+      ok: false,
+      reason: "navigation_failed",
+      detail: "Could not reach Instagram's login page right now (a network error or Instagram's own rate limiting) — please try again in a few minutes.",
+    };
+  }
+
   // Instagram's real login page (verified live, 2026-09) names these fields
   // "email" and "pass" — not "username"/"password", which is what most
   // examples elsewhere on the web assume and what this function originally,
