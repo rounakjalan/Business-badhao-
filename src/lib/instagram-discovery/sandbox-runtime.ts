@@ -71,7 +71,18 @@ const SANDBOX_SESSION_TIMEOUT_MS = 10 * 60_000;
 const WORKER_RUN_WINDOW_MS = 150_000;
 /** How long the woken worker waits with an empty queue before exiting early (WORKER_IDLE_EXIT_MS) — "when discovery finishes, stop the active Instagram discovery job cleanly" — rather than idling for the rest of WORKER_RUN_WINDOW_MS. Comfortably longer than a poll interval (worker.mjs's own default 4s) so a brief lull between two queries of the same batch is never mistaken for the run being over. */
 const WORKER_IDLE_EXIT_MS = 30_000;
-const SETUP_TIMEOUT_MS = 5 * 60_000;
+/**
+ * Kept well under this platform's own ~300s serverless function ceiling
+ * (see TOTAL_REQUEST_BUDGET_MS in campaigns/actions.ts for the same
+ * constraint elsewhere) since attemptSandboxCredentialLogin runs this
+ * synchronously, inside one Server Action, and must return its own honest
+ * timeout error before the platform kills the whole function outright —
+ * confirmed by a real failure: an earlier, unbounded-in-practice setup
+ * (stuck in an apt/debconf retry loop — see the script below) ran past the
+ * platform's own ceiling and surfaced only as Next.js's generic
+ * "Something went wrong" error page, not this module's own message.
+ */
+const SETUP_TIMEOUT_MS = 120_000;
 
 /**
  * Escape hatch for an operator who wants to run their own external runtime
@@ -168,10 +179,16 @@ async function runSetupIfNeeded(sandbox: Sandbox): Promise<void> {
 
   const script = [
     "set -e",
-    "sudo apt-get update -qq",
-    "sudo apt-get install -y -qq wget ca-certificates fonts-liberation",
+    // DEBIAN_FRONTEND=noninteractive is required here, not optional: a real
+    // production run without it hit exit 143 (killed at SETUP_TIMEOUT_MS) —
+    // apt-get -y alone still leaves debconf trying interactive prompts with
+    // no controlling TTY to answer them, and it just sits there cycling
+    // through fallback frontends until something kills it.
+    "export DEBIAN_FRONTEND=noninteractive",
+    "sudo -E apt-get update -qq",
+    "sudo -E apt-get install -y -qq wget ca-certificates fonts-liberation",
     "wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
-    "sudo apt-get install -y -qq /tmp/google-chrome.deb",
+    "sudo -E apt-get install -y -qq /tmp/google-chrome.deb",
     "rm -f /tmp/google-chrome.deb",
     `cd ${HERMES_DIR} && npm ci --omit=dev --loglevel=error`,
     `touch ${HERMES_DIR}/.setup-complete`,
@@ -256,8 +273,14 @@ export async function wakeHermesSandboxRuntime(): Promise<void> {
   }
 }
 
-/** How long one credential-login.mjs run may take — generous for a cold Sandbox (Chrome + npm ci, up to SETUP_TIMEOUT_MS the first time ever) on top of submitCredentialLogin's own internal wait (up to 45s). */
-const CREDENTIAL_LOGIN_TIMEOUT_MS = 6 * 60_000;
+/**
+ * How long one credential-login.mjs run itself may take (this is separate
+ * from, and runs after, runSetupIfNeeded's own SETUP_TIMEOUT_MS — see that
+ * constant's doc comment for why both stay well under the platform's own
+ * function-duration ceiling). Generous relative to submitCredentialLogin's
+ * own internal wait (up to 45s) for real page-load/navigation overhead.
+ */
+const CREDENTIAL_LOGIN_TIMEOUT_MS = 120_000;
 
 export type SandboxCredentialLoginResult = { ok: true; username: string } | { ok: false; message: string };
 
