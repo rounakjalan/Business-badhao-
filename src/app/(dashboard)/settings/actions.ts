@@ -11,7 +11,7 @@ import {
   requestInstagramDiscoveryConnection,
 } from "@/lib/instagram-discovery/connection";
 import { createInstagramDiscoveryVerificationJob, pollInstagramDiscoveryJobResult } from "@/lib/instagram-discovery/jobs";
-import { wakeHermesSandboxRuntime } from "@/lib/instagram-discovery/sandbox-runtime";
+import { attemptSandboxCredentialLogin, wakeHermesSandboxRuntime } from "@/lib/instagram-discovery/sandbox-runtime";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { disconnectWhatsAppAccount, saveWhatsAppAccount, updateWhatsAppTemplate } from "@/lib/whatsapp/tokens";
@@ -115,6 +115,58 @@ export async function requestInstagramDiscoveryConnectionAction() {
 
   revalidatePath("/settings");
   redirect("/settings?tab=Integrations&instagramDiscovery=requested");
+}
+
+/**
+ * The real action behind Settings' username/password "Connect Instagram"
+ * form — the org admin's own credentials for that organization's dedicated
+ * Instagram account, used exactly once to complete a real login via
+ * attemptSandboxCredentialLogin, then discarded. Never written to Supabase
+ * (no column for it exists on instagram_discovery_connections or anywhere
+ * else — see connection.ts), never logged, never returned to the client:
+ * this function's own local `password` binding goes out of scope the
+ * moment it returns, and nothing it calls persists it either.
+ *
+ * Only meaningful when this deployment uses the automatic Sandbox runtime
+ * (see isInstagramDiscoverySandboxHostingEnabled) — an operator who opted
+ * into running their own Docker/systemd runtime instead keeps using
+ * login.mjs's own human-supervised flow, unaffected by this action.
+ */
+export async function connectInstagramWithCredentialsAction(formData: FormData) {
+  const currentOrg = await getCurrentOrg();
+  if (!currentOrg) redirect("/login");
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const username = String(formData.get("instagramUsername") ?? "").trim();
+  const password = String(formData.get("instagramPassword") ?? "");
+
+  if (!username || !password) {
+    redirect(
+      `/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent("Enter both the Instagram username and password.")}`
+    );
+  }
+
+  // Records the pending connection the same way the old "Connect Instagram
+  // Discovery" button did — reused, not reinvented — so Settings shows
+  // "Connecting..." while the login below actually runs.
+  await requestInstagramDiscoveryConnection(currentOrg.organizationId, user.id);
+
+  const result = await attemptSandboxCredentialLogin(currentOrg.organizationId, username, password);
+  // `password` is not referenced again below and is never returned — it goes
+  // out of scope when this function returns.
+
+  revalidatePath("/settings");
+
+  if (!result.ok) {
+    redirect(`/settings?tab=Integrations&instagramDiscovery=error&instagramDiscoveryMessage=${encodeURIComponent(result.message)}`);
+  }
+
+  redirect(`/settings?tab=Integrations&instagramDiscovery=tested&instagramDiscoveryMessage=${encodeURIComponent(`Connected as @${result.username}.`)}`);
 }
 
 export async function disconnectInstagramDiscoveryConnectionAction() {

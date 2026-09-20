@@ -47,16 +47,18 @@ import { getSiteUrl } from "@/lib/site-url";
  * own — so a Sandbox only ever spins up because a real discovery or
  * connection-test run needs one answered.
  *
- * What this module still cannot do, and does not attempt: perform the
- * one-time interactive Instagram login itself. That requires a real human
- * to see Instagram's own page and complete it (password entry, 2FA,
- * whatever challenge Instagram shows) — automating that away is exactly the
- * kind of thing this project's own security requirements forbid, and Vercel
- * Sandbox has no attached display for a human to use even if it were
- * allowed. login.mjs is unchanged and still the one real one-time step,
- * still never sees or transmits the password — see its own doc comment and
- * README.md's "One-time login" section for exactly how to run it against
- * this same shared runtime.
+ * Also runs the one-time Instagram login itself, via
+ * attemptSandboxCredentialLogin below, when Settings' own username/password
+ * form submits one: this Sandbox has no attached display for a human to use
+ * login.mjs's original manual-entry flow, so credential-login.mjs (a
+ * separate script, invoked non-detached, once) submits the login
+ * programmatically instead. The password never reaches Business Badhao's
+ * own database — it flows in memory from the Settings form straight into
+ * this Sandbox command's own `env`, is read only by credential-login.mjs,
+ * and is discarded the moment that one process exits. Self-hosted operators
+ * (INSTAGRAM_DISCOVERY_SANDBOX_DISABLED) are unaffected: they still use
+ * login.mjs's original human-supervised flow, unchanged — see its own doc
+ * comment and README.md.
  */
 
 const SANDBOX_NAME = "hermes-instagram-runtime";
@@ -83,22 +85,28 @@ function sandboxHostingDisabled(): boolean {
   return process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED === "1" || process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED === "true";
 }
 
+/** Whether Settings should show the username/password Connect form (this Sandbox is what would actually run the login) rather than the login.mjs command hint for a self-hosted runtime. */
+export function isInstagramDiscoverySandboxHostingEnabled(): boolean {
+  return Boolean(process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN) && !sandboxHostingDisabled();
+}
+
 /**
  * hermes-browser-runtime's own source files, read off this deployment's own
  * filesystem (see next.config.ts's outputFileTracingIncludes for why they're
  * present in production at all) and uploaded into the Sandbox verbatim —
- * the exact same worker.mjs/lib code the manually-operated Docker/systemd
- * deployment runs, never a reimplementation. Only source files: node_modules
- * is deliberately excluded (the Sandbox runs `npm ci` itself, against its
- * own OS/architecture — see runSetup) and login.mjs is deliberately excluded
- * (it is never meant to run unattended inside this on-demand Sandbox; see
+ * the exact same worker.mjs/credential-login.mjs/lib code the manually-
+ * operated Docker/systemd deployment ships, never a reimplementation. Only
+ * source files: node_modules is deliberately excluded (the Sandbox runs
+ * `npm ci` itself, against its own OS/architecture — see runSetup) and
+ * login.mjs is deliberately excluded (it assumes a human at a real display;
+ * it is never meant to run unattended inside this on-demand Sandbox — see
  * this module's own doc comment).
  */
 async function collectRuntimeFiles(): Promise<{ path: string; content: Buffer }[]> {
   const root = path.join(process.cwd(), "hermes-browser-runtime");
   const files: { path: string; content: Buffer }[] = [];
 
-  for (const name of ["worker.mjs", "package.json", "package-lock.json"]) {
+  for (const name of ["worker.mjs", "credential-login.mjs", "package.json", "package-lock.json"]) {
     files.push({ path: name, content: await readFile(path.join(root, name)) });
   }
 
@@ -228,5 +236,71 @@ export async function wakeHermesSandboxRuntime(): Promise<void> {
     console.error("[instagram-discovery] wakeHermesSandboxRuntime failed — falling back to whatever external runtime (if any) is polling", {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/** How long one credential-login.mjs run may take — generous for a cold Sandbox (Chrome + npm ci, up to SETUP_TIMEOUT_MS the first time ever) on top of submitCredentialLogin's own internal wait (up to 45s). */
+const CREDENTIAL_LOGIN_TIMEOUT_MS = 6 * 60_000;
+
+export type SandboxCredentialLoginResult = { ok: true; username: string } | { ok: false; message: string };
+
+/**
+ * Called from Settings' username/password "Connect Instagram" form
+ * (connectInstagramWithCredentialsAction). Runs credential-login.mjs
+ * non-detached inside this same shared Sandbox and awaits its real result —
+ * unlike wakeHermesSandboxRuntime, this is NOT fire-and-forget, since the
+ * user is on the page waiting to see Connected/an error.
+ *
+ * The username and password are passed via this command's own `env` only —
+ * never written to Supabase, never interpolated into a shell/command
+ * string, never logged by this function. They live in this function's own
+ * memory for exactly as long as this call takes, then go out of scope; nothing
+ * in Business Badhao's own code path retains them afterward.
+ */
+export async function attemptSandboxCredentialLogin(organizationId: string, username: string, password: string): Promise<SandboxCredentialLoginResult> {
+  const runtimeToken = process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN;
+  if (!runtimeToken) {
+    return { ok: false, message: "No Instagram discovery browser runtime is configured for this deployment yet." };
+  }
+  if (sandboxHostingDisabled()) {
+    return {
+      ok: false,
+      message: "This deployment is configured to use your own Hermes runtime instead of the automatic one — run login.mjs there (see the command below).",
+    };
+  }
+
+  try {
+    const sandbox = await ensureSandbox();
+    await syncRuntimeFiles(sandbox);
+    await runSetupIfNeeded(sandbox);
+
+    const result = await sandbox.runCommand({
+      cmd: "node",
+      args: ["credential-login.mjs"],
+      cwd: HERMES_DIR,
+      timeoutMs: CREDENTIAL_LOGIN_TIMEOUT_MS,
+      env: {
+        BUSINESS_BADHAO_API_URL: getSiteUrl(),
+        INSTAGRAM_DISCOVERY_RUNTIME_TOKEN: runtimeToken,
+        CHROMIUM_EXECUTABLE_PATH,
+        CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage",
+        PROFILES_DIR: `${HERMES_DIR}/profiles`,
+        INSTAGRAM_LOGIN_ORG_ID: organizationId,
+        INSTAGRAM_LOGIN_USERNAME: username,
+        INSTAGRAM_LOGIN_PASSWORD: password,
+      },
+    });
+
+    const stdout = await result.stdout().catch(() => "");
+    const lastLine = stdout.trim().split("\n").filter(Boolean).pop();
+    if (!lastLine) {
+      return { ok: false, message: "The Instagram browser runtime didn't report a result. Please try again." };
+    }
+
+    const parsed = JSON.parse(lastLine) as { ok: boolean; username?: string; message?: string };
+    return parsed.ok && parsed.username ? { ok: true, username: parsed.username } : { ok: false, message: parsed.message ?? "Instagram login failed." };
+  } catch (error) {
+    console.error("[instagram-discovery] attemptSandboxCredentialLogin failed", { error: error instanceof Error ? error.message : String(error) });
+    return { ok: false, message: "Could not reach the Instagram browser runtime. Please try again." };
   }
 }

@@ -84,6 +84,75 @@ export async function waitForManualLogin(page, { timeoutMs = 10 * 60 * 1000, pol
   return { ok: false, reason: "timeout", detail: "No successful login was detected within the wait window." };
 }
 
+/**
+ * Programmatically submits a login using credentials the caller already
+ * collected (Business Badhao's own Settings -> Connect Instagram form,
+ * relayed via environment variables — see credential-login.mjs). Used only
+ * for the on-demand Sandbox runtime, which has no attached display for a
+ * human to use the way login.mjs's waitForManualLogin assumes — never used
+ * by login.mjs itself, which deliberately never sees a password at all.
+ * Typing a real password into Instagram's own login form is unavoidable
+ * here (something has to submit it), but this function never persists,
+ * logs, or returns it — see credential-login.mjs's own doc comment for the
+ * full chain of custody.
+ *
+ * HONESTY NOTE: the selectors below (username/password field names, the
+ * error-message text) target Instagram's real, long-stable login form
+ * markup, but — like every other selector in this file (see the top-of-file
+ * comment) — could not be verified against the live site from the
+ * environment that wrote this code, since no dedicated Instagram account
+ * was available there. If real credentials are rejected here despite being
+ * correct, inspect the live login page and update accordingly.
+ */
+export async function submitCredentialLogin(page, username, password, { timeoutMs = 45_000, pollIntervalMs = 1500 } = {}) {
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+
+  const usernameSelector = 'input[name="username"]';
+  const passwordSelector = 'input[name="password"]';
+  await page.waitForSelector(usernameSelector, { timeout: 15000 });
+  await page.click(usernameSelector);
+  await page.type(usernameSelector, username, { delay: 30 });
+  await page.click(passwordSelector);
+  await page.type(passwordSelector, password, { delay: 30 });
+
+  await Promise.all([page.keyboard.press("Enter"), page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {})]);
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isChallenged(page)) {
+      return {
+        ok: false,
+        reason: "challenged",
+        detail: "Instagram is showing a security challenge (CAPTCHA/verification code/2FA) that requires a human to complete — this cannot be finished from here.",
+      };
+    }
+
+    const errorText = await page.evaluate(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      if (alertEl?.textContent?.trim()) return alertEl.textContent.trim();
+      const text = document.body?.innerText || "";
+      const match = text.match(/(sorry,? your password was incorrect[^.]*\.?|the username you entered[^.]*\.?)/i);
+      return match ? match[0] : null;
+    });
+    if (errorText) {
+      return { ok: false, reason: "invalid_credentials", detail: errorText };
+    }
+
+    if (!page.url().includes("/accounts/login")) {
+      const loggedInUsername = await extractLoggedInUsername(page);
+      if (loggedInUsername) return { ok: true, username: loggedInUsername };
+    }
+
+    await sleep(pollIntervalMs);
+  }
+
+  return {
+    ok: false,
+    reason: "timeout",
+    detail: "No successful login was detected within the wait window — this can happen if Instagram asked for a kind of verification this script doesn't recognize.",
+  };
+}
+
 /** Re-checks a previously authenticated profile is still actually logged in — the real signal for reporting session_expired rather than assuming a saved profile still works forever. */
 export async function checkSessionStillValid(page) {
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });

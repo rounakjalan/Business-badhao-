@@ -4,7 +4,7 @@ const { getOrCreate } = vi.hoisted(() => ({ getOrCreate: vi.fn() }));
 
 vi.mock("@vercel/sandbox", () => ({ Sandbox: { getOrCreate } }));
 
-import { wakeHermesSandboxRuntime } from "@/lib/instagram-discovery/sandbox-runtime";
+import { attemptSandboxCredentialLogin, isInstagramDiscoverySandboxHostingEnabled, wakeHermesSandboxRuntime } from "@/lib/instagram-discovery/sandbox-runtime";
 
 function makeFakeSandbox() {
   const runCommand = vi.fn();
@@ -104,5 +104,103 @@ describe("wakeHermesSandboxRuntime", () => {
     getOrCreate.mockRejectedValue(new Error("Sandbox API unreachable"));
 
     await expect(wakeHermesSandboxRuntime()).resolves.toBeUndefined();
+  });
+});
+
+describe("isInstagramDiscoverySandboxHostingEnabled", () => {
+  const originalEnv = { ...process.env };
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it("is false with no runtime token configured", () => {
+    delete process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN;
+    expect(isInstagramDiscoverySandboxHostingEnabled()).toBe(false);
+  });
+
+  it("is false when an operator opted out via INSTAGRAM_DISCOVERY_SANDBOX_DISABLED", () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+    process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED = "1";
+    expect(isInstagramDiscoverySandboxHostingEnabled()).toBe(false);
+  });
+
+  it("is true when a runtime token is configured and the Sandbox isn't disabled", () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+    delete process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED;
+    expect(isInstagramDiscoverySandboxHostingEnabled()).toBe(true);
+  });
+});
+
+describe("attemptSandboxCredentialLogin", () => {
+  const originalEnv = { ...process.env };
+  const PASSWORD = "correct-horse-battery-staple";
+
+  afterEach(() => {
+    vi.resetAllMocks();
+    process.env = { ...originalEnv };
+  });
+
+  it("returns an honest error without touching the Sandbox SDK when no runtime is configured", async () => {
+    delete process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN;
+
+    const result = await attemptSandboxCredentialLogin("org-1", "biz_official", PASSWORD);
+
+    expect(result).toEqual({ ok: false, message: expect.stringContaining("browser runtime is configured") });
+    expect(getOrCreate).not.toHaveBeenCalled();
+  });
+
+  it("returns an honest error without touching the Sandbox SDK when an operator opted out of the automatic runtime", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+    process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED = "1";
+
+    const result = await attemptSandboxCredentialLogin("org-1", "biz_official", PASSWORD);
+
+    expect(result).toEqual({ ok: false, message: expect.stringContaining("own Hermes runtime") });
+    expect(getOrCreate).not.toHaveBeenCalled();
+  });
+
+  it("relays the username/password only via env (never inline in cmd/args) and parses a successful result", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+    delete process.env.INSTAGRAM_DISCOVERY_SANDBOX_DISABLED;
+
+    const sandbox = makeFakeSandbox();
+    getOrCreate.mockResolvedValue(sandbox);
+    sandbox.runCommand
+      .mockResolvedValueOnce({ exitCode: 0 }) // setup marker check: already complete
+      .mockResolvedValueOnce({ exitCode: 0, stdout: async () => `${JSON.stringify({ ok: true, username: "biz_official" })}\n` }); // credential-login.mjs
+
+    const result = await attemptSandboxCredentialLogin("org-1", "biz_official", PASSWORD);
+
+    expect(result).toEqual({ ok: true, username: "biz_official" });
+
+    const lastCall = sandbox.runCommand.mock.calls.at(-1)?.[0];
+    expect(lastCall).toMatchObject({ cmd: "node", args: ["credential-login.mjs"] });
+    expect(lastCall.env.INSTAGRAM_LOGIN_USERNAME).toBe("biz_official");
+    expect(lastCall.env.INSTAGRAM_LOGIN_PASSWORD).toBe(PASSWORD);
+    expect(lastCall.env.INSTAGRAM_LOGIN_ORG_ID).toBe("org-1");
+    expect(JSON.stringify({ cmd: lastCall.cmd, args: lastCall.args })).not.toContain(PASSWORD);
+  });
+
+  it("passes through the runtime's own real failure reason rather than fabricating success", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+
+    const sandbox = makeFakeSandbox();
+    getOrCreate.mockResolvedValue(sandbox);
+    sandbox.runCommand
+      .mockResolvedValueOnce({ exitCode: 0 })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: async () => JSON.stringify({ ok: false, message: "Sorry, your password was incorrect." }) });
+
+    const result = await attemptSandboxCredentialLogin("org-1", "biz_official", "wrong-password");
+
+    expect(result).toEqual({ ok: false, message: "Sorry, your password was incorrect." });
+  });
+
+  it("never throws even when the Sandbox SDK itself fails", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+    getOrCreate.mockRejectedValue(new Error("Sandbox API unreachable"));
+
+    const result = await attemptSandboxCredentialLogin("org-1", "biz_official", PASSWORD);
+
+    expect(result).toEqual({ ok: false, message: expect.any(String) });
   });
 });

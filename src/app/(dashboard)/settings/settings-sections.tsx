@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useFormStatus } from "react-dom";
 import { DarkAlert } from "@/components/dashboard-ui/alert";
 import { DashButton } from "@/components/dashboard-ui/button";
 import type { OrgRole } from "@/types/database.types";
@@ -89,9 +90,11 @@ export function SettingsSections({
   disconnectInstagramAction,
   instagramDiscoveryStatus,
   instagramDiscoveryRuntimeConfigured,
+  instagramDiscoverySandboxHostingEnabled,
   instagramDiscoveryOrganizationId,
   instagramDiscoveryNotice,
   requestInstagramDiscoveryConnectionAction,
+  connectInstagramWithCredentialsAction,
   disconnectInstagramDiscoveryConnectionAction,
   testInstagramDiscoveryConnectionAction,
 }: {
@@ -116,9 +119,11 @@ export function SettingsSections({
   disconnectInstagramAction: () => void;
   instagramDiscoveryStatus: InstagramDiscoveryStatus;
   instagramDiscoveryRuntimeConfigured: boolean;
+  instagramDiscoverySandboxHostingEnabled: boolean;
   instagramDiscoveryOrganizationId: string;
   instagramDiscoveryNotice: InstagramDiscoveryNotice;
   requestInstagramDiscoveryConnectionAction: () => void;
+  connectInstagramWithCredentialsAction: (formData: FormData) => void;
   disconnectInstagramDiscoveryConnectionAction: () => void;
   testInstagramDiscoveryConnectionAction: () => void;
 }) {
@@ -465,8 +470,10 @@ export function SettingsSections({
               <InstagramDiscoveryCard
                 status={instagramDiscoveryStatus}
                 runtimeConfigured={instagramDiscoveryRuntimeConfigured}
+                sandboxHostingEnabled={instagramDiscoverySandboxHostingEnabled}
                 organizationId={instagramDiscoveryOrganizationId}
                 requestConnectionAction={requestInstagramDiscoveryConnectionAction}
+                connectWithCredentialsAction={connectInstagramWithCredentialsAction}
                 disconnectAction={disconnectInstagramDiscoveryConnectionAction}
                 testConnectionAction={testInstagramDiscoveryConnectionAction}
               />
@@ -592,18 +599,72 @@ function LoginCommandHint({ organizationId }: { organizationId: string }) {
   );
 }
 
+/** Swaps its label to a pending state while the enclosing form's action is in flight — a credential-login round trip can take up to a couple of minutes on a cold Sandbox, so the button must not look inert while that's happening. */
+function ConnectSubmitButton({ label, pendingLabel }: { label: string; pendingLabel: string }) {
+  const { pending } = useFormStatus();
+  return (
+    <DashButton type="submit" variant="gradient" disabled={pending}>
+      {pending ? pendingLabel : label}
+    </DashButton>
+  );
+}
+
+/**
+ * The organization's own Instagram credentials, submitted once to
+ * authenticate via the Hermes/Chromium browser runtime — see
+ * connectInstagramWithCredentialsAction's own doc comment for the full
+ * chain of custody (never written to Supabase, never logged, discarded the
+ * moment that server action returns). Only rendered when this deployment's
+ * automatic Sandbox runtime can actually act on it — see
+ * isInstagramDiscoverySandboxHostingEnabled.
+ */
+function InstagramCredentialsForm({ action, buttonLabel }: { action: (formData: FormData) => void; buttonLabel: string }) {
+  return (
+    <form action={action} className="mt-3 space-y-2 border-t border-bb-border pt-3">
+      <div className="text-xs font-medium text-bb-text">Instagram Lead Discovery</div>
+      <p className="text-xs text-bb-text-3">
+        Enter this organization&apos;s dedicated Instagram account. Used once, in this one request, to sign in via the browser runtime — never stored,
+        never logged.
+      </p>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          name="instagramUsername"
+          type="text"
+          placeholder="Instagram Username"
+          autoComplete="username"
+          required
+          className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text placeholder:text-bb-text-3 sm:flex-1"
+        />
+        <input
+          name="instagramPassword"
+          type="password"
+          placeholder="Instagram Password"
+          autoComplete="current-password"
+          required
+          className="w-full rounded-lg border border-bb-border bg-bb-navy-3 px-3 py-2 text-sm text-bb-text placeholder:text-bb-text-3 sm:flex-1"
+        />
+        <ConnectSubmitButton label={buttonLabel} pendingLabel="Connecting…" />
+      </div>
+    </form>
+  );
+}
+
 function InstagramDiscoveryCard({
   status,
   runtimeConfigured,
+  sandboxHostingEnabled,
   organizationId,
   requestConnectionAction,
+  connectWithCredentialsAction,
   disconnectAction,
   testConnectionAction,
 }: {
   status: InstagramDiscoveryStatus;
   runtimeConfigured: boolean;
+  sandboxHostingEnabled: boolean;
   organizationId: string;
   requestConnectionAction: () => void;
+  connectWithCredentialsAction: (formData: FormData) => void;
   disconnectAction: () => void;
   testConnectionAction: () => void;
 }) {
@@ -613,9 +674,17 @@ function InstagramDiscoveryCard({
     status.status === "session_expired" ||
     status.status === "browser_unavailable" ||
     status.status === "error";
+  // The username/password form (this deployment's automatic Sandbox runtime
+  // can act on it directly) replaces the old copyable `login.mjs` command —
+  // that command hint is now shown only for an operator who explicitly
+  // opted out of the Sandbox runtime (their own Docker/systemd deployment),
+  // where a form here would have nothing to actually authenticate against.
+  const showCredentialsForm = runtimeConfigured && sandboxHostingEnabled && canReconnect;
   const showLoginCommand =
     runtimeConfigured &&
+    !sandboxHostingEnabled &&
     (status.status === "authentication_required" || status.status === "session_expired" || status.status === "browser_unavailable");
+  const showRequestConnectionButton = canReconnect && !showCredentialsForm;
 
   return (
     <div className="bb-stagger-item rounded-xl border border-bb-border bg-bb-navy-2 px-5 py-4">
@@ -628,7 +697,7 @@ function InstagramDiscoveryCard({
               : "Connect a dedicated Instagram account to discover new prospects — separate from Instagram Profile Lookup above, which only verifies a lead already found elsewhere."}
           </div>
           {status.lastError ? <div className="mt-1 text-xs text-bb-rose">{status.lastError}</div> : null}
-          {INSTAGRAM_DISCOVERY_STATE_HINT[status.status] ? (
+          {INSTAGRAM_DISCOVERY_STATE_HINT[status.status] && !showCredentialsForm ? (
             <div className="mt-1 text-xs text-bb-text-3">{INSTAGRAM_DISCOVERY_STATE_HINT[status.status]}</div>
           ) : null}
           {showLoginCommand ? <LoginCommandHint organizationId={organizationId} /> : null}
@@ -650,7 +719,7 @@ function InstagramDiscoveryCard({
             </DashButton>
           </form>
         ) : null}
-        {canReconnect ? (
+        {showRequestConnectionButton ? (
           <form action={requestConnectionAction}>
             <DashButton type="submit" variant="gradient">
               {status.status === "not_connected" ? "Connect Instagram Discovery" : "Reconnect"}
@@ -658,6 +727,9 @@ function InstagramDiscoveryCard({
           </form>
         ) : null}
       </div>
+      {showCredentialsForm ? (
+        <InstagramCredentialsForm action={connectWithCredentialsAction} buttonLabel={status.status === "not_connected" ? "Connect Instagram" : "Reconnect"} />
+      ) : null}
       <div className="mt-3 border-t border-bb-border pt-3 text-xs text-bb-text-3">
         Browser runtime:{" "}
         <span className={runtimeConfigured ? "text-bb-emerald" : "text-bb-text-3"}>{runtimeConfigured ? "Configured" : "Not configured"}</span>

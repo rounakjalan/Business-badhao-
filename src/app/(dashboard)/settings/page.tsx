@@ -1,4 +1,5 @@
 import {
+  connectInstagramWithCredentialsAction,
   connectWhatsAppAction,
   disconnectGmailAction,
   disconnectInstagramAction,
@@ -14,6 +15,7 @@ import { SettingsSections } from "@/app/(dashboard)/settings/settings-sections";
 import { getConnectionStatus } from "@/lib/gmail/tokens";
 import { getConnectionStatus as getInstagramConnectionStatus } from "@/lib/instagram/tokens";
 import { getInstagramDiscoveryConnectionStatus, isInstagramDiscoveryRuntimeConfigured } from "@/lib/instagram-discovery/connection";
+import { isInstagramDiscoverySandboxHostingEnabled } from "@/lib/instagram-discovery/sandbox-runtime";
 import { getCurrentOrg } from "@/lib/organizations";
 import { createClient } from "@/lib/supabase/server";
 import { getWhatsAppConnectionStatus } from "@/lib/whatsapp/tokens";
@@ -59,6 +61,7 @@ export default async function SettingsPage({
     getInstagramDiscoveryConnectionStatus(currentOrg.organizationId),
   ]);
   const instagramDiscoveryRuntimeConfigured = isInstagramDiscoveryRuntimeConfigured();
+  const instagramDiscoverySandboxHostingEnabled = isInstagramDiscoverySandboxHostingEnabled();
 
   const supabase = await createClient();
   const {
@@ -111,9 +114,11 @@ export default async function SettingsPage({
       disconnectInstagramAction={disconnectInstagramAction}
       instagramDiscoveryStatus={instagramDiscoveryStatus}
       instagramDiscoveryRuntimeConfigured={instagramDiscoveryRuntimeConfigured}
+      instagramDiscoverySandboxHostingEnabled={instagramDiscoverySandboxHostingEnabled}
       instagramDiscoveryOrganizationId={currentOrg.organizationId}
       instagramDiscoveryNotice={instagramDiscovery ? { status: instagramDiscovery, detail: instagramDiscoveryMessage } : null}
       requestInstagramDiscoveryConnectionAction={requestInstagramDiscoveryConnectionAction}
+      connectInstagramWithCredentialsAction={connectInstagramWithCredentialsAction}
       disconnectInstagramDiscoveryConnectionAction={disconnectInstagramDiscoveryConnectionAction}
       testInstagramDiscoveryConnectionAction={testInstagramDiscoveryConnectionAction}
     />

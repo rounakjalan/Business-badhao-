@@ -3,17 +3,22 @@
  * ship to any real log aggregator (journald, Docker's own log driver,
  * CloudWatch, etc.) without a parser having to guess at free-text formats.
  *
- * Redacts INSTAGRAM_DISCOVERY_RUNTIME_TOKEN from every logged string as a
- * defense-in-depth measure: normal code paths never log the token at all
- * (api-client.mjs never does), but an unexpected error message that happens
- * to embed a request's own Authorization header, or similar, must still
- * never reach a log line unredacted.
+ * Redacts INSTAGRAM_DISCOVERY_RUNTIME_TOKEN and (when this process is
+ * credential-login.mjs) INSTAGRAM_LOGIN_PASSWORD from every logged string as
+ * a defense-in-depth measure: normal code paths never log either at all
+ * (api-client.mjs never logs the token; credential-login.mjs never logs the
+ * password — see its own doc comment), but an unexpected error message that
+ * happens to embed one of them must still never reach a log line unredacted.
  */
 
 function redactValue(value) {
-  const token = process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN;
-  if (typeof value !== "string" || !token) return value;
-  return value.split(token).join("[REDACTED]");
+  if (typeof value !== "string") return value;
+  let out = value;
+  for (const name of ["INSTAGRAM_DISCOVERY_RUNTIME_TOKEN", "INSTAGRAM_LOGIN_PASSWORD"]) {
+    const secret = process.env[name];
+    if (secret) out = out.split(secret).join("[REDACTED]");
+  }
+  return out;
 }
 
 function redactDeep(value) {

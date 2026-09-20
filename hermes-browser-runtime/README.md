@@ -7,17 +7,20 @@ Next.js app's own request handling and is **never bundled into a Vercel
 serverless function**: Vercel's serverless execution model cannot host a
 persistent, authenticated browser session inside one HTTP request.
 
-**By default, you don't provision or operate anything.** Business Badhao
-runs this exact code itself, on demand, in its own Vercel Sandbox (a real
-Linux VM Vercel provisions automatically — see
+**By default, you don't provision or operate anything, and neither does the
+org admin connecting Instagram.** Business Badhao runs this exact code
+itself, on demand, in its own Vercel Sandbox (a real Linux VM Vercel
+provisions automatically — see
 `src/lib/instagram-discovery/sandbox-runtime.ts` on the main app side): the
 moment a real discovery job needs it, that Sandbox wakes, runs `worker.mjs`
 until the queue is drained, and stops — no server to keep running, no
-Docker/systemd to babysit, no terminal command for day-to-day use. You still
-run one real, human-supervised command **once per organization** to log
-that organization's own Instagram account in (see "Connect an organization"
-below) — Instagram's own security requires a real human for that, and this
-project won't try to automate around it — but nothing beyond that.
+Docker/systemd to babysit, no terminal command, ever, for normal use.
+Connecting an organization's Instagram account is a real username/password
+form in Settings (see "Connect an organization" below) — the one exception
+is a login Instagram itself challenges (CAPTCHA/2FA/"confirm it's you"),
+which genuinely requires a human looking at the real page; this project
+won't try to automate around Instagram's own security, so that one case
+falls back to a human-supervised command, same as before.
 
 If you'd rather run this yourself on your own always-available machine
 instead of using Business Badhao's on-demand Sandbox (e.g. for your own
@@ -75,11 +78,15 @@ backfilled with an Exa result.
 
 ## What this is (and isn't)
 
-- **Is**: a small Node.js service that opens a real Chromium window once so
-  a human can log into one organization's own Instagram account manually,
-  saves that authenticated session to a dedicated local profile directory,
-  and then runs continuously, claiming and executing real discovery jobs
-  Business Badhao creates.
+- **Is**: a small Node.js service that authenticates one organization's own
+  Instagram account — by default via `credential-login.mjs`, typing a
+  username/password Business Badhao's own Settings form collected directly
+  into Instagram's real login page (never stored, never logged — see
+  `credential-login.mjs`'s own doc comment); or, when Instagram challenges
+  that (CAPTCHA/2FA), via `login.mjs` opening a real Chromium window for a
+  human to complete it manually — saves that authenticated session to a
+  dedicated local profile directory either way, then runs continuously,
+  claiming and executing real discovery jobs Business Badhao creates.
 - **Isn't**: an API client for a documented Instagram search endpoint (no
   such public endpoint exists) — it drives a real browser exactly the way a
   human would, by navigating and typing into Instagram's own pages.
@@ -114,9 +121,48 @@ alternative for operators who'd rather not use it.
 
 ### Connect an organization (once per organization)
 
-1. In Business Badhao → Settings → Integrations, click **"Connect Instagram
-   Discovery"** for that organization. This creates the pending connection
-   record the login step attaches to.
+**Default (Business Badhao's own Sandbox runtime):** entirely inside the
+Business Badhao UI — no terminal, no separate machine:
+
+1. Settings → Integrations → **Instagram** → enter that organization's
+   dedicated Instagram username and password → **Connect Instagram**.
+2. Business Badhao relays those credentials, in memory, straight to a
+   one-off run of `credential-login.mjs` inside the same shared Sandbox
+   `sandbox-runtime.ts` already wakes for discovery — never written to
+   Supabase, never logged (see `connectInstagramWithCredentialsAction` and
+   `credential-login.mjs`'s own doc comments for the exact chain of
+   custody). That script types the credentials into Instagram's own real
+   login page, exactly the way a human would, and reports the real outcome
+   back.
+3. Settings shows **Connected** as `@<account>` on success — or the real
+   reason it failed (wrong password, or a challenge/2FA Instagram itself
+   requires a human to complete; see "Isn't: a way around Instagram's own
+   security" above).
+
+That's it — every subsequent "Find Leads" / "Start Discovery" automatically
+wakes the Sandbox runtime and runs real Instagram discovery for this
+organization alongside Tavily/Exa, reusing this same saved session. No
+terminal, Docker, or worker command for normal, day-to-day use — including
+the connection step itself.
+
+**If Instagram challenges the login** (CAPTCHA/2FA/"confirm it's you"),
+credential-login.mjs cannot complete it — that requires a real human looking
+at the actual page, which this on-demand Sandbox has no display for. Settings
+will show this honestly rather than pretend it succeeded; fall back to the
+human-supervised `login.mjs` flow below for that one organization (a
+challenge, once resolved this way, does not recur on every login).
+
+### Fallback: the human-supervised `login.mjs` flow
+
+Used when Instagram challenges a credential-based login above, or by an
+operator running their own self-hosted runtime (see "Advanced" below, where
+this is the *only* way to connect since there's no Sandbox to relay
+credentials to).
+
+1. In Business Badhao → Settings → Integrations, click **"Reconnect"** (or,
+   for a self-hosted runtime, **"Connect Instagram Discovery"**) for that
+   organization — this creates the pending connection record the login step
+   attaches to.
 2. Run, on any machine with Node 22+ and a real display (your own laptop, or
    any Linux machine/container — see "Which machine to run login.mjs on"
    below):
@@ -126,8 +172,6 @@ alternative for operators who'd rather not use it.
    cp .env.example .env   # edit: BUSINESS_BADHAO_API_URL, INSTAGRAM_DISCOVERY_RUNTIME_TOKEN
    node login.mjs --org <organizationId>
    ```
-   (Settings shows the exact command with the real organization id filled
-   in, with a Copy button, once a connection is requested.)
 3. A real, visible Chromium window opens on `instagram.com/accounts/login`.
    Log in manually with that organization's dedicated Instagram account —
    this script never reads, stores, or transmits the password; it only
@@ -144,17 +188,16 @@ alternative for operators who'd rather not use it.
    this profile is only usable by a `worker.mjs` you run on this same
    machine (see "Advanced" below).
 
-That's it — every subsequent "Find Leads" / "Start Discovery" in Business
-Badhao automatically wakes the Sandbox runtime and runs real Instagram
-discovery for this organization alongside Tavily/Exa. No terminal, Docker,
-or worker command for normal, day-to-day use.
-
 ### Connecting to the on-demand Sandbox runtime
 
-`login.mjs` pushes the profile it just created straight into the same
-Sandbox `sandbox-runtime.ts` wakes on demand, using the Sandbox SDK
-directly — no new endpoint on the Business Badhao deployment itself. Set,
-once, in this package's own `.env` (see `.env.example`):
+Both `login.mjs` (its optional last step) and Business Badhao's own
+`attemptSandboxCredentialLogin` (the default password-form flow above) use
+the Sandbox SDK directly to reach this same shared runtime — no separate
+endpoint on the Business Badhao deployment itself for either. The
+password-form flow authenticates automatically (this function runs inside
+Business Badhao's own deployment, which already has an ambient Vercel OIDC
+token — see "Authentication" below); `login.mjs`'s optional push needs its
+own credentials, set once in this package's own `.env` (see `.env.example`):
 
 - `VERCEL_TOKEN` — a personal access token from
   https://vercel.com/account/tokens, scoped to the team below.
