@@ -185,6 +185,12 @@ async function runSetupIfNeeded(sandbox: Sandbox): Promise<void> {
     // no controlling TTY to answer them, and it just sits there cycling
     // through fallback frontends until something kills it.
     "export DEBIAN_FRONTEND=noninteractive",
+    // Self-heals a dpkg left "interrupted" by an earlier setup attempt that
+    // was killed mid-install (a real production case: an apt-get hung on a
+    // debconf prompt — see the frontend fix below — and this
+    // module's own SETUP_TIMEOUT_MS killed it mid-transaction). A no-op
+    // when dpkg's state is already clean, so this is always safe to run.
+    "sudo dpkg --configure -a || true",
     "sudo -E apt-get update -qq",
     "sudo -E apt-get install -y -qq wget ca-certificates fonts-liberation",
     "wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
