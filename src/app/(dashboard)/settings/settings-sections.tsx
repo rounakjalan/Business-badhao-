@@ -674,12 +674,19 @@ function InstagramDiscoveryCard({
     status.status === "session_expired" ||
     status.status === "browser_unavailable" ||
     status.status === "error";
+  // Also covers "authentication_required" — the state a connection sits in
+  // right after the credentials form's own action records the request, and
+  // (a real production failure caught by live verification) the state it's
+  // STILL in if that same submission's login attempt then failed. Without
+  // this, the form disappeared the moment a submission failed, leaving the
+  // org with no way to retry short of disconnecting and starting over.
+  const needsAuthentication = canReconnect || status.status === "authentication_required";
   // The username/password form (this deployment's automatic Sandbox runtime
   // can act on it directly) replaces the old copyable `login.mjs` command —
   // that command hint is now shown only for an operator who explicitly
   // opted out of the Sandbox runtime (their own Docker/systemd deployment),
   // where a form here would have nothing to actually authenticate against.
-  const showCredentialsForm = runtimeConfigured && sandboxHostingEnabled && canReconnect;
+  const showCredentialsForm = runtimeConfigured && sandboxHostingEnabled && needsAuthentication;
   const showLoginCommand =
     runtimeConfigured &&
     !sandboxHostingEnabled &&

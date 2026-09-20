@@ -45,6 +45,7 @@ describe("wakeHermesSandboxRuntime", () => {
     const sandbox = makeFakeSandbox();
     getOrCreate.mockResolvedValue(sandbox);
     sandbox.runCommand
+      .mockResolvedValueOnce({ exitCode: 0 }) // mkdir -p .../hermes/lib
       .mockResolvedValueOnce({ exitCode: 0 }) // setup marker check: already complete
       .mockResolvedValueOnce({ exitCode: 1 }) // pgrep: not already running
       .mockResolvedValueOnce({ exitCode: 0 }); // detached start
@@ -73,12 +74,13 @@ describe("wakeHermesSandboxRuntime", () => {
     const sandbox = makeFakeSandbox();
     getOrCreate.mockResolvedValue(sandbox);
     sandbox.runCommand
+      .mockResolvedValueOnce({ exitCode: 0 }) // mkdir -p .../hermes/lib
       .mockResolvedValueOnce({ exitCode: 0 }) // setup marker check: already complete
       .mockResolvedValueOnce({ exitCode: 0 }); // pgrep: already running
 
     await wakeHermesSandboxRuntime();
 
-    expect(sandbox.runCommand).toHaveBeenCalledTimes(2);
+    expect(sandbox.runCommand).toHaveBeenCalledTimes(3);
   });
 
   it("runs Chrome + dependency setup when the marker file is missing, before checking for a running worker", async () => {
@@ -87,6 +89,7 @@ describe("wakeHermesSandboxRuntime", () => {
     const sandbox = makeFakeSandbox();
     getOrCreate.mockResolvedValue(sandbox);
     sandbox.runCommand
+      .mockResolvedValueOnce({ exitCode: 0 }) // mkdir -p .../hermes/lib
       .mockResolvedValueOnce({ exitCode: 1 }) // setup marker check: missing
       .mockResolvedValueOnce({ exitCode: 0, stderr: async () => "" }) // setup script itself
       .mockResolvedValueOnce({ exitCode: 1 }) // pgrep: not running
@@ -94,8 +97,8 @@ describe("wakeHermesSandboxRuntime", () => {
 
     await wakeHermesSandboxRuntime();
 
-    expect(sandbox.runCommand.mock.calls[1][0]).toBe("bash");
-    const setupOpts = sandbox.runCommand.mock.calls[1][2];
+    expect(sandbox.runCommand.mock.calls[2][0]).toBe("bash");
+    const setupOpts = sandbox.runCommand.mock.calls[2][2];
     expect(setupOpts).toMatchObject({ timeoutMs: expect.any(Number) });
   });
 
@@ -104,6 +107,17 @@ describe("wakeHermesSandboxRuntime", () => {
     getOrCreate.mockRejectedValue(new Error("Sandbox API unreachable"));
 
     await expect(wakeHermesSandboxRuntime()).resolves.toBeUndefined();
+  });
+
+  it("never throws even when creating the Sandbox's own working directory fails (real production failure: mkDir on a brand-new sandbox with no parent directory yet)", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+
+    const sandbox = makeFakeSandbox();
+    getOrCreate.mockResolvedValue(sandbox);
+    sandbox.runCommand.mockResolvedValueOnce({ exitCode: 1, stderr: async () => "error creating directory: No such file or directory" });
+
+    await expect(wakeHermesSandboxRuntime()).resolves.toBeUndefined();
+    expect(sandbox.writeFiles).not.toHaveBeenCalled();
   });
 });
 
@@ -166,6 +180,7 @@ describe("attemptSandboxCredentialLogin", () => {
     const sandbox = makeFakeSandbox();
     getOrCreate.mockResolvedValue(sandbox);
     sandbox.runCommand
+      .mockResolvedValueOnce({ exitCode: 0 }) // mkdir -p .../hermes/lib
       .mockResolvedValueOnce({ exitCode: 0 }) // setup marker check: already complete
       .mockResolvedValueOnce({ exitCode: 0, stdout: async () => `${JSON.stringify({ ok: true, username: "biz_official" })}\n` }); // credential-login.mjs
 
@@ -187,7 +202,8 @@ describe("attemptSandboxCredentialLogin", () => {
     const sandbox = makeFakeSandbox();
     getOrCreate.mockResolvedValue(sandbox);
     sandbox.runCommand
-      .mockResolvedValueOnce({ exitCode: 0 })
+      .mockResolvedValueOnce({ exitCode: 0 }) // mkdir -p .../hermes/lib
+      .mockResolvedValueOnce({ exitCode: 0 }) // setup marker check: already complete
       .mockResolvedValueOnce({ exitCode: 0, stdout: async () => JSON.stringify({ ok: false, message: "Sorry, your password was incorrect." }) });
 
     const result = await attemptSandboxCredentialLogin("org-1", "biz_official", "wrong-password");
@@ -202,5 +218,18 @@ describe("attemptSandboxCredentialLogin", () => {
     const result = await attemptSandboxCredentialLogin("org-1", "biz_official", PASSWORD);
 
     expect(result).toEqual({ ok: false, message: expect.any(String) });
+  });
+
+  it("reports an honest error, never a fabricated login, when creating the Sandbox's own working directory fails", async () => {
+    process.env.INSTAGRAM_DISCOVERY_RUNTIME_TOKEN = "secret-token";
+
+    const sandbox = makeFakeSandbox();
+    getOrCreate.mockResolvedValue(sandbox);
+    sandbox.runCommand.mockResolvedValueOnce({ exitCode: 1, stderr: async () => "error creating directory: No such file or directory" });
+
+    const result = await attemptSandboxCredentialLogin("org-1", "biz_official", PASSWORD);
+
+    expect(result.ok).toBe(false);
+    expect(sandbox.writeFiles).not.toHaveBeenCalled();
   });
 });

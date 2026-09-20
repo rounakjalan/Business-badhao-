@@ -127,10 +127,27 @@ async function ensureSandbox(): Promise<Sandbox> {
   });
 }
 
-/** Re-uploads the current deployment's runtime source on every wake (cheap — a handful of small text files) so a Sandbox that has been sitting idle for days still runs whatever worker.mjs this deployment currently ships, never a stale copy from whenever the Sandbox happened to be created. */
+/**
+ * Re-uploads the current deployment's runtime source on every wake (cheap —
+ * a handful of small text files) so a Sandbox that has been sitting idle
+ * for days still runs whatever worker.mjs this deployment currently ships,
+ * never a stale copy from whenever the Sandbox happened to be created.
+ *
+ * Uses `mkdir -p` via runCommand rather than sandbox.mkDir: on a genuinely
+ * brand-new sandbox (nothing under /vercel/sandbox/hermes yet at all),
+ * mkDir(".../hermes/lib") does not create the missing parent
+ * (.../hermes) itself and fails with "No such file or directory" — a real
+ * failure found via live production verification (the very first
+ * credential-login attempt against a freshly created sandbox), not a
+ * hypothetical.
+ */
 async function syncRuntimeFiles(sandbox: Sandbox): Promise<void> {
   const files = await collectRuntimeFiles();
-  await sandbox.mkDir(`${HERMES_DIR}/lib`);
+  const mkdir = await sandbox.runCommand("mkdir", ["-p", `${HERMES_DIR}/lib`], { timeoutMs: 15_000 });
+  if (mkdir.exitCode !== 0) {
+    const stderr = await mkdir.stderr().catch(() => "");
+    throw new Error(`Could not create ${HERMES_DIR}/lib in the Sandbox (exit ${mkdir.exitCode}): ${stderr.slice(-500)}`);
+  }
   await sandbox.writeFiles(files.map((f) => ({ path: `${HERMES_DIR}/${f.path}`, content: f.content })));
 }
 
