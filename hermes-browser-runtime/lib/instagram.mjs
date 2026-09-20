@@ -96,19 +96,23 @@ export async function waitForManualLogin(page, { timeoutMs = 10 * 60 * 1000, pol
  * logs, or returns it — see credential-login.mjs's own doc comment for the
  * full chain of custody.
  *
- * HONESTY NOTE: the selectors below (username/password field names, the
- * error-message text) target Instagram's real, long-stable login form
- * markup, but — like every other selector in this file (see the top-of-file
- * comment) — could not be verified against the live site from the
- * environment that wrote this code, since no dedicated Instagram account
- * was available there. If real credentials are rejected here despite being
- * correct, inspect the live login page and update accordingly.
+ * Field names verified against the real, live instagram.com/accounts/login/
+ * page (name="email"/name="pass", not the commonly-assumed
+ * name="username"/name="password") — see the doc comment on the constants
+ * below for how. Like every other selector in this file (see the top-of-file
+ * comment), these can still drift if Instagram changes its markup later;
+ * this is ordinary maintenance, not a sign of a broken approach.
  */
 export async function submitCredentialLogin(page, username, password, { timeoutMs = 45_000, pollIntervalMs = 1500 } = {}) {
   await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
 
-  const usernameSelector = 'input[name="username"]';
-  const passwordSelector = 'input[name="password"]';
+  // Instagram's real login page (verified live, 2026-09) names these fields
+  // "email" and "pass" — not "username"/"password", which is what most
+  // examples elsewhere on the web assume and what this function originally,
+  // wrongly, used. Confirmed by dumping the actual rendered <input> elements
+  // from a real headless session against the live page.
+  const usernameSelector = 'input[name="email"]';
+  const passwordSelector = 'input[name="pass"]';
   await page.waitForSelector(usernameSelector, { timeout: 15000 });
   await page.click(usernameSelector);
   await page.type(usernameSelector, username, { delay: 30 });
@@ -131,7 +135,15 @@ export async function submitCredentialLogin(page, username, password, { timeoutM
       const alertEl = document.querySelector('[role="alert"]');
       if (alertEl?.textContent?.trim()) return alertEl.textContent.trim();
       const text = document.body?.innerText || "";
-      const match = text.match(/(sorry,? your password was incorrect[^.]*\.?|the username you entered[^.]*\.?)/i);
+      // "The login information you entered is incorrect..." is the real,
+      // current wording confirmed by actually submitting wrong credentials
+      // to the live login page (Instagram now deliberately gives one merged
+      // message rather than distinguishing a bad username from a bad
+      // password). The other two phrases are kept for older/localized
+      // wording this wasn't tested against.
+      const match = text.match(
+        /(the login information you entered is incorrect[^.]*\.?|sorry,? your password was incorrect[^.]*\.?|the username you entered[^.]*\.?)/i
+      );
       return match ? match[0] : null;
     });
     if (errorText) {
