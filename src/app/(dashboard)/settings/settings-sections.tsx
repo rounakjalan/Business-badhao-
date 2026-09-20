@@ -680,7 +680,15 @@ function InstagramDiscoveryCard({
   // STILL in if that same submission's login attempt then failed. Without
   // this, the form disappeared the moment a submission failed, leaving the
   // org with no way to retry short of disconnecting and starting over.
-  const needsAuthentication = canReconnect || status.status === "authentication_required";
+  //
+  // "connecting" is included too, as a safety net: it's meant to be a brief,
+  // transient state credential-login.mjs reports right as it starts, then
+  // moves on from — but a real production case showed a connection can get
+  // stuck there if that script hits an error its own error handling doesn't
+  // yet convert into a real terminal status (fixed at the source since, but
+  // this keeps a retry path available even against a failure mode nobody's
+  // hit yet, rather than leaving the org stuck with only "Disconnect").
+  const needsAuthentication = canReconnect || status.status === "authentication_required" || status.status === "connecting";
   // The username/password form (this deployment's automatic Sandbox runtime
   // can act on it directly) replaces the old copyable `login.mjs` command —
   // that command hint is now shown only for an operator who explicitly

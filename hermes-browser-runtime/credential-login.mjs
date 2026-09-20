@@ -44,7 +44,21 @@ async function main() {
   await reportSession({ organizationId, status: "connecting" }).catch(() => {});
 
   try {
-    const result = await submitCredentialLogin(page, username, password);
+    // submitCredentialLogin's own internal calls (waitForSelector,
+    // navigation) can throw rather than resolve to {ok:false,...} — a real
+    // production case (a selector that no longer matched the live page)
+    // did exactly this, and because it wasn't caught here, execution never
+    // reached the reportSession call below at all: the connection stayed
+    // at "connecting" forever, with no real failure ever recorded and no
+    // way for the org to retry short of disconnecting first. Converting
+    // any such throw into the same {ok:false,...} shape guarantees a real
+    // terminal status is always reported, whatever actually went wrong.
+    let result;
+    try {
+      result = await submitCredentialLogin(page, username, password);
+    } catch {
+      result = { ok: false, reason: "error", detail: "The runtime hit an unexpected error interacting with Instagram's login page." };
+    }
 
     if (!result.ok) {
       await reportSession({
